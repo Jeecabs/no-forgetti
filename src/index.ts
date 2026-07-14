@@ -126,11 +126,10 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   function refreshStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI || !store || !frozenBranch) return;
     const t = ctx.ui.theme;
-    const marker = snapshotDirty ? "*" : "";
     const color = snapshotDirty ? "warning" : "muted";
     ctx.ui.setStatus(
       STATUS_KEY,
-      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `memory:${activeName}${marker} ${frozenBranch.entries.length}`)}`,
+      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `mem:${activeName} ${frozenBranch.entries.length}`)}`,
     );
   }
 
