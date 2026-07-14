@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { formatMemoryContext, memoryCharCount } from "./context.ts";
 import { scoreMemorySignal } from "./heuristics.ts";
 import { resolveProjectRoot } from "./project.ts";
+import { isNonPrimaryAgent } from "./runtime.ts";
 import { safeContextText } from "./security.ts";
 import { requestReviewPlan } from "./review.ts";
 import {
@@ -64,6 +65,10 @@ function toolDetails(action: MemoryAction, result: MutationResult, store: Projec
 }
 
 export default function projectMemoryExtension(pi: ExtensionAPI): void {
+  // Gang/pi-subagents children share the project cwd with the superintendent.
+  // They must neither receive project memory nor learn/write into it.
+  if (isNonPrimaryAgent()) return;
+
   let store: ProjectMemoryStore | undefined;
   let activeName = MAIN_MEMORY;
   let frozenBranch: MemoryBranch | undefined;

@@ -22,6 +22,7 @@ This is filesystem memory, not model training. It stores compact project facts a
 - Durable state intentionally lives outside the repository, so memory creates no project-file churn. Session custom entries store only the selected memory branch.
 - The complete bounded snapshot is injected as stable context. Dynamic per-turn search/retrieval is intentionally avoided because it would mutate prompt context and weaken cache stability.
 - A cross-process lock serializes every read-modify-write operation; Pi’s process-local mutation queue is therefore not the concurrency boundary.
+- Gang/pi-subagents child agents are memory-isolated. When `PI_SUBAGENT_CHILD_AGENT` or `PI_SUBAGENT_RUN_ID` is present, No Forgetti does not register its tool, load memory, inject context, count turns, or run review. Only the primary/superintendent session learns and writes project memory.
 
 ## Install
 
