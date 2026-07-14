@@ -39,6 +39,20 @@ test("stores project skills outside the repository and exposes them only on requ
   await assert.rejects(stat(join(project, "SKILL.md")));
 });
 
+test("retrieves relevant skills by trigger terms", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  for (const [name, description] of [
+    ["verification", "Run the canonical project verification."],
+    ["release", "Prepare and publish a production release."],
+  ] as const) {
+    const proposal = await store.stageProposal([{ action: "create", name, description, content: skillBody }]);
+    await store.approveProposal(proposal.id);
+  }
+  assert.deepEqual((await store.findRelevantSkills("run canonical verification" )).map((skill) => skill.name), ["verification"]);
+  assert.deepEqual(await store.findRelevantSkills("explain the weather"), []);
+});
+
 test("patches with a unique match, keeps a revision, and rejects ambiguous patches", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));

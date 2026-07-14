@@ -27,6 +27,14 @@ const REVIEW_LEASE_MS = 5 * 60_000;
 const REVIEW_RETRY_BASE_MS = 5 * 60_000;
 const REVIEW_RETRY_MAX_MS = 60 * 60_000;
 const SKILL_FILE = "SKILL.md";
+const RETRIEVAL_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "do", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "project", "the", "to", "use", "what", "when", "with",
+]);
+
+function retrievalTerms(value: string): string[] {
+  return (value.toLowerCase().match(/[a-z0-9]+/gu) ?? [])
+    .filter((term) => term.length > 2 && !RETRIEVAL_STOP_WORDS.has(term));
+}
 
 interface SkillStoreOptions {
   storageRoot?: string;
@@ -198,6 +206,22 @@ export class ProjectSkillStore {
     const skills = await this.listSkills();
     if (skills.length === 0) return "(no project skills have been formed yet)";
     return skills.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n");
+  }
+
+  async findRelevantSkills(query: string, limit = 2): Promise<ProjectSkill[]> {
+    const terms = retrievalTerms(query);
+    if (terms.length === 0) return [];
+    const scored = (await this.listSkills()).map((skill) => {
+      const nameTerms = new Set(retrievalTerms(skill.name.replaceAll("-", " ")));
+      const descriptionTerms = new Set(retrievalTerms(skill.description));
+      const score = terms.reduce((total, term) => total + (nameTerms.has(term) ? 3 : descriptionTerms.has(term) ? 1 : 0), 0);
+      return { skill, score };
+    });
+    return scored
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+      .slice(0, limit)
+      .map(({ skill }) => skill);
   }
 
   async viewSkill(name: string): Promise<ProjectSkill> {
