@@ -97,45 +97,48 @@ export async function requestSkillReviewPlan(
     boundedTranscript || "(no usable conversation text)",
   ].join("\n");
 
-  const message: Message = {
-    role: "user",
-    content: [{ type: "text", text: prompt }],
-    timestamp: Date.now(),
-  };
-  const response = await complete(
-    ctx.model,
-    {
-      systemPrompt: "You are a conservative procedural-skill curator. Output valid JSON only.",
-      messages: [message],
-    },
-    {
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      env: auth.env,
-      reasoningEffort: "low",
-      signal,
-    },
-  );
-  if (response.stopReason === "aborted") throw new Error("Project skill review was aborted.");
-  const raw = response.content
-    .filter((part): part is { type: "text"; text: string } => part.type === "text")
-    .map((part) => part.text)
-    .join("\n");
-  const plan = parseSkillReviewPlan(raw);
-  // Model output is untrusted. A malformed proposal must not poison the review loop:
-  // treat it as no learning rather than surfacing a warning and retrying forever.
-  for (const operation of plan.operations) {
+  let correction = "";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const message: Message = {
+      role: "user",
+      content: [{ type: "text", text: `${prompt}${correction}` }],
+      timestamp: Date.now(),
+    };
+    const response = await complete(
+      ctx.model,
+      {
+        systemPrompt: "You are a conservative procedural-skill curator. Output valid JSON only.",
+        messages: [message],
+      },
+      {
+        apiKey: auth.apiKey,
+        headers: auth.headers,
+        env: auth.env,
+        reasoningEffort: "low",
+        signal,
+      },
+    );
+    if (response.stopReason === "aborted") throw new Error("Project skill review was aborted.");
+    const raw = response.content
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
     try {
-      if (operation.action === "create") {
-        validateSkillDescription(operation.description || "");
-        validateSkillContent(operation.content || "");
-      } else if (operation.action === "patch") {
-        validateSkillContent(operation.newText || "");
+      const plan = parseSkillReviewPlan(raw);
+      for (const operation of plan.operations) {
+        if (operation.action === "create") {
+          validateSkillDescription(operation.description || "");
+          validateSkillContent(operation.content || "");
+        } else if (operation.action === "patch") {
+          validateSkillContent(operation.newText || "");
+        }
       }
-    } catch {
-      return { operations: [] };
+      return plan;
+    } catch (error) {
+      if (attempt === 1) return { operations: [] };
+      correction = `\n\nYour previous output was invalid: ${error instanceof Error ? error.message : "schema validation failed"}. Retry once. Return only valid JSON; descriptions must be one sentence ending in a period and <=60 characters.`;
     }
   }
-  return plan;
+  return { operations: [] };
 }
 
