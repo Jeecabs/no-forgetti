@@ -25,22 +25,65 @@ This is filesystem memory, not model training. It stores compact project facts a
 
 ## Install
 
-Local development:
+No Forgetti is currently hosted in a private GitHub repository. Your GitHub account needs access before Git can install it.
+
+### HTTPS install (recommended)
+
+Wire GitHub CLI authentication into Git once:
 
 ```bash
-cd /Users/lachlanjacobs/Documents/pi-tooling/no-forgetti
-pnpm install
-pi -e ./src/index.ts
+gh auth login
+gh auth setup-git
 ```
 
-Or add the extension path to `~/.pi/agent/settings.json`:
+Then install globally for all Pi projects:
 
-```json
-{
-  "extensions": [
-    "/Users/lachlanjacobs/Documents/pi-tooling/no-forgetti"
-  ]
-}
+```bash
+pi install https://github.com/Jeecabs/no-forgetti
+pi list
+```
+
+Restart Pi after the first install, or run `/reload` in an existing interactive session.
+
+### Project-local install
+
+Write the package to the current project's `.pi/settings.json` instead of global settings:
+
+```bash
+pi install -l https://github.com/Jeecabs/no-forgetti
+```
+
+### Try without installing
+
+Load a temporary HTTPS checkout for one Pi process without changing settings:
+
+```bash
+pi -e https://github.com/Jeecabs/no-forgetti
+```
+
+### Git shorthand
+
+Pi also accepts its GitHub shorthand:
+
+```bash
+pi install git:github.com/Jeecabs/no-forgetti
+```
+
+### Local development
+
+```bash
+git clone https://github.com/Jeecabs/no-forgetti.git
+cd no-forgetti
+pnpm install
+pnpm check
+pnpm test
+pi -e .
+```
+
+A local `pi install .` references the checkout in place, so do not move or delete it:
+
+```bash
+pi install .
 ```
 
 ## Model tool
