@@ -4,6 +4,7 @@ import { MAIN_MEMORY } from "./types.ts";
 
 export const ACTIVE_MEMORY_ENTRY = "no-forgetti-active";
 export const REVIEW_CURSOR_ENTRY = "no-forgetti-review";
+export const SKILL_REVIEW_CURSOR_ENTRY = "no-forgetti-skill-review";
 
 interface ActiveMemoryState {
   name?: unknown;
@@ -41,6 +42,19 @@ export function restoreReviewCursor(ctx: ExtensionContext, projectKey: string, n
 }
 
 /** Whether a resumed session contains user turns after the last review cursor. */
+export function restoreSkillReviewCursor(ctx: ExtensionContext, projectKey: string): string | undefined {
+  let cursor: string | undefined;
+  for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type !== "custom" || entry.customType !== SKILL_REVIEW_CURSOR_ENTRY) continue;
+    const data: unknown = entry.data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+    const state = data as ReviewCursorState;
+    if (state.projectKey !== projectKey || typeof state.throughEntryId !== "string") continue;
+    cursor = state.throughEntryId;
+  }
+  return cursor;
+}
+
 export function hasUnreviewedUserEntries(ctx: ExtensionContext, cursorId?: string): boolean {
   const entries = ctx.sessionManager.getBranch();
   const cursorIndex = cursorId ? entries.findIndex((entry) => entry.id === cursorId) : -1;

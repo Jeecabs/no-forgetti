@@ -9,16 +9,17 @@ Project-scoped persistent memory for Pi. No Forgetti ports the useful part of He
 - Pi `/fork` and `/clone` keep using the same memory branch. They **do not** clone memory automatically.
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
 - Writes persist immediately, but injected context stays frozen until the next session, explicit `/memory refresh`, or successful Pi compaction. Compaction is already a prompt-cache boundary, so it safely adopts the latest memory.
-- Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Explicit memory signals and durable corrections can trigger it early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes' existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` runs it on demand.
+- Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Explicit memory signals and durable corrections can trigger it early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes' existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` and `/project-skills review` run them on demand.
+- Successful complex workflows can form an external project-skill proposal. Proposals are staged for approval; approved skills remain in No Forgetti storage and are fetched through one `project_skill` tool. They are never registered as Pi slash commands and never written into the repository.
 
-This is filesystem memory, not model training. It stores compact project facts and injects a bounded snapshot into the system prompt.
+This is filesystem memory, not model training. It stores compact project facts and externally stored procedural skills.
 
 ## Design boundary
 
 - **Learning** happens only after a successfully completed turn: propose compact additions, replacements, or removals from recent conversation evidence.
 - **Maintenance** happens inside that same atomic mutation when necessary: overlapping or stale facts are consolidated to stay within the fixed budget.
-- No scheduled curator is needed for a 2,200-character state. There is no skill pruning, archival lifecycle, graph database, or background maintenance agent.
-- No Forgetti does not mutate Pi skills. A future read-only journey view could visualize memory branches, but it is deliberately outside the persistence core.
+- No scheduled curator is needed for a 2,200-character state. Project skills have approval, revisions, and external storage, but no automatic pruning/consolidation curator yet.
+- Project skills are deliberately not Pi resources: generated names do not enter the slash-command namespace. The `project_skill` tool fetches one relevant skill on demand.
 - Durable state intentionally lives outside the repository, so memory creates no project-file churn. Session custom entries store only the selected memory branch.
 - The complete bounded snapshot is injected as stable context. Dynamic per-turn search/retrieval is intentionally avoided because it would mutate prompt context and weaken cache stability.
 - A cross-process lock serializes every read-modify-write operation; Pi’s process-local mutation queue is therefore not the concurrency boundary.
@@ -109,6 +110,13 @@ pi install .
 /memory refresh
 /memory review
 /memory undo
+
+/project-skills list
+/project-skills view <name>
+/project-skills pending
+/project-skills approve <proposal-id>
+/project-skills reject <proposal-id>
+/project-skills review
 ```
 
 ### Fork semantics
@@ -133,12 +141,23 @@ $PI_CODING_AGENT_DIR/no-forgetti/<sha256(project-root)>/
 │   └── experiment.json
 ├── revisions/
 │   └── main.json
+├── skills/
+│   ├── <skill-name>/SKILL.md
+│   └── .archive/
+├── skill-pending/
+├── skill-revisions/
 └── branches/
     ├── main.json
     └── experiment.json
 ```
 
-`PI_CODING_AGENT_DIR` defaults to `~/.pi/agent` and supports `~/...` values.
+`PI_CODING_AGENT_DIR` defaults to `~/.pi/agent` and supports `~/...` values. Project skills use standard `SKILL.md` packages in the same external project directory, but Pi is never given their path through `resources_discover`; generated skills stay out of slash commands and the normal skill namespace.
+
+## Project skills
+
+Project skills are procedural memory formed from durable, repeatable workflows. The reviewer follows `writing-great-skills`: concise trigger descriptions, checkable completion criteria, progressive disclosure, one source of truth, and aggressive pruning of duplication/no-op prose.
+
+The background reviewer stages at most one create/patch/archive proposal per review. Inspect proposals with `/project-skills pending`; approve or reject explicitly. Approval creates a revision snapshot. Fetch approved skills with the `project_skill` tool; they remain external to the repository.
 
 Projects and directories are treated as trusted by default, so memory initializes immediately. Corrupt, unsupported, or oversized JSON is never silently overwritten; No Forgetti disables itself for that project and surfaces the storage error instead of injecting questionable memory. Git worktrees intentionally get separate memory because their canonical working-tree roots differ. This keeps experimental worktree conventions isolated unless you explicitly copy them.
 

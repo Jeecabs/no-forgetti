@@ -110,6 +110,10 @@ function defaultStorageRoot(): string {
   return getAgentDir();
 }
 
+export function projectStorageDir(projectRoot: string, storageRoot = defaultStorageRoot()): string {
+  return join(storageRoot, "no-forgetti", projectKey(projectRoot));
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -131,7 +135,7 @@ export class ProjectMemoryStore {
   constructor(projectRoot: string, options: StoreOptions = {}) {
     this.projectRoot = projectRoot;
     this.projectKey = projectKey(projectRoot);
-    this.projectDir = join(options.storageRoot ?? defaultStorageRoot(), "no-forgetti", this.projectKey);
+    this.projectDir = projectStorageDir(projectRoot, options.storageRoot);
     this.branchesDir = join(this.projectDir, "branches");
     this.reviewsDir = join(this.projectDir, "reviews");
     this.revisionsDir = join(this.projectDir, "revisions");
