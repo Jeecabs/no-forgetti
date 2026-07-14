@@ -12,6 +12,7 @@ import { requestReviewPlan } from "./review.ts";
 import {
   ACTIVE_MEMORY_ENTRY,
   REVIEW_CURSOR_ENTRY,
+  hasUnreviewedUserEntries,
   restoreActiveMemory,
   restoreReviewCursor,
 } from "./session-state.ts";
@@ -77,6 +78,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   let reviewController: AbortController | undefined;
   let pendingUserInputs: string[] = [];
   let reviewCursorId: string | undefined;
+  let reviewExistingSession = false;
   let knownUserEntryIds = new Set<string>();
   let lastAgentRunSuccessful = false;
 
@@ -136,6 +138,9 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       if (ctx.hasUI) ctx.ui.notify(`Memory branch '${missingName}' does not exist in this project; using 'main'.`, "warning");
     }
     reviewCursorId = restoreReviewCursor(ctx, nextStore.projectKey, activeName);
+    // Hermes reviews a resumed conversation once its existing transcript is
+    // available, rather than making the user send ten more turns first.
+    reviewExistingSession = hasUnreviewedUserEntries(ctx, reviewCursorId);
     knownUserEntryIds = new Set(
       ctx.sessionManager.getBranch()
         .filter((entry) => entry.type === "message" && entry.message.role === "user")
@@ -153,6 +158,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     const boundaryEntryId = ctx.sessionManager.getLeafId();
     activeName = branch.name;
     frozenBranch = branch;
+    reviewExistingSession = false;
     snapshotDirty = false;
     pi.appendEntry(ACTIVE_MEMORY_ENTRY, { name: activeName });
     if (boundaryEntryId) appendReviewCursor(activeName, boundaryEntryId, "branch-boundary");
@@ -203,7 +209,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
           refreshStatus(ctx);
         }
       } catch (error) {
-        if (force && ctx.hasUI) {
+        if (ctx.hasUI) {
           ctx.ui.notify(`Project memory review failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
         }
       } finally {
@@ -438,7 +444,11 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event) => {
     const finalAssistant = [...event.messages].reverse().find((message) => message.role === "assistant");
-    lastAgentRunSuccessful = finalAssistant?.role === "assistant" && finalAssistant.stopReason === "stop";
+    // A completed tool loop may end with `length` or `toolUse`; only provider
+    // errors/aborts mean there is no usable conversation to review.
+    lastAgentRunSuccessful = finalAssistant?.role === "assistant"
+      && finalAssistant.stopReason !== "error"
+      && finalAssistant.stopReason !== "aborted";
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
@@ -456,7 +466,12 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     for (const text of completedInputs) {
       await store.recordUserTurn(completedBranchName, scoreMemorySignal(text));
     }
-    void runReview(ctx, false);
+    const reviewExisting = reviewExistingSession;
+    reviewExistingSession = false;
+    // Force one pass for a resumed session with unreviewed history. This is
+    // the Hermes behavior: existing conversation context is eligible on the
+    // first completed turn, while fresh sessions retain cadence + signals.
+    void runReview(ctx, reviewExisting);
   });
 
   pi.on("session_shutdown", async () => {

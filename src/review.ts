@@ -97,12 +97,14 @@ export function buildReviewPrompt(branch: MemoryBranch, transcript: string): str
     ? branch.entries.map((entry) => `- ${safeContextText(entry.text)}`).join("\n")
     : "(empty)";
   return [
-    "Review this completed Pi conversation for durable project memory.",
+    "Review the entire completed Pi conversation above for durable project memory, including resumed history.",
+    "Actively look for user corrections, preferences, recurring workflow expectations, and non-obvious project facts; do not require the user to say 'remember'.",
     "Return ONLY JSON with this shape:",
     '{"operations":[{"action":"add|replace|remove","content":"...","oldText":"..."}]}',
     "",
-    "Save only high-confidence facts that reduce future rediscovery or user correction:",
+    "Save high-confidence learnings that would prevent future rediscovery or user correction:",
     "- project conventions, architecture, verification commands, durable workflows, recurring preferences",
+    "- corrections to the assistant's approach, style, or workflow that are likely to recur",
     "- non-obvious fixes or tool quirks that are still likely true next week",
     "",
     "Do not save task progress, completed-work logs, temporary paths, issue/PR numbers, commit hashes, raw output, secrets, or facts already obvious from checked-in context files.",
