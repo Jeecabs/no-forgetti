@@ -12,7 +12,7 @@ const SECRET_PATTERNS: RegExp[] = [
 const HIJACK_PATTERNS: RegExp[] = [
   /\b(?:ignore|disregard|forget)\s+(?:all|any|the|earlier|previous|prior).*instructions?/iu,
   /\b(?:reveal|print|leak|exfiltrate)\b.{0,80}\b(?:system prompt|api key|secret|credential)/iu,
-  /<\/?(?:system|developer|project-skill)\b[^>]*>/iu,
+  /<\/?(?:system|developer|project-memory|project-skill)\b[^>]*>/iu,
 ];
 
 export function validateSkillName(name: string): string {
@@ -28,6 +28,9 @@ export function validateSkillDescription(description: string): string {
   const normalized = description.trim().replace(/\r\n/g, "\n");
   if (!normalized) throw new Error("Skill description cannot be empty.");
   if (normalized.includes("\n")) throw new Error("Skill description must be one sentence.");
+  if (INVISIBLE_UNICODE.test(normalized)) throw new Error("Skill description contains invisible Unicode control characters.");
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(normalized))) throw new Error("Skill description looks like a credential or secret.");
+  if (HIJACK_PATTERNS.some((pattern) => pattern.test(normalized))) throw new Error("Skill description looks like prompt manipulation or unsafe context.");
   if (!normalized.endsWith(".")) throw new Error("Skill description must end with a period.");
   if (normalized.length > MAX_SKILL_DESCRIPTION_CHARS) {
     throw new Error(`Skill description exceeds ${MAX_SKILL_DESCRIPTION_CHARS} characters.`);

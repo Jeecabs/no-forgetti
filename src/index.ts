@@ -55,6 +55,14 @@ function isUserMessage(message: AgentMessage): message is Extract<AgentMessage, 
   return message.role === "user" && "content" in message;
 }
 
+function boundRetrievedSkill(content: string): string {
+  const limit = 6_000;
+  if (content.length <= limit) return content;
+  const marker = "\n\n[TRUNCATED: use project_skill for the full playbook]";
+  const boundary = content.lastIndexOf("\n", limit - marker.length);
+  return `${content.slice(0, boundary > 0 ? boundary : limit - marker.length).trimEnd()}${marker}`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -619,7 +627,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         const relevant = await skillStore.findRelevantSkills(event.prompt);
         let usedChars = 0;
         const skillBlocks = relevant.flatMap((skill) => {
-          const content = skill.content.slice(0, 6_000);
+          const content = boundRetrievedSkill(skill.content);
           if (usedChars + content.length > 12_000) return [];
           usedChars += content.length;
           void skillStore!.recordUse(skill.name).catch(() => undefined);
@@ -681,6 +689,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    retrievedSkillContext = undefined;
     if (!store) return;
     const unseenUserEntries = ctx.sessionManager.getBranch().filter((entry) =>
       entry.type === "message" && entry.message.role === "user" && !knownUserEntryIds.has(entry.id)
@@ -717,6 +726,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    retrievedSkillContext = undefined;
     pendingUserInputs = [];
     reviewController?.abort();
     skillReviewController?.abort();
