@@ -1,0 +1,236 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "excalidraw-cli",
+  "elements": [
+    {
+      "type": "rectangle",
+      "id": "a",
+      "x": 40,
+      "y": 180,
+      "width": 180,
+      "height": 80,
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "strokeColor": "#2563eb",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "Pi session\nconversation",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "b",
+      "x": 300,
+      "y": 180,
+      "width": 200,
+      "height": 80,
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "strokeColor": "#d97706",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "Review trigger\ncadence / signal / manual",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "c",
+      "x": 590,
+      "y": 180,
+      "width": 200,
+      "height": 80,
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "strokeColor": "#7c3aed",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "AI curator\nJSON plan",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "d",
+      "x": 870,
+      "y": 90,
+      "width": 220,
+      "height": 80,
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "strokeColor": "#16a34a",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "Validate\ndescription <=60 chars",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "e",
+      "x": 870,
+      "y": 270,
+      "width": 220,
+      "height": 80,
+      "backgroundColor": "#fee2e2",
+      "fillStyle": "solid",
+      "strokeColor": "#dc2626",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "Invalid output\nretry with correction",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "f",
+      "x": 1170,
+      "y": 90,
+      "width": 220,
+      "height": 80,
+      "backgroundColor": "#fce7f3",
+      "fillStyle": "solid",
+      "strokeColor": "#db2777",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "Pending proposal\nexternal store",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "g",
+      "x": 1170,
+      "y": 270,
+      "width": 220,
+      "height": 80,
+      "backgroundColor": "#e0f2fe",
+      "fillStyle": "solid",
+      "strokeColor": "#0284c7",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "User approval\n/project-skills approve",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "rectangle",
+      "id": "h",
+      "x": 1470,
+      "y": 180,
+      "width": 220,
+      "height": 80,
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "strokeColor": "#16a34a",
+      "strokeWidth": 2,
+      "roughness": 0,
+      "text": "Active skill\ninjected on demand",
+      "roundness": {
+        "type": 3
+      }
+    },
+    {
+      "type": "arrow",
+      "id": "ab",
+      "x": 220,
+      "y": 220,
+      "width": 80,
+      "height": 0,
+      "strokeColor": "#374151",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "bc",
+      "x": 500,
+      "y": 220,
+      "width": 90,
+      "height": 0,
+      "strokeColor": "#374151",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "cd",
+      "x": 790,
+      "y": 210,
+      "width": 80,
+      "height": -70,
+      "strokeColor": "#374151",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "ce",
+      "x": 790,
+      "y": 240,
+      "width": 80,
+      "height": 70,
+      "strokeColor": "#dc2626",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "ed",
+      "x": 980,
+      "y": 270,
+      "width": 0,
+      "height": -100,
+      "strokeColor": "#dc2626",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "df",
+      "x": 1090,
+      "y": 130,
+      "width": 80,
+      "height": 0,
+      "strokeColor": "#374151",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "fg",
+      "x": 1280,
+      "y": 170,
+      "width": 0,
+      "height": 100,
+      "strokeColor": "#374151",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    },
+    {
+      "type": "arrow",
+      "id": "gh",
+      "x": 1390,
+      "y": 310,
+      "width": 80,
+      "height": -70,
+      "strokeColor": "#374151",
+      "endArrowhead": "arrow",
+      "roughness": 0
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "gridSize": null
+  },
+  "files": {}
+}

@@ -21,7 +21,7 @@ This is filesystem memory, not model training. It stores compact project facts a
 - No scheduled curator is needed for a 2,200-character state. Project skills have approval, revisions, and external storage, but no automatic pruning/consolidation curator yet.
 - Project skills are deliberately not Pi resources: generated names do not enter the slash-command namespace. The `project_skill` tool fetches one relevant skill on demand.
 - Durable state intentionally lives outside the repository, so memory creates no project-file churn. Session custom entries store only the selected memory branch.
-- The complete bounded snapshot is injected as stable context. Dynamic per-turn search/retrieval is intentionally avoided because it would mutate prompt context and weaken cache stability.
+- The complete bounded memory snapshot is injected as stable context. Project skills use bounded per-turn lexical retrieval from the user prompt, with at most two matched playbooks and 12,000 injected skill characters.
 - A cross-process lock serializes every read-modify-write operation; Pi’s process-local mutation queue is therefore not the concurrency boundary.
 - Gang/pi-subagents child agents are memory-isolated. When `PI_SUBAGENT_CHILD_AGENT` or `PI_SUBAGENT_RUN_ID` is present, No Forgetti does not register its tool, load memory, inject context, count turns, or run review. Only the primary/superintendent session learns and writes project memory.
 
@@ -157,7 +157,7 @@ $PI_CODING_AGENT_DIR/no-forgetti/<sha256(project-root)>/
 
 Project skills are procedural memory formed from durable, repeatable workflows. The reviewer follows `writing-great-skills`: concise trigger descriptions, checkable completion criteria, progressive disclosure, one source of truth, and aggressive pruning of duplication/no-op prose.
 
-The background reviewer stages at most one create/patch/archive proposal per review. Inspect proposals with `/project-skills pending`; approve or reject explicitly. Approval creates a revision snapshot. Fetch approved skills with the `project_skill` tool; they remain external to the repository.
+The background reviewer stages at most one create/patch/archive proposal per review. Inspect proposals with `/project-skills pending`; approve or reject explicitly. Approval creates a revision snapshot. Relevant approved skills are retrieved automatically from the current prompt; use the `project_skill` tool for explicit list/view access. They remain external to the repository.
 
 Projects and directories are treated as trusted by default, so memory initializes immediately. Corrupt, unsupported, or oversized JSON is never silently overwritten; No Forgetti disables itself for that project and surfaces the storage error instead of injecting questionable memory. Git worktrees intentionally get separate memory because their canonical working-tree roots differ. This keeps experimental worktree conventions isolated unless you explicitly copy them.
 
@@ -182,7 +182,7 @@ Bad:
 
 ## Cache behavior
 
-`before_agent_start` appends the same frozen memory block each turn. `project_memory` writes update disk and live tool responses but do not mutate that snapshot. This preserves a stable prompt prefix. `/memory refresh`, `/memory use`, and `/memory fork` are explicit cache-invalidating choices.
+`before_agent_start` appends the same frozen memory block each turn, then performs bounded lexical retrieval for relevant project skills from the current prompt. `project_memory` writes update disk and live tool responses but do not mutate that snapshot. `/memory refresh`, `/memory use`, and `/memory fork` are explicit memory cache-invalidating choices.
 
 ## Development
 
