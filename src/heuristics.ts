@@ -22,6 +22,17 @@ const TRANSIENT_SIGNALS: RegExp[] = [
 ];
 
 /** Score a completed user turn for durable-memory review value. */
+export function scoreSkillSignal(text: string): number {
+  const normalized = text.trim();
+  if (normalized.length < 20) return 0;
+  let score = 0;
+  if (/\b(?:correction|instead|the canonical|the correct|project convention)\b/iu.test(normalized)) score += 4;
+  if (/\b(?:workflow|procedure|step|verification|debug|configure|migration|deploy|release)\b/iu.test(normalized)) score += 2;
+  if (/\b(?:remember|from now on|going forward|always|never|must)\b/iu.test(normalized)) score += 2;
+  if (/\b(?:for now|temporary|one[- ]off|just this once|today)\b/iu.test(normalized)) score -= 3;
+  return Math.max(0, Math.min(5, score));
+}
+
 export function scoreMemorySignal(text: string): number {
   const normalized = text.trim();
   if (normalized.length < 20) return 0;
