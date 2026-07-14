@@ -149,6 +149,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   }
 
   async function loadSessionMemory(ctx: ExtensionContext): Promise<void> {
+    retrievedSkillContext = undefined;
     const projectRoot = resolveProjectRoot(ctx.cwd);
     const nextStore = new ProjectMemoryStore(projectRoot);
     try {
@@ -665,7 +666,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     const userText = typeof lastUser.content === "string"
       ? lastUser.content
       : lastUser.content.filter((part): part is TextContent => part.type === "text").map((part) => part.text).join("\n");
-    if (!userText.includes(retrieval.prompt) || userText.includes("<project-skill name=")) return;
+    if (userText !== retrieval.prompt || userText.includes("<project-skill name=")) return;
     const messages = [...event.messages] as AgentMessage[];
     const content = typeof lastUser.content === "string"
       ? `${lastUser.content}\n\n${retrieval.block}`
