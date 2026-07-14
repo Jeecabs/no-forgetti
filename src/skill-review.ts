@@ -2,7 +2,7 @@ import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { buildReviewTranscript } from "./review.ts";
-import { validateSkillContent } from "./skill-security.ts";
+import { validateSkillContent, validateSkillDescription } from "./skill-security.ts";
 import { ProjectSkillStore } from "./skill-store.ts";
 import {
   MAX_SKILL_CONTENT_CHARS,
@@ -122,10 +122,19 @@ export async function requestSkillReviewPlan(
     .map((part) => part.text)
     .join("\n");
   const plan = parseSkillReviewPlan(raw);
-  // Validate content before it reaches the pending queue. Store validation runs again on approval.
+  // Model output is untrusted. A malformed proposal must not poison the review loop:
+  // treat it as no learning rather than surfacing a warning and retrying forever.
   for (const operation of plan.operations) {
-    if (operation.content) validateSkillContent(operation.content);
-    if (operation.newText) validateSkillContent(operation.newText);
+    try {
+      if (operation.action === "create") {
+        validateSkillDescription(operation.description || "");
+        validateSkillContent(operation.content || "");
+      } else if (operation.action === "patch") {
+        validateSkillContent(operation.newText || "");
+      }
+    } catch {
+      return { operations: [] };
+    }
   }
   return plan;
 }
