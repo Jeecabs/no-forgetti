@@ -6,6 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   ACTIVE_MEMORY_ENTRY,
   REVIEW_CURSOR_ENTRY,
+  hasUnreviewedUserEntries,
   restoreActiveMemory,
   restoreReviewCursor,
 } from "../src/session-state.ts";
@@ -28,4 +29,18 @@ test("restores branch binding and project-scoped review cursor from active path"
   assert.equal(restoreReviewCursor(ctx, "project-a", "main"), "user-1");
   assert.equal(restoreReviewCursor(ctx, "project-a", "experiment"), "user-2");
   assert.equal(restoreReviewCursor(ctx, "project-a", "missing"), undefined);
+});
+
+test("detects unreviewed user entries after the cursor", () => {
+  const ctx = contextWithBranch([
+    { id: "user-1", type: "message", message: { role: "user" } },
+    { id: "cursor", type: "custom", customType: REVIEW_CURSOR_ENTRY, data: {} },
+    { id: "user-2", type: "message", message: { role: "user" } },
+  ]);
+
+  assert.equal(hasUnreviewedUserEntries(ctx, "cursor"), true);
+  assert.equal(hasUnreviewedUserEntries(ctx, "missing"), true);
+  assert.equal(hasUnreviewedUserEntries(contextWithBranch([
+    { id: "user-1", type: "message", message: { role: "user" } },
+  ]), "user-1"), false);
 });

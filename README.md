@@ -9,7 +9,7 @@ Project-scoped persistent memory for Pi. No Forgetti ports the useful part of He
 - Pi `/fork` and `/clone` keep using the same memory branch. They **do not** clone memory automatically.
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
 - Writes persist immediately, but injected context stays frozen until the next session, explicit `/memory refresh`, or successful Pi compaction. Compaction is already a prompt-cache boundary, so it safely adopts the latest memory.
-- Review runs only after Pi is fully settled at the end of a completed turn. Explicit memory signals and durable corrections can trigger it early; otherwise 10 completed prompts provide a periodic fallback. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` runs it on demand.
+- Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Explicit memory signals and durable corrections can trigger it early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes' existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` runs it on demand.
 
 This is filesystem memory, not model training. It stores compact project facts and injects a bounded snapshot into the system prompt.
 

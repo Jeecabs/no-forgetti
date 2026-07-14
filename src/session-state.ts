@@ -39,3 +39,12 @@ export function restoreReviewCursor(ctx: ExtensionContext, projectKey: string, n
   }
   return cursor;
 }
+
+/** Whether a resumed session contains user turns after the last review cursor. */
+export function hasUnreviewedUserEntries(ctx: ExtensionContext, cursorId?: string): boolean {
+  const entries = ctx.sessionManager.getBranch();
+  const cursorIndex = cursorId ? entries.findIndex((entry) => entry.id === cursorId) : -1;
+  return entries.slice(cursorIndex + 1).some((entry) =>
+    entry.type === "message" && entry.message.role === "user",
+  );
+}
