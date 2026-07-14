@@ -30,10 +30,24 @@ const SKILL_FILE = "SKILL.md";
 const RETRIEVAL_STOP_WORDS = new Set([
   "a", "an", "and", "are", "do", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "project", "the", "to", "use", "what", "when", "with",
 ]);
+const MAX_RETRIEVAL_QUERY_CHARS = 256;
+const MAX_RETRIEVAL_TERMS = 32;
+const MAX_SKILL_OUTPUT_CHARS = 12_000;
+const MAX_SKILL_INDEX_CHARS = 6_000;
 
 function retrievalTerms(value: string): string[] {
-  return (value.toLowerCase().match(/[a-z0-9]+/gu) ?? [])
-    .filter((term) => term.length > 2 && !RETRIEVAL_STOP_WORDS.has(term));
+  return [...new Set(value.normalize("NFKC").slice(0, MAX_RETRIEVAL_QUERY_CHARS).toLowerCase().match(/[a-z0-9]+/gu) ?? [])]
+    .filter((term) => term.length > 2 && !RETRIEVAL_STOP_WORDS.has(term))
+    .slice(0, MAX_RETRIEVAL_TERMS);
+}
+
+function boundSkillContent(content: string, maxChars = MAX_SKILL_OUTPUT_CHARS): string {
+  const limit = Number.isFinite(maxChars) ? Math.min(MAX_SKILL_OUTPUT_CHARS, Math.max(1_000, Math.floor(maxChars))) : MAX_SKILL_OUTPUT_CHARS;
+  if (content.length <= limit) return content;
+  const marker = "\n\n[TRUNCATED: use the project_skill tool for the full playbook]";
+  const bodyLimit = Math.max(1, limit - marker.length);
+  const boundary = content.lastIndexOf("\n", bodyLimit);
+  return `${content.slice(0, boundary > 0 ? boundary : bodyLimit).trimEnd()}${marker}`;
 }
 
 interface SkillStoreOptions {
@@ -205,7 +219,18 @@ export class ProjectSkillStore {
   async skillIndex(): Promise<string> {
     const skills = await this.listSkills();
     if (skills.length === 0) return "(no project skills have been formed yet)";
-    return skills.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n");
+    const lines: string[] = [];
+    let usedChars = 0;
+    for (const skill of skills) {
+      const line = `- ${skill.name}: ${skill.description}`;
+      if (usedChars + line.length + 1 > MAX_SKILL_INDEX_CHARS) {
+        lines.push(`[TRUNCATED: ${skills.length - lines.length} more skills]`);
+        break;
+      }
+      lines.push(line);
+      usedChars += line.length + 1;
+    }
+    return lines.join("\n");
   }
 
   async findRelevantSkills(query: string, limit = 2): Promise<ProjectSkill[]> {
@@ -217,17 +242,18 @@ export class ProjectSkillStore {
       const score = terms.reduce((total, term) => total + (nameTerms.has(term) ? 3 : descriptionTerms.has(term) ? 1 : 0), 0);
       return { skill, score };
     });
+    const safeLimit = Number.isFinite(limit) ? Math.min(5, Math.max(1, Math.floor(limit))) : 2;
     return scored
       .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
-      .slice(0, limit)
+      .slice(0, safeLimit)
       .map(({ skill }) => skill);
   }
 
   async viewSkill(name: string): Promise<ProjectSkill> {
     const skill = await this.loadSkill(name);
     await this.touchUsage(skill.name, "view");
-    return skill;
+    return { ...skill, content: boundSkillContent(skill.content) };
   }
 
   async recordUse(name: string): Promise<void> {
