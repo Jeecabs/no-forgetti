@@ -130,7 +130,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     const color = snapshotDirty ? "warning" : "muted";
     ctx.ui.setStatus(
       STATUS_KEY,
-      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `memory:${activeName}${marker} · ${frozenBranch.entries.length}`)}`,
+      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `memory:${activeName}${marker} ${frozenBranch.entries.length}`)}`,
     );
   }
 
