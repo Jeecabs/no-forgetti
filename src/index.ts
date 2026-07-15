@@ -428,7 +428,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       return {
         content: [{
           type: "text",
-          text: `Project skill '${skill.name}' (external; not a slash command):\\n\\n${skill.content}`,
+          text: `Project skill '${skill.name}' (external; not a slash command):\n\n${skill.content}`,
         }],
         details: { ...details, name: skill.name },
       };
@@ -436,10 +436,44 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("project-skills", {
-    description: "Manage externally stored project skills. Usage: /project-skills list|view|pending|approve|reject|review",
+    description: "Manage externally stored project skills. Usage: /project-skills list|view|edit|pending|approve|reject|review",
+    getArgumentCompletions: async (prefix) => {
+      const commands = [
+        { value: "list", label: "list", description: "List project skills" },
+        { value: "view ", label: "view <name>", description: "Read a project skill" },
+        { value: "edit ", label: "edit <name>", description: "Edit a project skill" },
+        { value: "pending", label: "pending", description: "List pending proposals" },
+        { value: "approve ", label: "approve <id>", description: "Approve a proposal" },
+        { value: "reject ", label: "reject <id>", description: "Reject a proposal" },
+        { value: "review", label: "review", description: "Run skill review now" },
+      ];
+      const normalized = prefix.toLowerCase();
+      if (normalized.startsWith("view ") || normalized.startsWith("edit ")) {
+        if (!skillStore) return null;
+        const skills = await skillStore.listSkills();
+        const action = normalized.startsWith("view ") ? "view" : "edit";
+        const items = skills.map((skill) => ({ value: `${action} ${skill.name}`, label: skill.name, description: skill.description }));
+        const filtered = items.filter((item) => item.value.startsWith(normalized));
+        return filtered.length ? filtered : null;
+      }
+      if (normalized.startsWith("approve ") || normalized.startsWith("reject ")) {
+        if (!skillStore) return null;
+        const pending = await skillStore.listPending();
+        const action = normalized.startsWith("approve ") ? "approve" : "reject";
+        const items = pending.map((proposal) => ({
+          value: `${action} ${proposal.id}`,
+          label: proposal.id,
+          description: `${proposal.operations[0]?.action ?? "empty"} ${proposal.operations[0]?.name ?? ""}`,
+        }));
+        const filtered = items.filter((item) => item.value.startsWith(normalized));
+        return filtered.length ? filtered : null;
+      }
+      const filtered = commands.filter((item) => item.value.startsWith(normalized));
+      return filtered.length ? filtered : null;
+    },
     handler: async (args, ctx) => {
       const projectSkills = requireSkillStore();
-      const [subcommand = "list", value] = args.trim().split(/\\s+/u).filter(Boolean);
+      const [subcommand = "list", value] = args.trim().split(/\s+/u).filter(Boolean);
       if (subcommand === "list") {
         ctx.ui.notify(await projectSkills.skillIndex(), "info");
         return;
@@ -447,7 +481,27 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       if (subcommand === "view") {
         if (!value) return ctx.ui.notify("Usage: /project-skills view <name>", "warning");
         const skill = await projectSkills.viewSkill(value);
-        ctx.ui.notify(skill.content, "info");
+        ctx.ui.notify(`${skill.name}: ${skill.description}\n\n${skill.content}`, "info");
+        return;
+      }
+      if (subcommand === "edit") {
+        if (!value) return ctx.ui.notify("Usage: /project-skills edit <name>", "warning");
+        if (!ctx.hasUI) return ctx.ui.notify("Skill editing requires an interactive UI.", "warning");
+        await ctx.waitForIdle();
+        await skillReviewPromise?.catch(() => undefined);
+        const skill = await projectSkills.loadSkill(value);
+        const edited = await ctx.ui.editor(`Edit project skill: ${skill.name}`, skill.content);
+        if (edited === undefined) return;
+        if (edited === skill.content) return ctx.ui.notify(`No changes to '${skill.name}'.`, "info");
+        const proposal = await projectSkills.stageProposal([{
+          action: "patch",
+          name: skill.name,
+          oldText: skill.content,
+          newText: edited,
+          reason: "Foreground project-skill edit.",
+        }], ctx.sessionManager.getSessionId());
+        const result = await projectSkills.approveProposal(proposal.id, "foreground");
+        ctx.ui.notify(result.message, result.changed ? "info" : "warning");
         return;
       }
       if (subcommand === "pending") {
@@ -455,7 +509,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(
           pending.length === 0
             ? "No pending project skill proposals."
-            : pending.map((proposal) => `${proposal.id}: ${proposal.operations[0]?.action ?? "empty"} ${proposal.operations[0]?.name ?? ""}`).join("\\n"),
+            : pending.map((proposal) => `${proposal.id}: ${proposal.operations[0]?.action ?? "empty"} ${proposal.operations[0]?.name ?? ""}`).join("\n"),
           "info",
         );
         return;
@@ -464,7 +518,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         if (!value) return ctx.ui.notify("Usage: /project-skills approve <proposal-id>", "warning");
         await ctx.waitForIdle();
         const result = await projectSkills.approveProposal(value);
-        ctx.ui.notify(`${result.message} Run /reload to refresh project skill availability.`, result.changed ? "info" : "warning");
+        ctx.ui.notify(result.message, result.changed ? "info" : "warning");
         return;
       }
       if (subcommand === "reject") {
@@ -479,7 +533,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         await runSkillReview(ctx, true);
         return;
       }
-      ctx.ui.notify("Usage: /project-skills list|view <name>|pending|approve <id>|reject <id>|review", "warning");
+      ctx.ui.notify("Usage: /project-skills list|view <name>|edit <name>|pending|approve <id>|reject <id>|review", "warning");
     },
   });
 

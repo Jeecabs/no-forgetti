@@ -141,4 +141,5 @@ test("rejects unsafe skill content and invalid descriptions", async (t) => {
     }]),
     /prompt manipulation/u,
   );
+  await assert.rejects(store.rejectProposal("../skill-review"), /Invalid skill proposal id/u);
 });

@@ -10,7 +10,7 @@ Project-scoped persistent memory for Pi. No Forgetti ports the useful part of He
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
 - Writes persist immediately, but injected context stays frozen until the next session, explicit `/memory refresh`, or successful Pi compaction. Compaction is already a prompt-cache boundary, so it safely adopts the latest memory.
 - Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Explicit memory signals and durable corrections can trigger it early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes' existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` and `/project-skills review` run them on demand.
-- Successful complex workflows can form an external project-skill proposal. Proposals are staged for approval; approved skills remain in No Forgetti storage and are fetched through one `project_skill` tool. They are never registered as Pi slash commands and never written into the repository.
+- Successful complex workflows can form an external project skill. New skills auto-approve for this trusted single-user tool; patches and archives remain reviewable proposals. Skills stay in No Forgetti storage and are fetched through one `project_skill` tool. They are never registered as Pi slash commands and never written into the repository.
 
 This is filesystem memory, not model training. It stores compact project facts and externally stored procedural skills.
 
@@ -113,6 +113,7 @@ pi install .
 
 /project-skills list
 /project-skills view <name>
+/project-skills edit <name>
 /project-skills pending
 /project-skills approve <proposal-id>
 /project-skills reject <proposal-id>
@@ -157,7 +158,7 @@ $PI_CODING_AGENT_DIR/no-forgetti/<sha256(project-root)>/
 
 Project skills are procedural memory formed from durable, repeatable workflows. The reviewer follows `writing-great-skills`: concise trigger descriptions, checkable completion criteria, progressive disclosure, one source of truth, and aggressive pruning of duplication/no-op prose.
 
-The background reviewer stages at most one create/patch/archive proposal per review. Inspect proposals with `/project-skills pending`; approve or reject explicitly. Approval creates a revision snapshot. Relevant approved skills are retrieved automatically from the current prompt; use the `project_skill` tool for explicit list/view access. They remain external to the repository.
+The background reviewer stages at most one create/patch/archive proposal per review. New creates auto-approve; inspect patch/archive proposals with `/project-skills pending`, then approve or reject explicitly. `/project-skills view <name>` reads a skill and `/project-skills edit <name>` opens the built-in multiline editor and saves a revision. Relevant skills are retrieved automatically from the current prompt; use the `project_skill` tool for explicit list/view access. They remain external to the repository.
 
 Projects and directories are treated as trusted by default, so memory initializes immediately. Corrupt, unsupported, or oversized JSON is never silently overwritten; No Forgetti disables itself for that project and surfaces the storage error instead of injecting questionable memory. Git worktrees intentionally get separate memory because their canonical working-tree roots differ. This keeps experimental worktree conventions isolated unless you explicitly copy them.
 
