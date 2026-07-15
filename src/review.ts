@@ -140,12 +140,21 @@ export function buildReviewPrompt(
   ].join("\n");
 }
 
+export interface MemoryReviewRequest {
+  branch: MemoryBranch;
+  signal?: AbortSignal;
+  afterEntryId?: string;
+  maxChars?: number;
+}
+
 export async function requestReviewPlan(
   ctx: ExtensionContext,
-  branch: MemoryBranch,
-  signal?: AbortSignal,
-  afterEntryId?: string,
-  maxChars = DEFAULT_MAX_CHARS,
+  {
+    branch,
+    signal,
+    afterEntryId,
+    maxChars = DEFAULT_MAX_CHARS,
+  }: MemoryReviewRequest,
 ): Promise<ReviewPlan> {
   if (!ctx.model) throw new Error("No active model is available for memory review.");
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
