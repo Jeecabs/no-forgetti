@@ -112,7 +112,7 @@ pi install .
 /memory undo
 
 /project-skills list
-/project-skills view <name>
+/project-skills read <name>
 /project-skills edit <name>
 /project-skills pending
 /project-skills approve <proposal-id>

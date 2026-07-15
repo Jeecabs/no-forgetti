@@ -175,7 +175,10 @@ export async function showSkillViewer(
   canGoBack: boolean,
 ): Promise<SkillViewerAction> {
   if (ctx.mode !== "tui") {
-    if (ctx.hasUI) ctx.ui.notify(`${skill.name}: ${skill.description}\n\n${skill.content}`, "info");
+    const output = `${skill.name}: ${skill.description}\n\n${skill.content}`;
+    if (ctx.hasUI) ctx.ui.notify(output, "info");
+    else if (ctx.mode === "print") process.stdout.write(`${output}\n`);
+    else throw new Error("Project skill reading requires TUI/RPC mode; use the project_skill tool in JSON mode.");
     return "close";
   }
   return ctx.ui.custom<SkillViewerAction>((tui, theme, keybindings, done) => (

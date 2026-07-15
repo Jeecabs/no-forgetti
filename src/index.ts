@@ -74,6 +74,22 @@ function formatBranch(branch: MemoryBranch): string {
   return branch.entries.map((entry, index) => `${index + 1}. ${safeContextText(entry.text)}`).join("\n");
 }
 
+function showCommandOutput(
+  ctx: ExtensionCommandContext,
+  text: string,
+  type: "info" | "warning" | "error" = "info",
+): void {
+  if (ctx.hasUI) {
+    ctx.ui.notify(text, type);
+    return;
+  }
+  if (ctx.mode === "print") {
+    process.stdout.write(`${text}\n`);
+    return;
+  }
+  throw new Error("Project skill command output requires TUI/RPC mode; use the project_skill tool in JSON mode.");
+}
+
 function formatSkillProposal(proposal: SkillProposal): string {
   const operation = proposal.operations[0];
   if (!operation) return `proposal: ${proposal.id}\n(empty)`;
@@ -118,6 +134,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   let skillReviewController: AbortController | undefined;
   let skillReviewCursorId: string | undefined;
   let skillReviewExistingSession = false;
+  let pendingSkillCount = 0;
+  let skillReviewRunning = false;
   let knownUserEntryIds = new Set<string>();
   let lastAgentRunSuccessful = false;
   let retrievedSkillContext: { prompt: string; block: string } | undefined;
@@ -157,9 +175,11 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     if (!ctx.hasUI || !store || !frozenBranch) return;
     const t = ctx.ui.theme;
     const color = snapshotDirty ? "warning" : "muted";
+    const pending = pendingSkillCount > 0 ? ` pending:${pendingSkillCount}` : "";
+    const reviewing = skillReviewRunning ? " reviewing" : "";
     ctx.ui.setStatus(
       STATUS_KEY,
-      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `mem:${activeName} ${frozenBranch.entries.length}`)}`,
+      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `mem:${activeName} ${frozenBranch.entries.length}${pending}${reviewing}`)}`,
     );
   }
 
@@ -180,8 +200,10 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     try {
       await nextSkillStore.initialize();
       skillStore = nextSkillStore;
+      pendingSkillCount = (await nextSkillStore.listPending()).length;
     } catch (error) {
       skillStore = undefined;
+      pendingSkillCount = 0;
       if (ctx.hasUI) ctx.ui.notify(`Project skills disabled: ${errorMessage(error)}`, "warning");
     }
     activeName = restoreActiveMemory(ctx);
@@ -244,6 +266,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     const claimed = await projectSkills.claimReviewIfDue(undefined, undefined, force);
     if (!claimed) return;
 
+    skillReviewRunning = true;
+    refreshStatus(ctx);
     skillReviewController = new AbortController();
     const reviewTimeout = setTimeout(() => skillReviewController?.abort(), REVIEW_TIMEOUT_MS);
     skillReviewPromise = (async () => {
@@ -255,12 +279,17 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
           const submission = await projectSkills.submitProposal(plan.operations, ctx.sessionManager.getSessionId(), "background_review");
           if (submission.result) {
             if (ctx.hasUI) ctx.ui.notify(`Project skill review auto-approved '${operation.name}': ${submission.result.message}`, "info");
-          } else if (ctx.hasUI) {
-            ctx.ui.notify(
-              `Project skill review staged ${operation.action} '${operation.name}'. Inspect with /project-skills pending ${submission.proposal.id}`,
-              "info",
-            );
+          } else {
+            pendingSkillCount += 1;
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `Project skill review staged ${operation.action} '${operation.name}'. Inspect with /project-skills pending ${submission.proposal.id}`,
+                "info",
+              );
+            }
           }
+        } else if (force && ctx.hasUI) {
+          ctx.ui.notify("Project skill review: no reusable workflow change found.", "info");
         }
         if (throughEntryId) appendSkillReviewCursor(throughEntryId);
         success = true;
@@ -269,6 +298,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       } finally {
         clearTimeout(reviewTimeout);
         await projectSkills.finishReview(success).catch(() => undefined);
+        skillReviewRunning = false;
+        refreshStatus(ctx);
         skillReviewController = undefined;
         skillReviewPromise = undefined;
       }
@@ -370,7 +401,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   async function browseProjectSkills(ctx: ExtensionCommandContext): Promise<void> {
     const projectSkills = requireSkillStore();
     if (ctx.mode !== "tui") {
-      if (ctx.hasUI) ctx.ui.notify(await projectSkills.skillIndex(), "info");
+      showCommandOutput(ctx, await projectSkills.skillIndex());
       return;
     }
     let selected: string | undefined;
@@ -538,31 +569,31 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("project-skills", {
-    description: "Manage externally stored project skills. Usage: /project-skills list|view|edit|pending|approve|reject|review",
+    description: "Browse and manage project skills. Usage: /project-skills list|read|edit|pending|approve|reject|review",
     getArgumentCompletions: async (prefix) => {
       const commands = [
         { value: "list", label: "list", description: "List project skills" },
-        { value: "view ", label: "view <name>", description: "Read a project skill" },
         { value: "read ", label: "read <name>", description: "Read a project skill" },
         { value: "edit ", label: "edit <name>", description: "Edit a project skill" },
         { value: "pending", label: "pending", description: "List pending proposals" },
+        { value: "pending ", label: "pending <id>", description: "Inspect a pending proposal" },
         { value: "approve ", label: "approve <id>", description: "Approve a proposal" },
         { value: "reject ", label: "reject <id>", description: "Reject a proposal" },
         { value: "review", label: "review", description: "Run skill review now" },
       ];
       const normalized = prefix.toLowerCase();
-      if (normalized.startsWith("view ") || normalized.startsWith("read ") || normalized.startsWith("edit ")) {
+      if (normalized.startsWith("read ") || normalized.startsWith("edit ")) {
         if (!skillStore) return null;
         const skills = await skillStore.listSkills();
-        const action = normalized.startsWith("edit ") ? "edit" : normalized.startsWith("read ") ? "read" : "view";
+        const action = normalized.startsWith("edit ") ? "edit" : "read";
         const items = skills.map((skill) => ({ value: `${action} ${skill.name}`, label: skill.name, description: skill.description }));
         const filtered = items.filter((item) => item.value.startsWith(normalized));
         return filtered.length ? filtered : null;
       }
-      if (normalized.startsWith("approve ") || normalized.startsWith("reject ")) {
+      if (normalized.startsWith("pending ") || normalized.startsWith("approve ") || normalized.startsWith("reject ")) {
         if (!skillStore) return null;
         const pending = await skillStore.listPending();
-        const action = normalized.startsWith("approve ") ? "approve" : "reject";
+        const action = normalized.startsWith("pending ") ? "pending" : normalized.startsWith("approve ") ? "approve" : "reject";
         const items = pending.map((proposal) => ({
           value: `${action} ${proposal.id}`,
           label: proposal.id,
@@ -601,14 +632,14 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         if (value) {
           const proposal = pending.find((item) => item.id === value);
           if (!proposal) return ctx.ui.notify(`No pending proposal '${value}'.`, "warning");
-          ctx.ui.notify(formatSkillProposal(proposal), "info");
+          showCommandOutput(ctx, formatSkillProposal(proposal));
           return;
         }
-        ctx.ui.notify(
+        showCommandOutput(
+          ctx,
           pending.length === 0
             ? "No pending project skill proposals."
             : pending.map((proposal) => `${proposal.id}: ${proposal.operations[0]?.action ?? "empty"} ${proposal.operations[0]?.name ?? ""}`).join("\n"),
-          "info",
         );
         return;
       }
@@ -625,6 +656,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         if (!confirmed) return;
         await ctx.waitForIdle();
         const result = await projectSkills.approveProposal(value);
+        pendingSkillCount = Math.max(0, pendingSkillCount - 1);
+        refreshStatus(ctx);
         ctx.ui.notify(result.message, result.changed ? "info" : "warning");
         return;
       }
@@ -641,6 +674,8 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         if (!confirmed) return;
         await ctx.waitForIdle();
         await projectSkills.rejectProposal(value);
+        pendingSkillCount = Math.max(0, pendingSkillCount - 1);
+        refreshStatus(ctx);
         ctx.ui.notify(`Rejected project skill proposal '${value}'.`, "info");
         return;
       }
