@@ -236,10 +236,14 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       try {
         const plan = await requestSkillReviewPlan(ctx, projectSkills, reviewAfterEntryId, skillReviewController?.signal);
         if (plan.operations.length > 0) {
+          const operation = plan.operations[0]!;
           const proposal = await projectSkills.stageProposal(plan.operations, ctx.sessionManager.getSessionId());
-          if (ctx.hasUI) {
+          if (operation.action === "create") {
+            const result = await projectSkills.approveProposal(proposal.id, "background_review");
+            if (ctx.hasUI) ctx.ui.notify(`Project skill review auto-approved '${operation.name}': ${result.message}`, "info");
+          } else if (ctx.hasUI) {
             ctx.ui.notify(
-              `Project skill review staged ${plan.operations[0]?.action} '${plan.operations[0]?.name}'. Approve with /project-skills approve ${proposal.id}`,
+              `Project skill review staged ${operation.action} '${operation.name}'. Approve with /project-skills approve ${proposal.id}`,
               "info",
             );
           }
