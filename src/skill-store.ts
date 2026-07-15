@@ -32,22 +32,12 @@ const RETRIEVAL_STOP_WORDS = new Set([
 ]);
 const MAX_RETRIEVAL_QUERY_CHARS = 256;
 const MAX_RETRIEVAL_TERMS = 32;
-const MAX_SKILL_OUTPUT_CHARS = 12_000;
 const MAX_SKILL_INDEX_CHARS = 6_000;
 
 function retrievalTerms(value: string): string[] {
   return [...new Set(value.normalize("NFKC").slice(0, MAX_RETRIEVAL_QUERY_CHARS).toLowerCase().match(/[a-z0-9]+/gu) ?? [])]
     .filter((term) => term.length > 2 && !RETRIEVAL_STOP_WORDS.has(term))
     .slice(0, MAX_RETRIEVAL_TERMS);
-}
-
-function boundSkillContent(content: string, maxChars = MAX_SKILL_OUTPUT_CHARS): string {
-  const limit = Number.isFinite(maxChars) ? Math.min(MAX_SKILL_OUTPUT_CHARS, Math.max(1_000, Math.floor(maxChars))) : MAX_SKILL_OUTPUT_CHARS;
-  if (content.length <= limit) return content;
-  const marker = "\n\n[TRUNCATED: use the project_skill tool for the full playbook]";
-  const bodyLimit = Math.max(1, limit - marker.length);
-  const boundary = content.lastIndexOf("\n", bodyLimit);
-  return `${content.slice(0, boundary > 0 ? boundary : bodyLimit).trimEnd()}${marker}`;
 }
 
 interface SkillStoreOptions {
@@ -259,7 +249,7 @@ export class ProjectSkillStore {
   async viewSkill(name: string): Promise<ProjectSkill> {
     const skill = await this.loadSkill(name);
     await this.touchUsage(skill.name, "view");
-    return { ...skill, content: boundSkillContent(skill.content) };
+    return skill;
   }
 
   async recordUse(name: string): Promise<void> {
@@ -280,6 +270,16 @@ export class ProjectSkillStore {
       await this.atomicWrite(join(this.pendingDir, `${proposal.id}.json`), proposal);
     });
     return proposal;
+  }
+
+  async submitProposal(
+    operations: SkillOperation[],
+    sourceSessionId?: string,
+    origin: SkillWriteOrigin = "background_review",
+  ): Promise<{ proposal: SkillProposal; result?: SkillMutationResult }> {
+    const proposal = await this.stageProposal(operations, sourceSessionId);
+    if (proposal.operations[0]?.action !== "create") return { proposal };
+    return { proposal, result: await this.approveProposal(proposal.id, origin) };
   }
 
   async listPending(): Promise<SkillProposal[]> {
@@ -384,9 +384,10 @@ export class ProjectSkillStore {
       };
     }
     if (operation.action === "patch") {
-      const oldText = (operation.oldText || "").trim();
-      if (!oldText) throw new Error("Skill patch requires oldText.");
-      const newText = validateSkillContent(operation.newText || "");
+      const oldText = operation.oldText || "";
+      if (!oldText.trim()) throw new Error("Skill patch requires oldText.");
+      const newText = operation.newText ?? "";
+      if (newText) validateSkillContent(newText);
       return { ...operation, action: "patch", name, oldText, newText };
     }
     if (operation.action === "archive") return { ...operation, action: "archive", name };
