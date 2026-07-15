@@ -151,4 +151,13 @@ test("rejects unsafe skill content and invalid descriptions", async (t) => {
     /prompt manipulation/u,
   );
   await assert.rejects(store.rejectProposal("../skill-review"), /Invalid skill proposal id/u);
+  await assert.rejects(
+    store.stageProposal([{
+      action: "create",
+      name: "terminal-escape",
+      description: "Run the terminal escape check.",
+      content: `${skillBody}\u001b[2J`,
+    }]),
+    /unsafe control/u,
+  );
 });

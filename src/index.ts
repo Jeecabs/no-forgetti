@@ -493,6 +493,11 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         const edited = await ctx.ui.editor(`Edit project skill: ${skill.name}`, skill.content);
         if (edited === undefined) return;
         if (edited === skill.content) return ctx.ui.notify(`No changes to '${skill.name}'.`, "info");
+        const confirmed = await ctx.ui.confirm(
+          `Save project skill '${skill.name}'?`,
+          `${skill.content.length} → ${edited.length} characters. A revision snapshot will be created.`,
+        );
+        if (!confirmed) return ctx.ui.notify(`Discarded changes to '${skill.name}'.`, "info");
         const proposal = await projectSkills.stageProposal([{
           action: "patch",
           name: skill.name,
