@@ -4,6 +4,7 @@ import {
 } from "./skill-types.ts";
 
 const INVISIBLE_UNICODE = /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/u;
+const UNSAFE_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u001B]/u;
 const SECRET_PATTERNS: RegExp[] = [
   /\b(?:sk|ghp|github_pat|xox[baprs])-[-A-Za-z0-9_]{12,}\b/u,
   /\b(?:api[_ -]?key|access[_ -]?token|password|secret)\s*[:=]\s*\S{8,}/iu,
@@ -28,7 +29,7 @@ export function validateSkillDescription(description: string): string {
   const normalized = description.trim().replace(/\r\n/g, "\n");
   if (!normalized) throw new Error("Skill description cannot be empty.");
   if (normalized.includes("\n")) throw new Error("Skill description must be one sentence.");
-  if (INVISIBLE_UNICODE.test(normalized)) throw new Error("Skill description contains invisible Unicode control characters.");
+  if (INVISIBLE_UNICODE.test(normalized) || UNSAFE_CONTROL.test(normalized)) throw new Error("Skill description contains unsafe control characters.");
   if (SECRET_PATTERNS.some((pattern) => pattern.test(normalized))) throw new Error("Skill description looks like a credential or secret.");
   if (HIJACK_PATTERNS.some((pattern) => pattern.test(normalized))) throw new Error("Skill description looks like prompt manipulation or unsafe context.");
   if (!normalized.endsWith(".")) throw new Error("Skill description must end with a period.");
@@ -44,8 +45,8 @@ export function validateSkillContent(content: string): string {
   if (normalized.length > MAX_SKILL_CONTENT_CHARS) {
     throw new Error(`Skill content exceeds ${MAX_SKILL_CONTENT_CHARS} characters.`);
   }
-  if (INVISIBLE_UNICODE.test(normalized)) {
-    throw new Error("Skill content contains invisible Unicode control characters.");
+  if (INVISIBLE_UNICODE.test(normalized) || UNSAFE_CONTROL.test(normalized)) {
+    throw new Error("Skill content contains unsafe control characters.");
   }
   if (SECRET_PATTERNS.some((pattern) => pattern.test(normalized))) {
     throw new Error("Skill content looks like a credential or secret.");
