@@ -60,6 +60,12 @@ function isErrno(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
+function validateProposalId(id: string): string {
+  const normalized = id.trim();
+  if (!/^\d{14}-[0-9a-f]{8}$/u.test(normalized)) throw new Error("Invalid skill proposal id.");
+  return normalized;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -295,23 +301,25 @@ export class ProjectSkillStore {
   }
 
   async approveProposal(id: string, origin: SkillWriteOrigin = "background_review"): Promise<SkillMutationResult> {
+    const safeId = validateProposalId(id);
     return this.withLock(async () => {
-      const path = join(this.pendingDir, `${id}.json`);
+      const path = join(this.pendingDir, `${safeId}.json`);
       const proposal = await this.readProposal(path);
       const operation = proposal.operations[0];
       if (!operation) {
         await unlink(path);
-        return { changed: false, message: `Skill proposal '${id}' was empty.` };
+        return { changed: false, message: `Skill proposal '${safeId}' was empty.` };
       }
-      const result = await this.applyOperation(operation, origin, id);
+      const result = await this.applyOperation(operation, origin, safeId);
       if (result.changed) await unlink(path);
       return result;
     });
   }
 
   async rejectProposal(id: string): Promise<void> {
+    const safeId = validateProposalId(id);
     await this.withLock(async () => {
-      await unlink(join(this.pendingDir, `${id}.json`));
+      await unlink(join(this.pendingDir, `${safeId}.json`));
     });
   }
 
