@@ -402,6 +402,49 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     return result.changed;
   }
 
+  async function managePendingProposal(id: string, ctx: ExtensionCommandContext): Promise<void> {
+    const projectSkills = requireSkillStore();
+    const proposal = (await projectSkills.listPending()).find((item) => item.id === id);
+    if (!proposal) {
+      ctx.ui.notify(`Pending proposal '${id}' no longer exists.`, "warning");
+      return;
+    }
+    const operation = proposal.operations[0];
+    const choice = await ctx.ui.select(
+      `${(operation?.action ?? "empty").toUpperCase()} ${operation?.name ?? id}`,
+      ["Inspect", "Approve", "Reject", "Back"],
+    );
+    if (!choice || choice === "Back") return;
+    if (choice === "Inspect") {
+      showCommandOutput(ctx, formatSkillProposal(proposal));
+      return;
+    }
+    if (choice === "Approve") {
+      const confirmed = await ctx.ui.confirm(
+        `Approve ${operation?.action ?? "empty"} '${operation?.name ?? id}'?`,
+        formatSkillProposal(proposal),
+      );
+      if (!confirmed) return;
+      await ctx.waitForIdle();
+      const result = await projectSkills.approveProposal(id);
+      if (operation?.action === "archive" && result.changed) activeSkillCount = Math.max(0, activeSkillCount - 1);
+      pendingSkillCount = Math.max(0, pendingSkillCount - 1);
+      refreshStatus(ctx);
+      ctx.ui.notify(result.message, result.changed ? "info" : "warning");
+      return;
+    }
+    const confirmed = await ctx.ui.confirm(
+      `Reject ${operation?.action ?? "empty"} '${operation?.name ?? id}'?`,
+      "This removes the pending proposal without changing the active skill.",
+    );
+    if (!confirmed) return;
+    await ctx.waitForIdle();
+    await projectSkills.rejectProposal(id);
+    pendingSkillCount = Math.max(0, pendingSkillCount - 1);
+    refreshStatus(ctx);
+    ctx.ui.notify(`Rejected project skill proposal '${id}'.`, "info");
+  }
+
   async function browseProjectSkills(ctx: ExtensionCommandContext): Promise<void> {
     const projectSkills = requireSkillStore();
     if (ctx.mode !== "tui") {
@@ -410,13 +453,17 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     }
     let selected: string | undefined;
     while (true) {
-      const skills = await projectSkills.listSkills();
-      if (skills.length === 0) {
-        ctx.ui.notify("No project skills yet.", "info");
+      const [skills, proposals] = await Promise.all([projectSkills.listSkills(), projectSkills.listPending()]);
+      if (skills.length + proposals.length === 0) {
+        ctx.ui.notify("No project skills or pending proposals yet.", "info");
         return;
       }
-      const choice = await showSkillPicker(ctx, skills, selected);
+      const choice = await showSkillPicker(ctx, skills, proposals, selected);
       if (!choice) return;
+      if (choice.action === "proposal") {
+        await managePendingProposal(choice.id, ctx);
+        continue;
+      }
       selected = choice.name;
       if (choice.action === "edit") {
         await editProjectSkill(selected, ctx);

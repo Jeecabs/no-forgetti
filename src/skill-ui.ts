@@ -17,30 +17,49 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 
-import type { ProjectSkill } from "./skill-types.ts";
+import type { ProjectSkill, SkillProposal } from "./skill-types.ts";
 
 export type SkillViewerAction = "back" | "close" | "edit";
-export type SkillPickerAction = { action: "open" | "edit"; name: string };
+export type SkillPickerAction =
+  | { action: "open" | "edit"; name: string }
+  | { action: "proposal"; id: string };
 
 export async function showSkillPicker(
   ctx: ExtensionCommandContext,
   skills: ProjectSkill[],
+  proposals: SkillProposal[],
   selectedName?: string,
 ): Promise<SkillPickerAction | undefined> {
-  if (ctx.mode !== "tui" || skills.length === 0) return undefined;
+  if (ctx.mode !== "tui" || skills.length + proposals.length === 0) return undefined;
 
-  const items: SelectItem[] = skills.map((skill) => ({
-    value: skill.name,
-    label: skill.name,
-    description: skill.description,
-  }));
+  const actions = new Map<string, SkillPickerAction>();
+  const proposalItems: SelectItem[] = proposals.map((proposal) => {
+    const operation = proposal.operations[0];
+    const value = `proposal:${proposal.id}`;
+    actions.set(value, { action: "proposal", id: proposal.id });
+    return {
+      value,
+      label: `! ${(operation?.action ?? "empty").toUpperCase()} ${operation?.name ?? proposal.id}`,
+      description: operation?.reason ?? `Pending proposal ${proposal.id}`,
+    };
+  });
+  const skillItems: SelectItem[] = skills.map((skill) => {
+    const value = `skill:${skill.name}`;
+    actions.set(value, { action: "open", name: skill.name });
+    return { value, label: skill.name, description: skill.description };
+  });
+  const items = [...proposalItems, ...skillItems];
 
   const result = await ctx.ui.custom<SkillPickerAction | null>((tui, theme, _keybindings, done) => {
     const container = new Container();
     const border = new DynamicBorder((text: string) => theme.fg("borderAccent", text));
     container.addChild(border);
-    container.addChild(new Text(theme.fg("accent", theme.bold(`Project skills  ${skills.length}`)), 1, 0));
-    container.addChild(new Text(theme.fg("muted", "Reusable workflows learned for this project"), 1, 0));
+    container.addChild(new Text(theme.fg("accent", theme.bold("No Forgetti / Project skills")), 1, 0));
+    container.addChild(new Text(
+      theme.fg("muted", `${skills.length} active  ${proposals.length} pending  External project store`),
+      1,
+      0,
+    ));
 
     const listRows = Math.min(12, Math.max(4, items.length), Math.max(4, tui.terminal.rows - 8));
     const list = new SelectList(items, listRows, {
@@ -50,9 +69,9 @@ export async function showSkillPicker(
       scrollInfo: (text) => theme.fg("dim", text),
       noMatch: (text) => theme.fg("warning", text),
     });
-    const selectedIndex = selectedName ? items.findIndex((item) => item.value === selectedName) : -1;
+    const selectedIndex = selectedName ? items.findIndex((item) => item.value === `skill:${selectedName}`) : -1;
     if (selectedIndex >= 0) list.setSelectedIndex(selectedIndex);
-    list.onSelect = (item) => done({ action: "open", name: item.value });
+    list.onSelect = (item) => done(actions.get(item.value) ?? null);
     list.onCancel = () => done(null);
     container.addChild(list);
     container.addChild(new Text(theme.fg("dim", "↑↓ navigate   enter open   e edit   esc close"), 1, 0));
@@ -64,7 +83,8 @@ export async function showSkillPicker(
       handleInput: (data: string) => {
         if (data === "e") {
           const item = list.getSelectedItem();
-          if (item) done({ action: "edit", name: item.value });
+          const action = item ? actions.get(item.value) : undefined;
+          if (action?.action === "open") done({ action: "edit", name: action.name });
           return;
         }
         list.handleInput(data);
