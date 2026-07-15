@@ -1,6 +1,7 @@
 export const STORE_VERSION = 1;
 export const MAIN_MEMORY = "main";
-export const DEFAULT_MAX_CHARS = 2_200;
+export const DEFAULT_MAX_CHARS = 4_000;
+export const MEMORY_REFINEMENT_TARGET_RATIO = 0.75;
 export const DEFAULT_MAX_ENTRY_CHARS = 800;
 export const DEFAULT_REVIEW_INTERVAL = 10;
 export const DEFAULT_REVIEW_SIGNAL_THRESHOLD = 4;
