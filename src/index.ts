@@ -134,6 +134,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
   let skillReviewController: AbortController | undefined;
   let skillReviewCursorId: string | undefined;
   let skillReviewExistingSession = false;
+  let activeSkillCount = 0;
   let pendingSkillCount = 0;
   let skillReviewRunning = false;
   let knownUserEntryIds = new Set<string>();
@@ -179,7 +180,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     const reviewing = skillReviewRunning ? " reviewing" : "";
     ctx.ui.setStatus(
       STATUS_KEY,
-      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `mem:${activeName} ${frozenBranch.entries.length}${pending}${reviewing}`)}`,
+      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `mem:${activeName} ${frozenBranch.entries.length} skills:${activeSkillCount}${pending}${reviewing}`)}`,
     );
   }
 
@@ -200,9 +201,11 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
     try {
       await nextSkillStore.initialize();
       skillStore = nextSkillStore;
+      activeSkillCount = (await nextSkillStore.listSkills()).length;
       pendingSkillCount = (await nextSkillStore.listPending()).length;
     } catch (error) {
       skillStore = undefined;
+      activeSkillCount = 0;
       pendingSkillCount = 0;
       if (ctx.hasUI) ctx.ui.notify(`Project skills disabled: ${errorMessage(error)}`, "warning");
     }
@@ -278,6 +281,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
           const operation = plan.operations[0]!;
           const submission = await projectSkills.submitProposal(plan.operations, ctx.sessionManager.getSessionId(), "background_review");
           if (submission.result) {
+            activeSkillCount += 1;
             if (ctx.hasUI) ctx.ui.notify(`Project skill review auto-approved '${operation.name}': ${submission.result.message}`, "info");
           } else {
             pendingSkillCount += 1;
@@ -656,6 +660,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         if (!confirmed) return;
         await ctx.waitForIdle();
         const result = await projectSkills.approveProposal(value);
+        if (operation?.action === "archive" && result.changed) activeSkillCount = Math.max(0, activeSkillCount - 1);
         pendingSkillCount = Math.max(0, pendingSkillCount - 1);
         refreshStatus(ctx);
         ctx.ui.notify(result.message, result.changed ? "info" : "warning");
