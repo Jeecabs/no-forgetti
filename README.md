@@ -11,14 +11,11 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 ## Behavior
 
 - Memory scope = nearest Git root; when no Git root exists, exact launch directory.
-- Default branch = `main` for every new session in that project.
 - Pi `/fork` and `/clone` keep using the same memory branch. They **do not** clone memory automatically.
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
 - Writes persist immediately, but injected context stays frozen until the next session, explicit `/memory refresh`, or successful Pi compaction. Compaction is already a prompt-cache boundary, so it safely adopts the latest memory.
 - Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Reviews stage proposals; memory changes require explicit inspection and approval. Explicit memory signals and durable corrections can trigger review early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes Agent's existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` and `/project-skills review` run them on demand.
 - Successful complex workflows can form an external project skill. Every generated create, patch, and archive remains pending until you inspect and approve it. Skills stay in No Forgetti storage and are fetched through one `project_skill` tool. They are never registered as Pi slash commands and never written into the repository.
-
-This is filesystem memory, not model training. It stores compact project facts and externally stored procedural skills.
 
 ## Design boundary
 
