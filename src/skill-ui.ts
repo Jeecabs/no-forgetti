@@ -17,38 +17,23 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 
-import type { ProjectSkill, SkillProposal } from "./skill-types.ts";
+import type { ProjectSkill } from "./skill-types.ts";
 
-export type SkillViewerAction = "back" | "close" | "edit";
-export type SkillPickerAction =
-  | { action: "open" | "edit"; name: string }
-  | { action: "proposal"; id: string };
+export type SkillViewerAction = "back" | "close" | "edit" | "next" | "previous";
+export type SkillPickerAction = { action: "open" | "edit"; name: string };
 
 export async function showSkillPicker(
   ctx: ExtensionCommandContext,
   skills: ProjectSkill[],
-  proposals: SkillProposal[],
   selectedName?: string,
 ): Promise<SkillPickerAction | undefined> {
-  if (ctx.mode !== "tui" || skills.length + proposals.length === 0) return undefined;
+  if (ctx.mode !== "tui" || skills.length === 0) return undefined;
 
   const actions = new Map<string, SkillPickerAction>();
-  const proposalItems: SelectItem[] = proposals.map((proposal) => {
-    const operation = proposal.operations[0];
-    const value = `proposal:${proposal.id}`;
-    actions.set(value, { action: "proposal", id: proposal.id });
-    return {
-      value,
-      label: `! ${(operation?.action ?? "empty").toUpperCase()} ${operation?.name ?? proposal.id}`,
-      description: operation?.reason ?? `Pending proposal ${proposal.id}`,
-    };
+  const items: SelectItem[] = skills.map((skill) => {
+    actions.set(skill.name, { action: "open", name: skill.name });
+    return { value: skill.name, label: skill.name, description: skill.description };
   });
-  const skillItems: SelectItem[] = skills.map((skill) => {
-    const value = `skill:${skill.name}`;
-    actions.set(value, { action: "open", name: skill.name });
-    return { value, label: skill.name, description: skill.description };
-  });
-  const items = [...proposalItems, ...skillItems];
 
   const result = await ctx.ui.custom<SkillPickerAction | null>((tui, theme, _keybindings, done) => {
     const container = new Container();
@@ -56,7 +41,7 @@ export async function showSkillPicker(
     container.addChild(border);
     container.addChild(new Text(theme.fg("accent", theme.bold("No Forgetti / Project skills")), 1, 0));
     container.addChild(new Text(
-      theme.fg("muted", `${skills.length} active  ${proposals.length} pending  External project store`),
+      theme.fg("muted", `${skills.length} active skills  External project store`),
       1,
       0,
     ));
@@ -69,7 +54,7 @@ export async function showSkillPicker(
       scrollInfo: (text) => theme.fg("dim", text),
       noMatch: (text) => theme.fg("warning", text),
     });
-    const selectedIndex = selectedName ? items.findIndex((item) => item.value === `skill:${selectedName}`) : -1;
+    const selectedIndex = selectedName ? items.findIndex((item) => item.value === selectedName) : -1;
     if (selectedIndex >= 0) list.setSelectedIndex(selectedIndex);
     list.onSelect = (item) => done(actions.get(item.value) ?? null);
     list.onCancel = () => done(null);
@@ -131,6 +116,8 @@ class SkillViewer {
     if (this.canGoBack && (cancel || matchesKey(data, Key.left) || data === "b")) return "back";
     if (cancel) return "close";
     if (data === "e") return "edit";
+    if (this.canGoBack && data === "[") return "previous";
+    if (this.canGoBack && data === "]") return "next";
     return undefined;
   }
 
@@ -163,7 +150,7 @@ class SkillViewer {
     const position = this.renderedBody.length > pageSize
       ? `${this.scrollOffset + 1}-${this.scrollOffset + visible.length}/${this.renderedBody.length}`
       : `${this.renderedBody.length} lines`;
-    const help = `${this.canGoBack ? "b back   " : ""}↑↓ scroll   pgup/pgdn page   e edit   esc close`;
+    const help = `${this.canGoBack ? "b back   [ previous   ] next   " : ""}↑↓ scroll   pgup/pgdn page   e edit   esc close`;
 
     return [
       this.theme.fg("borderAccent", "─".repeat(Math.max(0, width))),
