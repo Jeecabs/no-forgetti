@@ -1,6 +1,7 @@
 export const SKILL_STORE_VERSION = 1;
 export const DEFAULT_SKILL_REVIEW_INTERVAL = 10;
 export const DEFAULT_SKILL_REVIEW_SIGNAL_THRESHOLD = 4;
+export const DEFAULT_SKILL_RETENTION_SESSIONS = 20;
 export const MAX_SKILL_DESCRIPTION_CHARS = 60;
 export const MAX_SKILL_CONTENT_CHARS = 32_000;
 
@@ -10,6 +11,7 @@ export type SkillOperationAction = "create" | "patch" | "archive";
 
 export interface ProjectSkill {
   name: string;
+  generationId: string;
   description: string;
   content: string;
   createdAt: string;
@@ -18,9 +20,14 @@ export interface ProjectSkill {
   updatedBy: SkillWriteOrigin;
   state: SkillState;
   useCount: number;
+  useSessionCount: number;
   viewCount: number;
   patchCount: number;
+  createdSession: number;
+  lastUsedSession?: number;
+  lastRetentionSession?: number;
   lastUsedAt?: string;
+  lastRetentionAt?: string;
   lastViewedAt?: string;
   lastPatchedAt?: string;
 }
@@ -41,7 +48,20 @@ export interface SkillProposal {
   id: string;
   createdAt: string;
   sourceSessionId?: string;
+  retention?: boolean;
+  retentionSession?: number;
+  retentionAfterSessions?: number;
   operations: SkillOperation[];
+}
+
+export interface SkillSessionMaintenance {
+  sessionCount: number;
+  isNew: boolean;
+  proposals: SkillProposal[];
+}
+
+export interface SkillUseResult {
+  withdrawnRetentionProposals: number;
 }
 
 export interface SkillReviewState {

@@ -22,6 +22,10 @@ import type { ProjectSkill } from "./skill-types.ts";
 export type SkillViewerAction = "back" | "close" | "edit" | "next" | "previous";
 export type SkillPickerAction = { action: "open" | "edit"; name: string };
 
+function usageSummary(skill: ProjectSkill): string {
+  return `${skill.useSessionCount} sessions  ${skill.useCount} recalls`;
+}
+
 export async function showSkillPicker(
   ctx: ExtensionCommandContext,
   skills: ProjectSkill[],
@@ -32,7 +36,7 @@ export async function showSkillPicker(
   const actions = new Map<string, SkillPickerAction>();
   const items: SelectItem[] = skills.map((skill) => {
     actions.set(skill.name, { action: "open", name: skill.name });
-    return { value: skill.name, label: skill.name, description: skill.description };
+    return { value: skill.name, label: skill.name, description: `${skill.description}  ${usageSummary(skill)}` };
   });
 
   const result = await ctx.ui.custom<SkillPickerAction | null>((tui, theme, _keybindings, done) => {
@@ -83,18 +87,30 @@ export async function showSkillPicker(
 
 class SkillViewer {
   private readonly markdown: Markdown;
+  private readonly tui: TUI;
+  private readonly theme: Theme;
+  private readonly keybindings: KeybindingsManager;
+  private readonly skill: ProjectSkill;
+  private readonly canGoBack: boolean;
+  private readonly done: (action: SkillViewerAction) => void;
   private scrollOffset = 0;
   private renderedWidth?: number;
   private renderedBody: string[] = [];
 
   constructor(
-    private readonly tui: TUI,
-    private readonly theme: Theme,
-    private readonly keybindings: KeybindingsManager,
-    private readonly skill: ProjectSkill,
-    private readonly canGoBack: boolean,
-    private readonly done: (action: SkillViewerAction) => void,
+    tui: TUI,
+    theme: Theme,
+    keybindings: KeybindingsManager,
+    skill: ProjectSkill,
+    canGoBack: boolean,
+    done: (action: SkillViewerAction) => void,
   ) {
+    this.tui = tui;
+    this.theme = theme;
+    this.keybindings = keybindings;
+    this.skill = skill;
+    this.canGoBack = canGoBack;
+    this.done = done;
     this.markdown = new Markdown(skill.content, 0, 0, getMarkdownTheme());
   }
 
@@ -146,7 +162,7 @@ class SkillViewer {
     const visible = this.renderedBody.slice(this.scrollOffset, this.scrollOffset + pageSize);
     const remaining = Math.max(0, this.renderedBody.length - this.scrollOffset - visible.length);
     const title = ` ${this.skill.name} `;
-    const meta = `${this.skill.description}  updated ${this.skill.updatedAt.slice(0, 10)}`;
+    const meta = `${this.skill.description}  ${usageSummary(this.skill)}  updated ${this.skill.updatedAt.slice(0, 10)}`;
     const position = this.renderedBody.length > pageSize
       ? `${this.scrollOffset + 1}-${this.scrollOffset + visible.length}/${this.renderedBody.length}`
       : `${this.renderedBody.length} lines`;
@@ -180,10 +196,12 @@ export async function showSkillViewer(
   ctx: ExtensionCommandContext,
   skill: ProjectSkill,
   canGoBack: boolean,
+  presentOutput?: (text: string) => void,
 ): Promise<SkillViewerAction> {
   if (ctx.mode !== "tui") {
     const output = `${skill.name}: ${skill.description}\n\n${skill.content}`;
-    if (ctx.hasUI) ctx.ui.notify(output, "info");
+    if (presentOutput) presentOutput(output);
+    else if (ctx.hasUI) ctx.ui.notify(output, "info");
     else if (ctx.mode === "print") process.stdout.write(`${output}\n`);
     else throw new Error("Project skill reading requires TUI/RPC mode; use the project_skill tool in JSON mode.");
     return "close";

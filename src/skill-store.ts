@@ -1,9 +1,14 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 
+import { atomicWriteFile } from "./atomic-file.ts";
+import { withFileLock } from "./file-lock.ts";
+import { SkillActivityIndex } from "./skill-activity.ts";
+import { optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
 import { projectStorageDir } from "./store.ts";
 import {
+  DEFAULT_SKILL_RETENTION_SESSIONS,
   DEFAULT_SKILL_REVIEW_INTERVAL,
   DEFAULT_SKILL_REVIEW_SIGNAL_THRESHOLD,
   MAX_SKILL_CONTENT_CHARS,
@@ -13,11 +18,14 @@ import {
   type SkillOperation,
   type SkillProposal,
   type SkillReviewState,
+  type SkillSessionMaintenance,
+  type SkillUseResult,
   type SkillWriteOrigin,
 } from "./skill-types.ts";
 import {
   validateSkillContent,
   validateSkillDescription,
+  validateSkillMetadataText,
   validateSkillName,
 } from "./skill-security.ts";
 
@@ -33,10 +41,35 @@ const RETRIEVAL_STOP_WORDS = new Set([
 const MAX_RETRIEVAL_QUERY_CHARS = 256;
 const MAX_RETRIEVAL_TERMS = 32;
 const MAX_SKILL_INDEX_CHARS = 6_000;
+const MAX_SKILL_JSON_BYTES = 5 * 1024 * 1024;
+
+function retrievalVariants(term: string): string[] {
+  const variants = [term];
+  const replacements: ReadonlyArray<readonly [RegExp, string]> = [
+    [/ability$/u, "able"],
+    [/ification$/u, "ify"],
+    [/ied$/u, "y"],
+    [/ies$/u, "y"],
+    [/ing$/u, ""],
+    [/ed$/u, ""],
+    [/s$/u, ""],
+  ];
+  const rule = replacements.find(([pattern]) => pattern.test(term));
+  if (!rule) return variants;
+  const stem = term.replace(rule[0], rule[1]);
+  if (stem.length > 2 && stem !== term) variants.push(stem);
+  if (term.endsWith("ing") && stem.length > 2) {
+    if (!stem.endsWith("e")) variants.push(`${stem}e`);
+    if (/([^aeiou])\1$/u.test(stem)) variants.push(stem.slice(0, -1));
+  }
+  return variants;
+}
 
 function retrievalTerms(value: string): string[] {
-  return [...new Set(value.normalize("NFKC").slice(0, MAX_RETRIEVAL_QUERY_CHARS).toLowerCase().match(/[a-z0-9]+/gu) ?? [])]
+  const tokens = value.normalize("NFKC").slice(0, MAX_RETRIEVAL_QUERY_CHARS).toLowerCase().match(/[a-z0-9]+/gu) ?? [];
+  return [...new Set(tokens
     .filter((term) => term.length > 2 && !RETRIEVAL_STOP_WORDS.has(term))
+    .flatMap(retrievalVariants))]
     .slice(0, MAX_RETRIEVAL_TERMS);
 }
 
@@ -65,20 +98,17 @@ function emptyReviewState(): SkillReviewState {
 }
 
 function parseReviewState(value: unknown): SkillReviewState {
-  if (!isRecord(value)) return emptyReviewState();
+  if (!isRecord(value)) throw new Error("Invalid project skill review state.");
   if (value.version !== SKILL_STORE_VERSION) throw new Error("Unsupported project skill review state.");
-  const number = (key: string) => typeof value[key] === "number" && Number.isFinite(value[key])
-    ? Math.max(0, Math.floor(value[key] as number))
-    : 0;
   return {
     version: SKILL_STORE_VERSION,
-    turnsSinceReview: number("turnsSinceReview"),
-    signalScore: number("signalScore"),
-    consecutiveFailures: number("consecutiveFailures"),
-    ...(typeof value.lastReviewedAt === "string" ? { lastReviewedAt: value.lastReviewedAt } : {}),
-    ...(typeof value.lastAttemptAt === "string" ? { lastAttemptAt: value.lastAttemptAt } : {}),
-    ...(typeof value.nextAttemptAt === "string" ? { nextAttemptAt: value.nextAttemptAt } : {}),
-    ...(typeof value.inFlightUntil === "string" ? { inFlightUntil: value.inFlightUntil } : {}),
+    turnsSinceReview: requireNonnegativeInteger(value.turnsSinceReview, "project skill review turn count"),
+    signalScore: requireNonnegativeInteger(value.signalScore, "project skill review signal score"),
+    consecutiveFailures: requireNonnegativeInteger(value.consecutiveFailures, "project skill review failure count"),
+    lastReviewedAt: optionalIsoTimestamp(value.lastReviewedAt, "project skill review timestamp"),
+    lastAttemptAt: optionalIsoTimestamp(value.lastAttemptAt, "project skill review attempt timestamp"),
+    nextAttemptAt: optionalIsoTimestamp(value.nextAttemptAt, "project skill review retry timestamp"),
+    inFlightUntil: optionalIsoTimestamp(value.inFlightUntil, "project skill review lease timestamp"),
   };
 }
 
@@ -108,27 +138,36 @@ function parseSkillFile(text: string, fallbackName: string, now: string): Projec
   const name = validateSkillName(fields.get("name") || fallbackName);
   const description = validateSkillDescription(fields.get("description") || "");
   const content = validateSkillContent(match[2]);
+  const createdAt = fields.get("createdAt") || now;
+  const storedGeneration = fields.get("generationId");
+  const generationId = storedGeneration && /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(storedGeneration)
+    ? storedGeneration
+    : createHash("sha256").update(`${name}\0${createdAt}`).digest("hex").slice(0, 24);
   const numberField = (key: string) => {
     const value = Number(fields.get(key) || 0);
     return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
   };
   return {
     name,
+    generationId,
     description,
     content,
-    createdAt: fields.get("createdAt") || now,
+    createdAt,
     updatedAt: fields.get("updatedAt") || now,
     createdBy: fields.get("createdBy") === "foreground" ? "foreground" : "background_review",
     updatedBy: fields.get("updatedBy") === "foreground" ? "foreground" : "background_review",
     state: "active",
-    useCount: 0,
-    viewCount: 0,
+    useCount: numberField("useCount"),
+    useSessionCount: numberField("useSessionCount"),
+    viewCount: numberField("viewCount"),
     patchCount: numberField("patchCount"),
-    ...(numberField("useCount") > 0 ? { useCount: numberField("useCount") } : {}),
-    ...(numberField("viewCount") > 0 ? { viewCount: numberField("viewCount") } : {}),
-    ...(fields.get("lastUsedAt") ? { lastUsedAt: fields.get("lastUsedAt") } : {}),
-    ...(fields.get("lastViewedAt") ? { lastViewedAt: fields.get("lastViewedAt") } : {}),
-    ...(fields.get("lastPatchedAt") ? { lastPatchedAt: fields.get("lastPatchedAt") } : {}),
+    createdSession: numberField("createdSession"),
+    lastUsedSession: numberField("lastUsedSession") || undefined,
+    lastRetentionSession: numberField("lastRetentionSession") || undefined,
+    lastUsedAt: fields.get("lastUsedAt"),
+    lastRetentionAt: fields.get("lastRetentionAt"),
+    lastViewedAt: fields.get("lastViewedAt"),
+    lastPatchedAt: fields.get("lastPatchedAt"),
   };
 }
 
@@ -136,6 +175,7 @@ function renderSkillFile(skill: ProjectSkill): string {
   return [
     "---",
     `name: ${skill.name}`,
+    `generationId: ${skill.generationId}`,
     `description: ${JSON.stringify(skill.description)}`,
     "version: 0.1.0",
     "author: No Forgetti",
@@ -144,9 +184,14 @@ function renderSkillFile(skill: ProjectSkill): string {
     `createdBy: ${skill.createdBy}`,
     `updatedBy: ${skill.updatedBy}`,
     `useCount: ${skill.useCount}`,
+    `useSessionCount: ${skill.useSessionCount}`,
     `viewCount: ${skill.viewCount}`,
     `patchCount: ${skill.patchCount}`,
+    `createdSession: ${skill.createdSession}`,
+    ...(skill.lastUsedSession !== undefined ? [`lastUsedSession: ${skill.lastUsedSession}`] : []),
+    ...(skill.lastRetentionSession !== undefined ? [`lastRetentionSession: ${skill.lastRetentionSession}`] : []),
     ...(skill.lastUsedAt ? [`lastUsedAt: ${skill.lastUsedAt}`] : []),
+    ...(skill.lastRetentionAt ? [`lastRetentionAt: ${skill.lastRetentionAt}`] : []),
     ...(skill.lastViewedAt ? [`lastViewedAt: ${skill.lastViewedAt}`] : []),
     ...(skill.lastPatchedAt ? [`lastPatchedAt: ${skill.lastPatchedAt}`] : []),
     "---",
@@ -163,6 +208,8 @@ export class ProjectSkillStore {
   readonly pendingDir: string;
   readonly revisionsDir: string;
   readonly reviewPath: string;
+  readonly activityPath: string;
+  readonly activity: SkillActivityIndex;
 
   private readonly lockPath: string;
   private readonly now: () => Date;
@@ -174,8 +221,10 @@ export class ProjectSkillStore {
     this.pendingDir = join(this.projectDir, "skill-pending");
     this.revisionsDir = join(this.projectDir, "skill-revisions");
     this.reviewPath = join(this.projectDir, "skill-review.json");
+    this.activityPath = join(this.projectDir, "skill-activity.json");
     this.lockPath = join(this.projectDir, ".lock");
     this.now = options.now ?? (() => new Date());
+    this.activity = new SkillActivityIndex(this.projectDir, { now: this.now });
   }
 
   async initialize(): Promise<void> {
@@ -187,29 +236,45 @@ export class ProjectSkillStore {
     await this.withLock(async () => {
       if (!await this.exists(this.reviewPath)) await this.atomicWrite(this.reviewPath, emptyReviewState());
       else parseReviewState(await this.readJson(this.reviewPath));
+      const storedSkills = await this.listStoredSkills();
+      const aliases = Object.fromEntries(storedSkills.flatMap((skill) => [[skill.name, skill.generationId], [skill.generationId, skill.generationId]]));
+      const seeds = Object.fromEntries(storedSkills.map((skill) => [skill.generationId, {
+        useCount: skill.useCount,
+        useSessionCount: skill.useSessionCount,
+        ...(skill.lastUsedSession ? { lastUsedCompletedSession: skill.lastUsedSession } : {}),
+        ...(skill.lastUsedAt ? { lastUsedAt: skill.lastUsedAt } : {}),
+      }]));
+      await this.activity.initialize({ legacyPath: this.activityPath, generationAliases: aliases, generationSeeds: seeds });
+      for (const skill of storedSkills) {
+        const path = join(this.skillsDir, skill.name, SKILL_FILE);
+        const source = await readFile(path, "utf8");
+        const hydrated = await this.hydrateUsage(skill);
+        const staleUsage = skill.useCount !== hydrated.useCount
+          || skill.useSessionCount !== hydrated.useSessionCount
+          || skill.lastUsedSession !== hydrated.lastUsedSession
+          || skill.lastUsedAt !== hydrated.lastUsedAt;
+        if (!source.includes("\ngenerationId:") || staleUsage) await this.atomicWrite(path, renderSkillFile(hydrated));
+      }
     });
   }
 
   async listSkills(): Promise<ProjectSkill[]> {
-    const entries = await readdir(this.skillsDir, { withFileTypes: true });
-    const skills: ProjectSkill[] = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      try {
-        skills.push(await this.loadSkill(entry.name));
-      } catch {
-        // Invalid skill packages stay invisible to the model and are surfaced by status later.
-      }
-    }
-    return skills.sort((a, b) => a.name.localeCompare(b.name));
+    return Promise.all((await this.listStoredSkills()).map((skill) => this.hydrateUsage(skill)));
   }
 
   async loadSkill(name: string): Promise<ProjectSkill> {
-    const normalized = validateSkillName(name);
-    const path = join(this.skillsDir, normalized, SKILL_FILE);
-    const skill = parseSkillFile(await readFile(path, "utf8"), normalized, this.timestamp());
-    if (skill.name !== normalized) throw new Error(`Skill package name mismatch: expected '${normalized}'.`);
-    return skill;
+    return this.hydrateUsage(await this.loadStoredSkill(name));
+  }
+
+  private async hydrateUsage(skill: ProjectSkill): Promise<ProjectSkill> {
+    const usage = await this.activity.generationUsage(skill.generationId);
+    return {
+      ...skill,
+      useCount: usage.useCount,
+      useSessionCount: usage.useSessionCount,
+      lastUsedSession: usage.lastUsedCompletedSession,
+      lastUsedAt: usage.lastUsedAt,
+    };
   }
 
   async skillIndex(): Promise<string> {
@@ -218,7 +283,7 @@ export class ProjectSkillStore {
     const lines: string[] = [];
     let usedChars = 0;
     for (const skill of skills) {
-      const line = `- ${skill.name}: ${skill.description}`;
+      const line = `- ${skill.name}: ${skill.description} (${skill.useSessionCount} sessions, ${skill.useCount} recalls)`;
       if (usedChars + line.length + 1 > MAX_SKILL_INDEX_CHARS) {
         lines.push(`[TRUNCATED: ${skills.length - lines.length} more skills]`);
         break;
@@ -246,40 +311,103 @@ export class ProjectSkillStore {
       .map(({ skill }) => skill);
   }
 
+  async usageReport(retentionSessions = DEFAULT_SKILL_RETENTION_SESSIONS): Promise<string> {
+    return this.withLock(async () => {
+      const completedCount = await this.activity.completedCount();
+      const skills = await this.listSkills();
+      if (skills.length === 0) return `(no project skills have been formed yet)\ncompleted project sessions: ${completedCount}`;
+      const lines = [`completed project sessions: ${completedCount} · retention: ${retentionSessions}`];
+      let chars = lines[0]!.length + 1;
+      for (const skill of skills) {
+        const eligibleSessions = Math.max(1, completedCount - skill.createdSession);
+        const inactiveSessions = Math.max(0, completedCount - (skill.lastUsedSession ?? skill.createdSession));
+        const retentionBaseline = Math.max(skill.createdSession, skill.lastUsedSession ?? 0, skill.lastRetentionSession ?? 0);
+        const retentionInactive = Math.max(0, completedCount - retentionBaseline);
+        const rate = Math.round((skill.useSessionCount / eligibleSessions) * 100);
+        const status = retentionInactive >= retentionSessions ? "stale" : `${inactiveSessions} inactive · cull in ${retentionSessions - retentionInactive}`;
+        const line = `${skill.name}: ${skill.useSessionCount}/${eligibleSessions} sessions ${rate}% · ${skill.useCount} recalls · ${status}`;
+        if (chars + line.length + 1 > MAX_SKILL_INDEX_CHARS) {
+          lines.push(`[TRUNCATED: ${skills.length - (lines.length - 1)} more skills]`);
+          break;
+        }
+        lines.push(line);
+        chars += line.length + 1;
+      }
+      return lines.join("\n");
+    });
+  }
+
+  async maintainSession(sessionId: string): Promise<SkillSessionMaintenance> {
+    return this.withLock(async () => {
+      const result = await this.activity.beginSession(sessionId);
+      return { sessionCount: result.completedCount, isNew: result.isNew, proposals: [] };
+    });
+  }
+
+  async completeSession(
+    sessionId: string,
+    retentionSessions = DEFAULT_SKILL_RETENTION_SESSIONS,
+  ): Promise<SkillSessionMaintenance> {
+    const threshold = Number.isFinite(retentionSessions) ? Math.max(1, Math.floor(retentionSessions)) : DEFAULT_SKILL_RETENTION_SESSIONS;
+    return this.withLock(async () => {
+      const completion = await this.activity.completeSession(sessionId);
+      const completedCount = completion.completedCount;
+      const skills = await this.listSkills();
+      const pending = await this.listPending();
+      const pendingArchives = new Set(pending
+        .filter((proposal) => proposal.operations[0]?.action === "archive")
+        .map((proposal) => proposal.operations[0]!.name));
+      const stale = skills
+        .map((skill) => ({
+          skill,
+          inactiveSessions: completedCount - Math.max(skill.createdSession, skill.lastUsedSession ?? 0, skill.lastRetentionSession ?? 0),
+        }))
+        .filter(({ skill, inactiveSessions }) => inactiveSessions >= threshold && !pendingArchives.has(skill.name))
+        .sort((a, b) => b.inactiveSessions - a.inactiveSessions || a.skill.name.localeCompare(b.skill.name));
+      const proposals: SkillProposal[] = [];
+      for (const candidate of stale) {
+        const proposal = this.createProposal([{
+          action: "archive",
+          name: candidate.skill.name,
+          reason: `Unused for ${candidate.inactiveSessions} completed project sessions (retention: ${threshold}).`,
+        }], undefined, true, completedCount, threshold);
+        await this.atomicWrite(join(this.pendingDir, `${proposal.id}.json`), proposal);
+        proposals.push(proposal);
+      }
+      return { sessionCount: completedCount, isNew: completion.isNew, proposals };
+    });
+  }
+
   async viewSkill(name: string): Promise<ProjectSkill> {
     const skill = await this.loadSkill(name);
     await this.touchUsage(skill.name, "view");
     return skill;
   }
 
-  async recordUse(name: string): Promise<void> {
-    await this.touchUsage(validateSkillName(name), "use");
+  async recordUse(name: string, sessionId: string): Promise<SkillUseResult> {
+    return this.touchUsage(validateSkillName(name), "use", sessionId);
   }
 
   async stageProposal(operations: SkillOperation[], sourceSessionId?: string): Promise<SkillProposal> {
-    if (operations.length > 1) throw new Error("A self-forming skill review may stage one operation at a time.");
-    const normalized = operations.map((operation) => this.validateOperation(operation));
-    const proposal: SkillProposal = {
-      version: SKILL_STORE_VERSION,
-      id: `${this.timestamp().replace(/[^0-9]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`,
-      createdAt: this.timestamp(),
-      ...(sourceSessionId ? { sourceSessionId } : {}),
-      operations: normalized,
-    };
-    await this.withLock(async () => {
+    const proposal = this.createProposal(operations, sourceSessionId);
+    return this.withLock(async () => {
+      const operation = proposal.operations[0];
+      const existing = (await this.listPending()).find((item) => (
+        item.operations[0]?.action === operation?.action && item.operations[0]?.name === operation?.name
+      ));
+      if (existing) return existing;
       await this.atomicWrite(join(this.pendingDir, `${proposal.id}.json`), proposal);
+      return proposal;
     });
-    return proposal;
   }
 
   async submitProposal(
     operations: SkillOperation[],
     sourceSessionId?: string,
-    origin: SkillWriteOrigin = "background_review",
-  ): Promise<{ proposal: SkillProposal; result?: SkillMutationResult }> {
+  ): Promise<{ proposal: SkillProposal; staged: boolean }> {
+    const existingIds = new Set((await this.listPending()).map((proposal) => proposal.id));
     const proposal = await this.stageProposal(operations, sourceSessionId);
-    if (proposal.operations[0]?.action !== "create") return { proposal };
-    return { proposal, result: await this.approveProposal(proposal.id, origin) };
+    return { proposal, staged: !existingIds.has(proposal.id) };
   }
 
   async listPending(): Promise<SkillProposal[]> {
@@ -289,26 +417,49 @@ export class ProjectSkillStore {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const value = await this.readJson(join(this.pendingDir, entry.name));
       if (!isRecord(value) || value.version !== SKILL_STORE_VERSION || !Array.isArray(value.operations)) continue;
-      proposals.push({
-        version: SKILL_STORE_VERSION,
-        id: String(value.id || entry.name.slice(0, -5)),
-        createdAt: typeof value.createdAt === "string" ? value.createdAt : this.timestamp(),
-        ...(typeof value.sourceSessionId === "string" ? { sourceSessionId: value.sourceSessionId } : {}),
-        operations: value.operations.map((operation) => this.validateOperation(operation as SkillOperation)),
-      });
+      const filenameId = validateProposalId(entry.name.slice(0, -5));
+      proposals.push(this.parseProposal(value, filenameId));
     }
     return proposals.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async pendingIndex(): Promise<string> {
+    const pending = await this.listPending();
+    if (pending.length === 0) return "(no pending project skill proposals)";
+    const lines: string[] = [];
+    let chars = 0;
+    for (const proposal of pending) {
+      const operation = proposal.operations[0];
+      const line = `- ${proposal.id}: ${operation?.action ?? "empty"} ${operation?.name ?? ""}`;
+      if (chars + line.length + 1 > MAX_SKILL_INDEX_CHARS) {
+        lines.push(`[TRUNCATED: ${pending.length - lines.length} more proposals]`);
+        break;
+      }
+      lines.push(line);
+      chars += line.length + 1;
+    }
+    return lines.join("\n");
   }
 
   async approveProposal(id: string, origin: SkillWriteOrigin = "background_review"): Promise<SkillMutationResult> {
     const safeId = validateProposalId(id);
     return this.withLock(async () => {
       const path = join(this.pendingDir, `${safeId}.json`);
-      const proposal = await this.readProposal(path);
+      const proposal = await this.readProposal(path, safeId);
       const operation = proposal.operations[0];
       if (!operation) {
         await unlink(path);
         return { changed: false, message: `Skill proposal '${safeId}' was empty.` };
+      }
+      if (proposal.retention && operation.action === "archive") {
+        const skill = await this.loadSkill(operation.name);
+        const completedCount = await this.activity.completedCount();
+        const baseline = Math.max(skill.createdSession, skill.lastUsedSession ?? 0, skill.lastRetentionSession ?? 0);
+        const threshold = proposal.retentionAfterSessions ?? DEFAULT_SKILL_RETENTION_SESSIONS;
+        if (completedCount - baseline < threshold) {
+          await unlink(path);
+          return { changed: false, message: `Skill '${skill.name}' is no longer stale; discarded retention proposal.` };
+        }
       }
       const result = await this.applyOperation(operation, origin, safeId);
       if (result.changed) await unlink(path);
@@ -319,7 +470,19 @@ export class ProjectSkillStore {
   async rejectProposal(id: string): Promise<void> {
     const safeId = validateProposalId(id);
     await this.withLock(async () => {
-      await unlink(join(this.pendingDir, `${safeId}.json`));
+      const path = join(this.pendingDir, `${safeId}.json`);
+      const proposal = await this.readProposal(path, safeId);
+      const operation = proposal.operations[0];
+      if (proposal.retention && operation?.action === "archive") {
+        const skill = await this.loadSkill(operation.name);
+        const completedCount = await this.activity.completedCount();
+        await this.atomicWrite(join(this.skillsDir, skill.name, SKILL_FILE), renderSkillFile({
+          ...skill,
+          lastRetentionSession: completedCount,
+          lastRetentionAt: this.timestamp(),
+        }));
+      }
+      await unlink(path);
     });
   }
 
@@ -371,12 +534,40 @@ export class ProjectSkillStore {
     });
   }
 
+  private createProposal(
+    operations: SkillOperation[],
+    sourceSessionId?: string,
+    retention = false,
+    retentionSession?: number,
+    retentionAfterSessions?: number,
+  ): SkillProposal {
+    if (operations.length > 1) throw new Error("A self-forming skill review may stage one operation at a time.");
+    const normalized = operations.map((operation) => this.validateOperation(operation));
+    return {
+      version: SKILL_STORE_VERSION,
+      id: `${this.timestamp().replace(/[^0-9]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`,
+      createdAt: this.timestamp(),
+      ...(sourceSessionId ? { sourceSessionId } : {}),
+      ...(retention ? { retention: true } : {}),
+      ...(retentionSession !== undefined ? { retentionSession } : {}),
+      ...(retentionAfterSessions !== undefined ? { retentionAfterSessions } : {}),
+      operations: normalized,
+    };
+  }
+
   private validateOperation(operation: SkillOperation): SkillOperation {
     if (!operation || typeof operation !== "object") throw new Error("Invalid skill operation.");
     const name = validateSkillName(operation.name);
+    const metadata = {
+      ...(operation.reason !== undefined ? { reason: validateSkillMetadataText(operation.reason) } : {}),
+      ...(operation.evidence !== undefined ? {
+        evidence: operation.evidence.slice(0, 8).map((item) => validateSkillMetadataText(item)),
+      } : {}),
+    };
     if (operation.action === "create") {
       return {
         ...operation,
+        ...metadata,
         action: "create",
         name,
         description: validateSkillDescription(operation.description || ""),
@@ -388,9 +579,9 @@ export class ProjectSkillStore {
       if (!oldText.trim()) throw new Error("Skill patch requires oldText.");
       const newText = operation.newText ?? "";
       if (newText) validateSkillContent(newText);
-      return { ...operation, action: "patch", name, oldText, newText };
+      return { ...operation, ...metadata, action: "patch", name, oldText, newText };
     }
-    if (operation.action === "archive") return { ...operation, action: "archive", name };
+    if (operation.action === "archive") return { ...operation, ...metadata, action: "archive", name };
     throw new Error("Unknown skill operation.");
   }
 
@@ -400,8 +591,10 @@ export class ProjectSkillStore {
     if (validated.action === "create") {
       const path = join(this.skillsDir, validated.name, SKILL_FILE);
       if (await this.exists(path)) throw new Error(`Skill '${validated.name}' already exists.`);
+      const completedCount = await this.activity.completedCount();
       const skill: ProjectSkill = {
         name: validated.name,
+        generationId: randomUUID(),
         description: validated.description!,
         content: validated.content!,
         createdAt: timestamp,
@@ -410,8 +603,10 @@ export class ProjectSkillStore {
         updatedBy: origin,
         state: "active",
         useCount: 0,
+        useSessionCount: 0,
         viewCount: 0,
         patchCount: 0,
+        createdSession: completedCount,
       };
       await this.atomicWrite(path, renderSkillFile(skill));
       return { changed: true, message: `Created project skill '${skill.name}'.`, skill };
@@ -446,28 +641,71 @@ export class ProjectSkillStore {
     await this.atomicWrite(join(this.revisionsDir, proposalId, skill.name, SKILL_FILE), renderSkillFile(skill));
   }
 
-  private async touchUsage(name: string, kind: "view" | "use"): Promise<void> {
-    await this.withLock(async () => {
-      const skill = await this.loadSkill(name);
-      const timestamp = this.timestamp();
-      const next = {
-        ...skill,
-        ...(kind === "view" ? { viewCount: skill.viewCount + 1, lastViewedAt: timestamp } : { useCount: skill.useCount + 1, lastUsedAt: timestamp }),
-      } satisfies ProjectSkill;
-      await this.atomicWrite(join(this.skillsDir, name, SKILL_FILE), renderSkillFile(next));
+  private async touchUsage(name: string, kind: "view" | "use", sessionId?: string): Promise<SkillUseResult> {
+    return this.withLock(async () => {
+      const skill = await this.loadStoredSkill(name);
+      if (kind === "view") {
+        await this.atomicWrite(join(this.skillsDir, name, SKILL_FILE), renderSkillFile({
+          ...skill,
+          viewCount: skill.viewCount + 1,
+          lastViewedAt: this.timestamp(),
+        }));
+        return { withdrawnRetentionProposals: 0 };
+      }
+      if (!sessionId) throw new Error("Project skill use requires a tracked session.");
+      await this.activity.recordUse(sessionId, skill.generationId);
+      let withdrawnRetentionProposals = 0;
+      for (const proposal of await this.listPending()) {
+        if (!proposal.retention || proposal.operations[0]?.action !== "archive" || proposal.operations[0].name !== name) continue;
+        await unlink(join(this.pendingDir, `${proposal.id}.json`));
+        withdrawnRetentionProposals += 1;
+      }
+      return { withdrawnRetentionProposals };
     });
   }
 
-  private async readProposal(path: string): Promise<SkillProposal> {
-    const value = await this.readJson(path);
-    if (!isRecord(value) || value.version !== SKILL_STORE_VERSION || !Array.isArray(value.operations)) throw new Error("Invalid skill proposal.");
+  private parseProposal(value: Record<string, unknown>, expectedId: string): SkillProposal {
+    if (value.version !== SKILL_STORE_VERSION || !Array.isArray(value.operations)) throw new Error("Invalid skill proposal.");
+    const id = validateProposalId(typeof value.id === "string" ? value.id : expectedId);
+    if (id !== expectedId) throw new Error("Skill proposal id does not match its filename.");
     return {
       version: SKILL_STORE_VERSION,
-      id: typeof value.id === "string" ? value.id : "unknown",
+      id,
       createdAt: typeof value.createdAt === "string" ? value.createdAt : this.timestamp(),
       ...(typeof value.sourceSessionId === "string" ? { sourceSessionId: value.sourceSessionId } : {}),
+      ...(value.retention === true ? { retention: true } : {}),
+      ...(typeof value.retentionSession === "number" && Number.isInteger(value.retentionSession) && value.retentionSession >= 0 ? { retentionSession: value.retentionSession } : {}),
+      ...(typeof value.retentionAfterSessions === "number" && Number.isInteger(value.retentionAfterSessions) && value.retentionAfterSessions > 0 ? { retentionAfterSessions: value.retentionAfterSessions } : {}),
       operations: value.operations.map((operation) => this.validateOperation(operation as SkillOperation)),
     };
+  }
+
+  private async readProposal(path: string, expectedId: string): Promise<SkillProposal> {
+    const value = await this.readJson(path);
+    if (!isRecord(value)) throw new Error("Invalid skill proposal.");
+    return this.parseProposal(value, expectedId);
+  }
+
+  private async listStoredSkills(): Promise<ProjectSkill[]> {
+    const entries = await readdir(this.skillsDir, { withFileTypes: true });
+    const skills: ProjectSkill[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      try {
+        skills.push(await this.loadStoredSkill(entry.name));
+      } catch {
+        // Invalid packages remain invisible and fail closed when addressed directly.
+      }
+    }
+    return skills.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private async loadStoredSkill(name: string): Promise<ProjectSkill> {
+    const normalized = validateSkillName(name);
+    const path = join(this.skillsDir, normalized, SKILL_FILE);
+    const skill = parseSkillFile(await readFile(path, "utf8"), normalized, this.timestamp());
+    if (skill.name !== normalized) throw new Error(`Skill package name mismatch: expected '${normalized}'.`);
+    return skill;
   }
 
   private timestamp(): string {
@@ -475,24 +713,17 @@ export class ProjectSkillStore {
   }
 
   private async readJson(path: string): Promise<unknown> {
+    const info = await stat(path);
+    if (info.size > MAX_SKILL_JSON_BYTES) throw new Error(`Project skill JSON exceeds ${MAX_SKILL_JSON_BYTES} bytes: ${path}`);
     return JSON.parse(await readFile(path, "utf8")) as unknown;
   }
 
   private async atomicWrite(path: string, value: unknown): Promise<void> {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      const file = await open(temporary, "wx", 0o600);
-      try {
-        await file.writeFile(typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`, "utf8");
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      await rename(temporary, path);
-    } finally {
-      await unlink(temporary).catch(() => undefined);
+    const serialized = typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > MAX_SKILL_JSON_BYTES) {
+      throw new Error(`Project skill write exceeds ${MAX_SKILL_JSON_BYTES} bytes: ${path}`);
     }
+    await atomicWriteFile(path, serialized);
   }
 
   private async exists(path: string): Promise<boolean> {
@@ -506,34 +737,6 @@ export class ProjectSkillStore {
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    await mkdir(dirname(this.lockPath), { recursive: true, mode: 0o700 });
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    const owner = `${process.pid}:${randomUUID()}`;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-    while (!handle) {
-      try {
-        handle = await open(this.lockPath, "wx", 0o600);
-        await handle.writeFile(`${owner}\n${Date.now()}\n`, "utf8");
-      } catch (error) {
-        if (handle) await handle.close().catch(() => undefined);
-        handle = undefined;
-        if (!isErrno(error, "EEXIST")) throw error;
-        try {
-          const info = await stat(this.lockPath);
-          if (Date.now() - info.mtimeMs > LOCK_STALE_MS) await unlink(this.lockPath).catch(() => undefined);
-        } catch (statError) {
-          if (!isErrno(statError, "ENOENT")) throw statError;
-        }
-        if (Date.now() >= deadline) throw new Error(`Timed out waiting for project skill lock: ${this.lockPath}`);
-        await new Promise((resolve) => setTimeout(resolve, 25 + Math.floor(Math.random() * 25)));
-      }
-    }
-    try {
-      return await fn();
-    } finally {
-      await handle.close().catch(() => undefined);
-      const current = await readFile(this.lockPath, "utf8").catch(() => "");
-      if (current.startsWith(`${owner}\n`)) await unlink(this.lockPath).catch(() => undefined);
-    }
+    return withFileLock(this.lockPath, LOCK_TIMEOUT_MS, LOCK_STALE_MS, "project skill", fn);
   }
 }
