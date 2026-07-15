@@ -386,7 +386,13 @@ export function activateProjectMemoryExtension(
         if (!claimed || controller.signal.aborted) return;
         reviewTimeout = setTimeout(() => controller.abort(), dependencies.reviewTimeoutMs);
         const branch = await memoryStore.loadBranch(reviewBranchName);
-        const plan = await dependencies.requestReviewPlan(ctx, branch, controller.signal, reviewAfterEntryId);
+        const plan = await dependencies.requestReviewPlan(
+          ctx,
+          branch,
+          controller.signal,
+          reviewAfterEntryId,
+          memoryStore.maxChars,
+        );
         const proposal = await memoryStore.stageReviewProposal(
           reviewBranchName,
           plan.operations,

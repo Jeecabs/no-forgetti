@@ -3,7 +3,13 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 
 import { memoryCharCount } from "./context.ts";
 import { safeContextText } from "./security.ts";
-import type { MemoryBranch, MemoryOperation, ReviewPlan } from "./types.ts";
+import {
+  DEFAULT_MAX_CHARS,
+  MEMORY_REFINEMENT_TARGET_RATIO,
+  type MemoryBranch,
+  type MemoryOperation,
+  type ReviewPlan,
+} from "./types.ts";
 
 const MAX_TRANSCRIPT_CHARS = 32_000;
 
@@ -92,7 +98,14 @@ export function parseReviewPlan(raw: string): ReviewPlan {
   return { operations };
 }
 
-export function buildReviewPrompt(branch: MemoryBranch, transcript: string): string {
+export function buildReviewPrompt(
+  branch: MemoryBranch,
+  transcript: string,
+  maxChars = DEFAULT_MAX_CHARS,
+): string {
+  const usedChars = memoryCharCount(branch);
+  const refinementTarget = Math.max(1, Math.floor(maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
+  const refinementRequired = usedChars >= refinementTarget;
   const current = branch.entries.length
     ? branch.entries.map((entry) => `- ${safeContextText(entry.text)}`).join("\n")
     : "(empty)";
@@ -108,12 +121,18 @@ export function buildReviewPrompt(branch: MemoryBranch, transcript: string): str
     "- non-obvious fixes or tool quirks that are still likely true next week",
     "",
     "Do not save task progress, completed-work logs, temporary paths, issue/PR numbers, commit hashes, raw output, secrets, or facts already obvious from checked-in context files.",
-    "Memory is a fixed-size evolving state, not an append-only log. Merge overlapping facts, replace stale facts, and remove low-value facts as better knowledge arrives.",
-    "The operation batch is atomic and checked against the final size, so remove/replace/add can consolidate a full memory in one response.",
-    "Write compact declarative facts, not instructions. Use at most 4 operations. If nothing durable emerged, return {\"operations\":[]}.",
+    "Memory is a bounded evolving state, not an append-only log.",
+    `HARD LIMIT: ${maxChars} characters. WORKING TARGET: ${refinementTarget} characters. Current usage: ${usedChars} characters.`,
+    `If the proposed final state would exceed ${refinementTarget} characters, consolidate in the same atomic batch before adding. Never exceed the hard limit.`,
+    "Refine in this order: remove facts duplicated in checked-in docs; remove stale or low-value facts; merge overlapping entries; shorten verbose entries without losing independent high-value facts.",
+    ...(refinementRequired ? [
+      `REFINEMENT REQUIRED: current memory has reached the ${refinementTarget}-character working target. Do not return an add-only batch; use replace/remove operations to bring it below the target.`,
+    ] : []),
+    "The operation batch is atomic and checked against final size, so remove/replace/add can refine full memory in one response.",
+    "Write compact declarative facts, not instructions. Use at most 4 operations. If nothing durable emerged and refinement is not required, return {\"operations\":[]}.",
     "For replace/remove, oldText must be a unique substring of one existing entry.",
     "",
-    `CURRENT MEMORY BRANCH (${branch.name}, ${memoryCharCount(branch)} characters used):`,
+    `CURRENT MEMORY BRANCH (${branch.name}, ${usedChars} characters used):`,
     current,
     "",
     "RECENT CONVERSATION:",
@@ -126,6 +145,7 @@ export async function requestReviewPlan(
   branch: MemoryBranch,
   signal?: AbortSignal,
   afterEntryId?: string,
+  maxChars = DEFAULT_MAX_CHARS,
 ): Promise<ReviewPlan> {
   if (!ctx.model) throw new Error("No active model is available for memory review.");
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
@@ -135,7 +155,7 @@ export async function requestReviewPlan(
   const transcript = buildReviewTranscript(ctx.sessionManager.getBranch(), afterEntryId);
   const message: Message = {
     role: "user",
-    content: [{ type: "text", text: buildReviewPrompt(branch, transcript) }],
+    content: [{ type: "text", text: buildReviewPrompt(branch, transcript, maxChars) }],
     timestamp: Date.now(),
   };
   const response = await complete(

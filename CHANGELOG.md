@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Expand project memory's hard limit from 2,200 to 4,000 characters.
+- Start review-driven refinement at a 3,000-character working target and give the reviewer exact capacity guidance.
+
 ## 0.1.0 — 2026-07-15
 
 - Add project-scoped bounded memory.

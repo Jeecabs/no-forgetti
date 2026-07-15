@@ -52,6 +52,17 @@ test("adds, deduplicates, replaces, and removes entries", async (t) => {
   assert.equal(removed.branch.entries.length, 0);
 });
 
+test("default capacity accepts memory beyond the old 2,200-character limit", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  await store.applyOperation("main", { action: "add", content: "a".repeat(800) });
+  await store.applyOperation("main", { action: "add", content: "b".repeat(800) });
+  await store.applyOperation("main", { action: "add", content: "c".repeat(800) });
+  assert.equal(store.maxChars, 4_000);
+  assert.equal((await store.loadBranch("main")).entries.length, 3);
+});
+
 test("requires unique substring and enforces capacity", async (t) => {
   const { base, store } = await fixture({ maxChars: 45 });
   t.after(() => rm(base, { recursive: true, force: true }));

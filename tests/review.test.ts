@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { formatMemoryContext } from "../src/context.ts";
 import { scoreMemorySignal } from "../src/heuristics.ts";
-import { buildReviewTranscript, parseReviewPlan } from "../src/review.ts";
+import { buildReviewPrompt, buildReviewTranscript, parseReviewPlan } from "../src/review.ts";
 import { validateMemoryText } from "../src/security.ts";
 import type { MemoryBranch } from "../src/types.ts";
 
@@ -31,6 +31,24 @@ test("parses plain and fenced review JSON", () => {
     parseReviewPlan('```json\n{"operations":[{"action":"remove","oldText":"strict"}]}\n```'),
     { operations: [{ action: "remove", oldText: "strict" }] },
   );
+});
+
+test("review prompt exposes hard capacity and an earlier refinement target", () => {
+  const prompt = buildReviewPrompt(branch, "USER: Durable correction.", 4_000);
+  assert.match(prompt, /HARD LIMIT: 4000 characters/u);
+  assert.match(prompt, /WORKING TARGET: 3000 characters/u);
+  assert.match(prompt, /Current usage: 26 characters/u);
+  assert.match(prompt, /If the proposed final state would exceed 3000 characters/u);
+});
+
+test("review prompt requires refinement once the working target is reached", () => {
+  const fullBranch: MemoryBranch = {
+    ...branch,
+    entries: [{ ...branch.entries[0]!, text: "x".repeat(3_000) }],
+  };
+  const prompt = buildReviewPrompt(fullBranch, "", 4_000);
+  assert.match(prompt, /REFINEMENT REQUIRED/u);
+  assert.match(prompt, /Do not return an add-only batch/u);
 });
 
 test("review transcript strips tool arguments and results", () => {

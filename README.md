@@ -20,8 +20,8 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 ## Design boundary
 
 - **Learning** happens only after a successfully completed turn: propose compact additions, replacements, or removals from recent conversation evidence.
-- **Maintenance** happens inside that same atomic mutation when necessary: overlapping or stale facts are consolidated to stay within the fixed budget.
-- No scheduled curator is needed for a 2,200-character memory state. Project skills have approval, revisions, usage tracking, and reviewable retention archives after 20 inactive sessions.
+- **Maintenance** happens inside that same atomic mutation. The reviewer starts consolidating at a 3,000-character working target, before memory reaches its 4,000-character hard limit.
+- No separate scheduled curator is needed. Every review receives exact usage, target, and limit values, then removes documented, stale, or low-value facts before merging overlaps and shortening prose. Project skills have approval, revisions, usage tracking, and reviewable retention archives after 20 inactive sessions.
 - Project skills are deliberately not Pi resources: generated names do not enter the slash-command namespace. The `project_skill` tool fetches one relevant skill on demand.
 - Durable state intentionally lives outside the repository, so memory creates no project-file churn. Session custom entries store only the selected memory branch.
 - The complete bounded memory snapshot is injected as stable context. Project skills use bounded per-turn lexical retrieval from the user prompt, with at most two matched playbooks and 12,000 injected skill characters.
@@ -91,7 +91,7 @@ pi install .
 - `replace(oldText, content)`
 - `remove(oldText)`
 
-`oldText` is a unique substring, not an entry ID. Memory is a fixed evolving state bounded to 2,200 total characters and 800 characters per entry. Exact duplicates are ignored. Review changes apply as one atomic batch against the final size, allowing stale entries to be removed or merged before better facts are added. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next approved review that changes memory. Entries record whether their latest write came from the foreground assistant tool or an approved background-review proposal. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
+`oldText` is a unique substring, not an entry ID. Memory is a bounded evolving state with a 3,000-character working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Once memory reaches the working target, reviews must include consolidation rather than an add-only batch. Review changes apply as one atomic batch against the final size, allowing stale entries to be removed or merged before better facts are added. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next approved review that changes memory. Entries record whether their latest write came from the foreground assistant tool or an approved background-review proposal. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
 
 ## Commands
 
