@@ -75,6 +75,15 @@ test("patches with a unique match, keeps a revision, and rejects ambiguous patch
   assert.match((await store.loadSkill("verification")).content, /typecheck/u);
   assert.match(await readFile(join(store.revisionsDir, patch.id, "verification", "SKILL.md"), "utf8"), /canonical check/u);
 
+  const deletion = await store.stageProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: " and typecheck",
+    newText: "",
+  }]);
+  await store.approveProposal(deletion.id);
+  assert.doesNotMatch((await store.loadSkill("verification")).content, /typecheck/u);
+
   const ambiguous = await store.stageProposal([{
     action: "patch",
     name: "verification",
