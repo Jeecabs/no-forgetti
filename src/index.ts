@@ -1,8 +1,8 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { TextContent } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { formatMemoryContext, memoryCharCount } from "./context.ts";
@@ -13,6 +13,8 @@ import { safeContextText } from "./security.ts";
 import { requestReviewPlan } from "./review.ts";
 import { requestSkillReviewPlan } from "./skill-review.ts";
 import { ProjectSkillStore } from "./skill-store.ts";
+import { showSkillPicker, showSkillViewer } from "./skill-ui.ts";
+import type { SkillProposal } from "./skill-types.ts";
 import {
   ACTIVE_MEMORY_ENTRY,
   REVIEW_CURSOR_ENTRY,
@@ -70,6 +72,19 @@ function errorMessage(error: unknown): string {
 function formatBranch(branch: MemoryBranch): string {
   if (branch.entries.length === 0) return `(project memory '${branch.name}' is empty)`;
   return branch.entries.map((entry, index) => `${index + 1}. ${safeContextText(entry.text)}`).join("\n");
+}
+
+function formatSkillProposal(proposal: SkillProposal): string {
+  const operation = proposal.operations[0];
+  if (!operation) return `proposal: ${proposal.id}\n(empty)`;
+  return [
+    `proposal: ${proposal.id}`,
+    `action: ${operation.action}`,
+    `skill: ${operation.name}`,
+    ...(operation.reason ? [`reason: ${operation.reason}`] : []),
+    ...(operation.evidence?.length ? [`evidence:\n${operation.evidence.join("\n")}`] : []),
+    ...(operation.action === "patch" ? [`--- old ---\n${operation.oldText}\n--- new ---\n${operation.newText}`] : []),
+  ].join("\n\n");
 }
 
 function toolDetails(action: MemoryAction, result: MutationResult, store: ProjectMemoryStore): MemoryToolDetails {
@@ -242,7 +257,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
             if (ctx.hasUI) ctx.ui.notify(`Project skill review auto-approved '${operation.name}': ${submission.result.message}`, "info");
           } else if (ctx.hasUI) {
             ctx.ui.notify(
-              `Project skill review staged ${operation.action} '${operation.name}'. Approve with /project-skills approve ${submission.proposal.id}`,
+              `Project skill review staged ${operation.action} '${operation.name}'. Inspect with /project-skills pending ${submission.proposal.id}`,
               "info",
             );
           }
@@ -315,6 +330,71 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       }
     })();
     return reviewPromise;
+  }
+
+  async function editProjectSkill(name: string, ctx: ExtensionCommandContext): Promise<boolean> {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("Skill editing requires an interactive UI.", "warning");
+      return false;
+    }
+    await ctx.waitForIdle();
+    await skillReviewPromise?.catch(() => undefined);
+    const projectSkills = requireSkillStore();
+    const skill = await projectSkills.loadSkill(name);
+    const edited = await ctx.ui.editor(`Edit project skill: ${skill.name}`, skill.content);
+    if (edited === undefined) return false;
+    if (edited === skill.content) {
+      ctx.ui.notify(`No changes to '${skill.name}'.`, "info");
+      return false;
+    }
+    const confirmed = await ctx.ui.confirm(
+      `Save project skill '${skill.name}'?`,
+      `${skill.content.length} → ${edited.length} characters. A revision snapshot will be created.`,
+    );
+    if (!confirmed) {
+      ctx.ui.notify(`Discarded changes to '${skill.name}'.`, "info");
+      return false;
+    }
+    const proposal = await projectSkills.stageProposal([{
+      action: "patch",
+      name: skill.name,
+      oldText: skill.content,
+      newText: edited,
+      reason: "Foreground project-skill edit.",
+    }], ctx.sessionManager.getSessionId());
+    const result = await projectSkills.approveProposal(proposal.id, "foreground");
+    ctx.ui.notify(result.message, result.changed ? "info" : "warning");
+    return result.changed;
+  }
+
+  async function browseProjectSkills(ctx: ExtensionCommandContext): Promise<void> {
+    const projectSkills = requireSkillStore();
+    if (ctx.mode !== "tui") {
+      if (ctx.hasUI) ctx.ui.notify(await projectSkills.skillIndex(), "info");
+      return;
+    }
+    let selected: string | undefined;
+    while (true) {
+      const skills = await projectSkills.listSkills();
+      if (skills.length === 0) {
+        ctx.ui.notify("No project skills yet.", "info");
+        return;
+      }
+      const choice = await showSkillPicker(ctx, skills, selected);
+      if (!choice) return;
+      selected = choice.name;
+      if (choice.action === "edit") {
+        await editProjectSkill(selected, ctx);
+        continue;
+      }
+      while (true) {
+        const skill = await projectSkills.viewSkill(selected);
+        const action = await showSkillViewer(ctx, skill, true);
+        if (action === "close") return;
+        if (action === "back") break;
+        await editProjectSkill(selected, ctx);
+      }
+    }
   }
 
   pi.registerTool({
@@ -410,6 +490,29 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       action: StringEnum(["list", "read", "view"] as const),
       name: Type.Optional(Type.String({ description: "Skill name for view" })),
     }),
+    renderCall(args, theme) {
+      const suffix = args.name ? ` ${args.name}` : "";
+      return new Text(
+        theme.fg("toolTitle", theme.bold(`${SKILL_TOOL_NAME} `)) + theme.fg("muted", `${args.action}${suffix}`),
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Loading project skills…"), 0, 0);
+      const details = result.details as { action?: string; name?: string } | undefined;
+      const content = result.content.find((part) => part.type === "text");
+      const text = content?.type === "text" ? content.text : "";
+      if (expanded && text) {
+        return details?.action === "list"
+          ? new Text(theme.fg("toolOutput", text), 0, 0)
+          : new Markdown(text, 0, 0, getMarkdownTheme());
+      }
+      const summary = details?.action === "list"
+        ? "Listed project skills"
+        : `Loaded project skill '${details?.name ?? "unknown"}'`;
+      return new Text(theme.fg("success", "✓ ") + theme.fg("muted", summary), 0, 0);
+    },
     async execute(_toolCallId, params) {
       const projectSkills = requireSkillStore();
       const details: { action: "list" | "read" | "view"; name: string } = {
@@ -475,38 +578,22 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       const projectSkills = requireSkillStore();
       const [subcommand = "list", value] = args.trim().split(/\s+/u).filter(Boolean);
       if (subcommand === "list") {
-        ctx.ui.notify(await projectSkills.skillIndex(), "info");
+        await browseProjectSkills(ctx);
         return;
       }
       if (subcommand === "view" || subcommand === "read") {
-        if (!value) return ctx.ui.notify("Usage: /project-skills view <name>", "warning");
+        if (!value) {
+          await browseProjectSkills(ctx);
+          return;
+        }
         const skill = await projectSkills.viewSkill(value);
-        ctx.ui.notify(`${skill.name}: ${skill.description}\n\n${skill.content}`, "info");
+        const action = await showSkillViewer(ctx, skill, false);
+        if (action === "edit") await editProjectSkill(skill.name, ctx);
         return;
       }
       if (subcommand === "edit") {
         if (!value) return ctx.ui.notify("Usage: /project-skills edit <name>", "warning");
-        if (!ctx.hasUI) return ctx.ui.notify("Skill editing requires an interactive UI.", "warning");
-        await ctx.waitForIdle();
-        await skillReviewPromise?.catch(() => undefined);
-        const skill = await projectSkills.loadSkill(value);
-        const edited = await ctx.ui.editor(`Edit project skill: ${skill.name}`, skill.content);
-        if (edited === undefined) return;
-        if (edited === skill.content) return ctx.ui.notify(`No changes to '${skill.name}'.`, "info");
-        const confirmed = await ctx.ui.confirm(
-          `Save project skill '${skill.name}'?`,
-          `${skill.content.length} → ${edited.length} characters. A revision snapshot will be created.`,
-        );
-        if (!confirmed) return ctx.ui.notify(`Discarded changes to '${skill.name}'.`, "info");
-        const proposal = await projectSkills.stageProposal([{
-          action: "patch",
-          name: skill.name,
-          oldText: skill.content,
-          newText: edited,
-          reason: "Foreground project-skill edit.",
-        }], ctx.sessionManager.getSessionId());
-        const result = await projectSkills.approveProposal(proposal.id, "foreground");
-        ctx.ui.notify(result.message, result.changed ? "info" : "warning");
+        await editProjectSkill(value, ctx);
         return;
       }
       if (subcommand === "pending") {
@@ -514,18 +601,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
         if (value) {
           const proposal = pending.find((item) => item.id === value);
           if (!proposal) return ctx.ui.notify(`No pending proposal '${value}'.`, "warning");
-          const operation = proposal.operations[0];
-          const detail = operation
-            ? [
-              `proposal: ${proposal.id}`,
-              `action: ${operation.action}`,
-              `skill: ${operation.name}`,
-              ...(operation.reason ? [`reason: ${operation.reason}`] : []),
-              ...(operation.evidence?.length ? [`evidence:\n${operation.evidence.join("\n")}`] : []),
-              ...(operation.action === "patch" ? [`--- old ---\n${operation.oldText}\n--- new ---\n${operation.newText}`] : []),
-            ].join("\n\n")
-            : `proposal: ${proposal.id}\n(empty)`;
-          ctx.ui.notify(detail, "info");
+          ctx.ui.notify(formatSkillProposal(proposal), "info");
           return;
         }
         ctx.ui.notify(
@@ -538,6 +614,15 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       }
       if (subcommand === "approve") {
         if (!value) return ctx.ui.notify("Usage: /project-skills approve <proposal-id>", "warning");
+        if (!ctx.hasUI) throw new Error("Project skill approval requires an interactive UI.");
+        const proposal = (await projectSkills.listPending()).find((item) => item.id === value);
+        if (!proposal) return ctx.ui.notify(`No pending proposal '${value}'.`, "warning");
+        const operation = proposal.operations[0];
+        const confirmed = await ctx.ui.confirm(
+          `Approve ${operation?.action ?? "empty"} '${operation?.name ?? value}'?`,
+          formatSkillProposal(proposal),
+        );
+        if (!confirmed) return;
         await ctx.waitForIdle();
         const result = await projectSkills.approveProposal(value);
         ctx.ui.notify(result.message, result.changed ? "info" : "warning");
@@ -545,6 +630,15 @@ export default function projectMemoryExtension(pi: ExtensionAPI): void {
       }
       if (subcommand === "reject") {
         if (!value) return ctx.ui.notify("Usage: /project-skills reject <proposal-id>", "warning");
+        if (!ctx.hasUI) throw new Error("Project skill rejection requires an interactive UI.");
+        const proposal = (await projectSkills.listPending()).find((item) => item.id === value);
+        if (!proposal) return ctx.ui.notify(`No pending proposal '${value}'.`, "warning");
+        const operation = proposal.operations[0];
+        const confirmed = await ctx.ui.confirm(
+          `Reject ${operation?.action ?? "empty"} '${operation?.name ?? value}'?`,
+          "This removes the pending proposal without changing the active skill.",
+        );
+        if (!confirmed) return;
         await ctx.waitForIdle();
         await projectSkills.rejectProposal(value);
         ctx.ui.notify(`Rejected project skill proposal '${value}'.`, "info");
