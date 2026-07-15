@@ -188,7 +188,7 @@ test("shutdown aborts and waits for an active review", async (t) => {
   const started = new Promise<void>((resolve) => { entered = resolve; });
   let reviewSignal: AbortSignal | undefined;
   const { context, extension, skillStore } = await fixture(t, {
-    requestReviewPlan: async (_ctx, _branch, signal) => {
+    requestReviewPlan: async (_ctx, { signal }) => {
       reviewSignal = signal;
       entered();
       return new Promise<never>((_resolve, reject) => {
