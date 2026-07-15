@@ -3,34 +3,50 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
+  "author": "Lachlan Jacobs",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
-  "description": "No Forgetti: project-scoped persistent memory for Pi with explicit memory branches.",
+  "description": "Project-scoped persistent memory and self-forming skills for Pi.",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "memory"
+    "memory",
+    "skills"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jeecabs/no-forgetti.git"
+  },
+  "homepage": "https://github.com/Jeecabs/no-forgetti#readme",
+  "bugs": {
+    "url": "https://github.com/Jeecabs/no-forgetti/issues"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/Jeecabs/no-forgetti/main/assets/no-forgetti-logo.jpg"
   },
   "files": [
     "src",
+    "assets",
     "README.md",
     "CHANGELOG.md",
+    "NOTICE.md",
+    "SECURITY.md",
     "LICENSE",
     "package.json"
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/*.test.ts"
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "prepack": "pnpm check && pnpm test"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",

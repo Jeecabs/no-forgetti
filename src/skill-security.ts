@@ -39,6 +39,22 @@ export function validateSkillDescription(description: string): string {
   return normalized;
 }
 
+export function validateSkillMetadataText(value: string, maxChars = 500): string {
+  const normalized = value.trim().replace(/\r\n/g, "\n");
+  if (!normalized) throw new Error("Skill proposal metadata cannot be empty.");
+  if (normalized.length > maxChars) throw new Error(`Skill proposal metadata exceeds ${maxChars} characters.`);
+  if (INVISIBLE_UNICODE.test(normalized) || UNSAFE_CONTROL.test(normalized)) {
+    throw new Error("Skill proposal metadata contains unsafe control characters.");
+  }
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    throw new Error("Skill proposal metadata looks like a credential or secret.");
+  }
+  if (HIJACK_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    throw new Error("Skill proposal metadata looks like prompt manipulation or unsafe context.");
+  }
+  return normalized;
+}
+
 export function validateSkillContent(content: string): string {
   const normalized = content.trim().replace(/\r\n/g, "\n");
   if (!normalized) throw new Error("Skill content cannot be empty.");

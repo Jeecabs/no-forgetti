@@ -1,4 +1,10 @@
 node_modules/
 .pnpm-store/
+.fallow/
+coverage/
+*.tgz
 *.log
+.env
+.env.*
+!.env.example
 .DS_Store

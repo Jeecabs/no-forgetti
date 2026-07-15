@@ -1,5 +1,5 @@
-// The `writing-great-skills` rite and its glossary, bundled verbatim as the
-// skill-maker's guidance. ENVIRONMENT adapts it to No Forgetti: every skill
+// Embedded `writing-great-skills` doctrine and glossary for the skill-maker.
+// ENVIRONMENT adapts it to No Forgetti: every skill
 // here is one self-contained SKILL.md, retrieved by lexical match, never a Pi
 // slash command — so the invocation, splitting, and sibling-file sections are
 // read for principle, not mechanics. The adapter states that positively so the

@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, readdir, stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+import { atomicWriteFile } from "./atomic-file.ts";
 import { memoryCharCount } from "./context.ts";
+import { withFileLock } from "./file-lock.ts";
 import { projectKey } from "./project.ts";
 import { validateMemoryText } from "./security.ts";
+import { optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
 import {
   DEFAULT_MAX_CHARS,
   DEFAULT_MAX_ENTRY_CHARS,
@@ -15,6 +18,7 @@ import {
   type MemoryBranch,
   type MemoryEntry,
   type MemoryOperation,
+  type MemoryReviewProposal,
   type MemoryWriteOrigin,
   type MutationResult,
   type ProjectMetadata,
@@ -41,6 +45,12 @@ function isErrno(error: unknown, code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateMemoryProposalId(id: string): string {
+  const normalized = id.trim();
+  if (!/^\d{14}-[0-9a-f]{8}$/u.test(normalized)) throw new Error("Invalid memory proposal id.");
+  return normalized;
 }
 
 function parseMemoryEntry(value: unknown): MemoryEntry {
@@ -83,26 +93,17 @@ function emptyReviewState(): ReviewState {
 }
 
 function parseReviewState(value: unknown): ReviewState {
-  if (!isRecord(value)) return emptyReviewState();
+  if (!isRecord(value)) throw new Error("Invalid memory review state.");
   if (value.version !== STORE_VERSION) throw new Error("Unsupported memory review state version.");
-  const count = typeof value.turnsSinceReview === "number" && Number.isFinite(value.turnsSinceReview)
-    ? Math.max(0, Math.floor(value.turnsSinceReview))
-    : 0;
-  const signalScore = typeof value.signalScore === "number" && Number.isFinite(value.signalScore)
-    ? Math.max(0, Math.floor(value.signalScore))
-    : 0;
-  const failures = typeof value.consecutiveFailures === "number" && Number.isFinite(value.consecutiveFailures)
-    ? Math.max(0, Math.floor(value.consecutiveFailures))
-    : 0;
   return {
     version: STORE_VERSION,
-    turnsSinceReview: count,
-    signalScore,
-    consecutiveFailures: failures,
-    ...(typeof value.lastReviewedAt === "string" ? { lastReviewedAt: value.lastReviewedAt } : {}),
-    ...(typeof value.lastAttemptAt === "string" ? { lastAttemptAt: value.lastAttemptAt } : {}),
-    ...(typeof value.nextAttemptAt === "string" ? { nextAttemptAt: value.nextAttemptAt } : {}),
-    ...(typeof value.inFlightUntil === "string" ? { inFlightUntil: value.inFlightUntil } : {}),
+    turnsSinceReview: requireNonnegativeInteger(value.turnsSinceReview, "memory review turn count"),
+    signalScore: requireNonnegativeInteger(value.signalScore, "memory review signal score"),
+    consecutiveFailures: requireNonnegativeInteger(value.consecutiveFailures, "memory review failure count"),
+    lastReviewedAt: optionalIsoTimestamp(value.lastReviewedAt, "memory review timestamp"),
+    lastAttemptAt: optionalIsoTimestamp(value.lastAttemptAt, "memory review attempt timestamp"),
+    nextAttemptAt: optionalIsoTimestamp(value.nextAttemptAt, "memory review retry timestamp"),
+    inFlightUntil: optionalIsoTimestamp(value.inFlightUntil, "memory review lease timestamp"),
   };
 }
 
@@ -114,10 +115,6 @@ export function projectStorageDir(projectRoot: string, storageRoot = defaultStor
   return join(storageRoot, "no-forgetti", projectKey(projectRoot));
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export class ProjectMemoryStore {
   readonly projectRoot: string;
   readonly projectKey: string;
@@ -127,6 +124,7 @@ export class ProjectMemoryStore {
 
   private readonly branchesDir: string;
   private readonly reviewsDir: string;
+  readonly memoryPendingDir: string;
   private readonly revisionsDir: string;
   private readonly metadataPath: string;
   private readonly lockPath: string;
@@ -139,6 +137,7 @@ export class ProjectMemoryStore {
     this.branchesDir = join(this.projectDir, "branches");
     this.reviewsDir = join(this.projectDir, "reviews");
     this.revisionsDir = join(this.projectDir, "revisions");
+    this.memoryPendingDir = join(this.projectDir, "memory-pending");
     this.metadataPath = join(this.projectDir, "project.json");
     this.lockPath = join(this.projectDir, ".lock");
     this.maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
@@ -151,6 +150,7 @@ export class ProjectMemoryStore {
     await mkdir(this.branchesDir, { recursive: true, mode: 0o700 });
     await mkdir(this.reviewsDir, { recursive: true, mode: 0o700 });
     await mkdir(this.revisionsDir, { recursive: true, mode: 0o700 });
+    await mkdir(this.memoryPendingDir, { recursive: true, mode: 0o700 });
     await this.withLock(async () => {
       const timestamp = this.timestamp();
       const metadata = await this.readJsonIfExists(this.metadataPath);
@@ -295,6 +295,76 @@ export class ProjectMemoryStore {
     });
   }
 
+  async stageReviewProposal(
+    name: string,
+    operations: MemoryOperation[],
+    sourceSessionId?: string,
+  ): Promise<MemoryReviewProposal | undefined> {
+    const branchName = this.validateBranchName(name);
+    if (operations.length === 0) return undefined;
+    return this.withLock(async () => {
+      const original = parseMemoryBranch(await this.readJson(this.branchPath(branchName)), branchName);
+      this.assertLoadedBranch(original);
+      let branch = original;
+      const normalized = operations.slice(0, 4).map((operation) => this.normalizeReviewOperation(operation));
+      for (const operation of normalized) branch = this.mutate(branch, operation, sourceSessionId, "background_review", false).branch;
+      this.assertCapacity(branch);
+
+      const existing = (await this.listPendingReviews()).find((proposal) => (
+        proposal.branch === branchName && JSON.stringify(proposal.operations) === JSON.stringify(normalized)
+      ));
+      if (existing) return existing;
+      const proposal: MemoryReviewProposal = {
+        version: STORE_VERSION,
+        id: `${this.timestamp().replace(/[^0-9]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`,
+        branch: branchName,
+        createdAt: this.timestamp(),
+        ...(sourceSessionId ? { sourceSessionId } : {}),
+        operations: normalized,
+      };
+      await this.atomicWrite(join(this.memoryPendingDir, `${proposal.id}.json`), proposal);
+      return proposal;
+    });
+  }
+
+  async listPendingReviews(): Promise<MemoryReviewProposal[]> {
+    const entries = await readdir(this.memoryPendingDir, { withFileTypes: true });
+    const proposals: MemoryReviewProposal[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const filenameId = validateMemoryProposalId(entry.name.slice(0, -5));
+      const value = await this.readJson(join(this.memoryPendingDir, entry.name));
+      if (!isRecord(value) || value.version !== STORE_VERSION || value.id !== filenameId || !Array.isArray(value.operations)) {
+        throw new Error("Invalid memory review proposal.");
+      }
+      proposals.push({
+        version: STORE_VERSION,
+        id: filenameId,
+        branch: this.validateBranchName(String(value.branch ?? "")),
+        createdAt: optionalIsoTimestamp(value.createdAt, "memory proposal timestamp") ?? this.timestamp(),
+        ...(typeof value.sourceSessionId === "string" ? { sourceSessionId: value.sourceSessionId } : {}),
+        operations: value.operations.map((operation) => this.normalizeReviewOperation(operation as MemoryOperation)),
+      });
+    }
+    return proposals.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async approveReviewProposal(id: string): Promise<MutationResult[]> {
+    const safeId = validateMemoryProposalId(id);
+    const proposal = (await this.listPendingReviews()).find((item) => item.id === safeId);
+    if (!proposal) throw new Error(`No pending memory proposal '${safeId}'.`);
+    const results = await this.applyOperations(proposal.branch, proposal.operations, proposal.sourceSessionId, "background_review");
+    if (!results.some((result) => result.message.startsWith("Review batch rejected;"))) {
+      await this.withLock(async () => unlink(join(this.memoryPendingDir, `${safeId}.json`)));
+    }
+    return results;
+  }
+
+  async rejectReviewProposal(id: string): Promise<void> {
+    const safeId = validateMemoryProposalId(id);
+    await this.withLock(async () => unlink(join(this.memoryPendingDir, `${safeId}.json`)));
+  }
+
   async undoReview(name: string): Promise<MutationResult> {
     const branchName = this.validateBranchName(name);
     return this.withLock(async () => {
@@ -356,6 +426,24 @@ export class ProjectMemoryStore {
       }
       await this.atomicWrite(path, state);
     });
+  }
+
+  private normalizeReviewOperation(operation: MemoryOperation): MemoryOperation {
+    if (!operation || typeof operation !== "object") throw new Error("Invalid memory review operation.");
+    if (operation.action === "add") {
+      return { action: "add", content: validateMemoryText(operation.content ?? "", this.maxEntryChars) };
+    }
+    if (operation.action === "replace") {
+      const oldText = (operation.oldText ?? "").trim();
+      if (!oldText || oldText.length > this.maxEntryChars) throw new Error("Invalid memory review replacement match.");
+      return { action: "replace", oldText, content: validateMemoryText(operation.content ?? "", this.maxEntryChars) };
+    }
+    if (operation.action === "remove") {
+      const oldText = (operation.oldText ?? "").trim();
+      if (!oldText || oldText.length > this.maxEntryChars) throw new Error("Invalid memory review removal match.");
+      return { action: "remove", oldText };
+    }
+    throw new Error("Invalid memory review operation action.");
   }
 
   private mutate(
@@ -472,34 +560,7 @@ export class ProjectMemoryStore {
   }
 
   private async atomicWrite(path: string, value: unknown): Promise<void> {
-    await mkdir(dirname(path), { recursive: true });
-    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      const file = await open(temporary, "wx", 0o600);
-      try {
-        await file.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          await rename(temporary, path);
-          const directory = await open(dirname(path), "r").catch(() => undefined);
-          if (directory) {
-            await directory.sync().catch(() => undefined);
-            await directory.close().catch(() => undefined);
-          }
-          break;
-        } catch (error) {
-          const transient = isErrno(error, "EPERM") || isErrno(error, "EBUSY") || isErrno(error, "EACCES");
-          if (!transient || attempt >= 4) throw error;
-          await wait(20 * (attempt + 1));
-        }
-      }
-    } finally {
-      await unlink(temporary).catch(() => undefined);
-    }
+    await atomicWriteFile(path, `${JSON.stringify(value, null, 2)}\n`);
   }
 
   private async exists(path: string): Promise<boolean> {
@@ -513,45 +574,6 @@ export class ProjectMemoryStore {
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    const ownerToken = `${process.pid}:${randomUUID()}`;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-
-    while (!handle) {
-      let candidate: Awaited<ReturnType<typeof open>> | undefined;
-      try {
-        candidate = await open(this.lockPath, "wx", 0o600);
-        await candidate.writeFile(`${ownerToken}\n${Date.now()}\n`, "utf8");
-        handle = candidate;
-      } catch (error) {
-        if (candidate) {
-          await candidate.close().catch(() => undefined);
-          await unlink(this.lockPath).catch(() => undefined);
-        }
-        if (!isErrno(error, "EEXIST")) throw error;
-        try {
-          const info = await stat(this.lockPath);
-          if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
-            await unlink(this.lockPath).catch(() => undefined);
-            continue;
-          }
-        } catch (statError) {
-          if (isErrno(statError, "ENOENT")) continue;
-          throw statError;
-        }
-        if (Date.now() >= deadline) throw new Error(`Timed out waiting for project memory lock: ${this.lockPath}`);
-        await wait(25 + Math.floor(Math.random() * 25));
-      }
-    }
-
-    try {
-      return await fn();
-    } finally {
-      await handle.close().catch(() => undefined);
-      const currentOwner = await readFile(this.lockPath, "utf8").catch(() => "");
-      if (currentOwner.startsWith(`${ownerToken}\n`)) {
-        await unlink(this.lockPath).catch(() => undefined);
-      }
-    }
+    return withFileLock(this.lockPath, LOCK_TIMEOUT_MS, LOCK_STALE_MS, "project memory", fn);
   }
 }

@@ -62,3 +62,12 @@ export interface MutationResult {
 export interface ReviewPlan {
   operations: MemoryOperation[];
 }
+
+export interface MemoryReviewProposal {
+  version: number;
+  id: string;
+  branch: string;
+  createdAt: string;
+  sourceSessionId?: string;
+  operations: MemoryOperation[];
+}

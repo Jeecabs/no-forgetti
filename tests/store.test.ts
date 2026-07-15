@@ -98,6 +98,24 @@ test("review batch consolidates atomically against final capacity", async (t) =>
   assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), ["Project commands use pnpm."]);
 });
 
+test("background memory reviews remain pending until explicit approval", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const proposal = await store.stageReviewProposal("main", [{ action: "add", content: "Tests run with pnpm test." }], "session-1");
+  assert.ok(proposal);
+  assert.equal((await store.loadBranch("main")).entries.length, 0);
+  assert.equal((await store.listPendingReviews()).length, 1);
+  const results = await store.approveReviewProposal(proposal.id);
+  assert.equal(results.some((result) => result.changed), true);
+  assert.equal((await store.loadBranch("main")).entries.length, 1);
+  assert.equal((await store.listPendingReviews()).length, 0);
+
+  const rejected = await store.stageReviewProposal("main", [{ action: "remove", oldText: "pnpm test" }], "session-2");
+  assert.ok(rejected);
+  await store.rejectReviewProposal(rejected.id);
+  assert.equal((await store.loadBranch("main")).entries.length, 1);
+});
+
 test("explicit memory fork copies then diverges", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
@@ -145,6 +163,13 @@ test("rejects oversized and future-version on-disk branches", async (t) => {
 
   await writeFile(path, JSON.stringify({ ...original, version: 999 }), "utf8");
   await assert.rejects(store.loadBranch("main"), /Unsupported memory branch version/u);
+});
+
+test("rejects malformed review state instead of resetting cadence", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await writeFile(join(store.projectDir, "reviews", "main.json"), "null\n");
+  await assert.rejects(store.recordUserTurn("main"), /Invalid memory review state/u);
 });
 
 test("refuses corrupt branch rather than overwriting it", async (t) => {

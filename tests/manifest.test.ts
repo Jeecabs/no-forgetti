@@ -20,12 +20,14 @@ test("package manifest exposes only the extension runtime surface", async () => 
   assert.deepEqual(manifest.pi?.extensions, ["./src/index.ts"]);
   assert.equal(manifest.dependencies, undefined);
   assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).sort(), [
+    "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-tui",
     "typebox",
   ]);
   assert.ok(manifest.files?.includes("src"));
+  assert.ok(manifest.files?.includes("assets"));
   assert.ok(manifest.files?.includes("LICENSE"));
   assert.ok(!manifest.files?.some((path) => path.includes("test")));
 });
