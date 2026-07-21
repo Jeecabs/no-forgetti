@@ -35,6 +35,24 @@ import {
 } from "./types.ts";
 
 const STATUS_KEY = "no-forgetti";
+const WIDGET_KEY = "no-forgetti";
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const BAR_CELLS = 4;
+const BAR_LEVELS = ["⣀", "⣤", "⣶", "⣿"] as const;
+
+type StateColor = "muted" | "warning" | "accent";
+
+/** 4-cell braille bar, 16 fill levels; filled cells take the state color, empty cells are dim. */
+function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used: number, max: number): string {
+  const steps = max > 0 ? Math.round(Math.min(1, used / max) * BAR_CELLS * BAR_LEVELS.length) : 0;
+  let bar = "";
+  for (let cell = 0; cell < BAR_CELLS; cell++) {
+    const fill = Math.min(BAR_LEVELS.length, Math.max(0, steps - cell * BAR_LEVELS.length));
+    bar += fill === 0 ? t.fg("dim", BAR_LEVELS[0]) : t.fg(color, BAR_LEVELS[fill - 1]);
+  }
+  return bar;
+}
+
 const TOOL_NAME = "project_memory";
 const SKILL_TOOL_NAME = "project_skill";
 const REVIEW_TIMEOUT_MS = 60_000;
@@ -204,16 +222,67 @@ export function activateProjectMemoryExtension(
     skillReviewCursorId = throughEntryId;
   }
 
+  let widgetShown: "review" | "pending" | undefined;
+
+  function refreshWidget(ctx: ExtensionContext): void {
+    const key = skillReviewRunning ? "review" : pendingSkillCount > 0 ? "pending" : undefined;
+    if (key === widgetShown) return;
+    widgetShown = key;
+    if (!key) {
+      ctx.ui.setWidget(WIDGET_KEY, undefined);
+      return;
+    }
+    ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
+      let frame = 0;
+      const timer =
+        key === "review"
+          ? setInterval(() => {
+              frame = (frame + 1) % SPINNER_FRAMES.length;
+              tui.requestRender();
+            }, 100)
+          : undefined;
+      return {
+        invalidate() {},
+        // Reads live closure state, so count changes render without re-setting the widget.
+        render() {
+          const rail = theme.fg("dim", "│ ");
+          const lines = [theme.fg("dim", "╭ no-forgetti")];
+          if (skillReviewRunning) {
+            lines.push(`${rail}${theme.fg("accent", SPINNER_FRAMES[frame] ?? "⠋")} ${theme.fg("muted", "reviewing skill proposals…")}`);
+          }
+          if (pendingSkillCount > 0) {
+            lines.push(`${rail}${theme.fg("muted", `pending:${pendingSkillCount} · /project-skills pending`)}`);
+          }
+          return lines;
+        },
+        dispose() {
+          if (timer) clearInterval(timer);
+        },
+      };
+    });
+  }
+
   function refreshStatus(ctx: ExtensionContext): void {
-    if (!ctx.hasUI || !store || !frozenBranch) return;
+    if (!ctx.hasUI) return;
+    refreshWidget(ctx);
+    if (!store || !frozenBranch) return;
     const t = ctx.ui.theme;
-    const color = snapshotDirty ? "warning" : "muted";
-    const pending = pendingSkillCount > 0 ? ` pending:${pendingSkillCount}` : "";
-    const reviewing = skillReviewRunning ? " reviewing" : "";
-    ctx.ui.setStatus(
-      STATUS_KEY,
-      `${t.fg(color, snapshotDirty ? "◆" : "◇")} ${t.fg("muted", `mem:${activeName} ${frozenBranch.entries.length} skills:${activeSkillCount}${pending}${reviewing}`)}`,
-    );
+    const entries = frozenBranch.entries.length;
+    const segs: string[] = [];
+    if (activeName !== MAIN_MEMORY || entries > 0) {
+      segs.push(activeName === MAIN_MEMORY ? `mem:${entries}` : `mem:${activeName}:${entries}`);
+    }
+    if (activeSkillCount > 0) segs.push(`skills:${activeSkillCount}`);
+    if (pendingSkillCount > 0) segs.push(`pending:${pendingSkillCount}`);
+    if (segs.length === 0 && !snapshotDirty && !skillReviewRunning) {
+      // ponytail: nothing to say — give the footer row back
+      ctx.ui.setStatus(STATUS_KEY, undefined);
+      return;
+    }
+    // Bar fill = memory capacity; bar color = state: dirty (writes not injected) > reviewing > clean.
+    const stateColor: StateColor = snapshotDirty ? "warning" : skillReviewRunning ? "accent" : "muted";
+    const bar = capacityBar(t, stateColor, memoryCharCount(frozenBranch), store.maxChars);
+    ctx.ui.setStatus(STATUS_KEY, `${bar} ${t.fg("muted", segs.join(" "))}`.trimEnd());
   }
 
   async function loadSessionMemory(ctx: ExtensionContext): Promise<void> {
