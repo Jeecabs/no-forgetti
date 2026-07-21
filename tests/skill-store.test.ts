@@ -39,7 +39,7 @@ test("stores project skills outside the repository and exposes them only on requ
   await assert.rejects(stat(join(project, "SKILL.md")));
 });
 
-test("generated skill creates remain pending until explicit approval", async (t) => {
+test("generated skill creates auto-approve while patches remain pending", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
   const submission = await store.submitProposal([{
@@ -48,18 +48,51 @@ test("generated skill creates remain pending until explicit approval", async (t)
     description: "Run the canonical project verification.",
     content: skillBody,
   }], "session-1");
-  const duplicate = await store.submitProposal([{
+  assert.equal(submission.proposal.operations.at(0)?.action, "create");
+  assert.equal(submission.staged, false);
+  assert.equal(submission.result?.changed, true);
+  assert.equal((await store.listSkills()).length, 1);
+  assert.equal((await store.listPending()).length, 0);
+
+  const patch = await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "canonical check",
+    newText: "canonical verification check",
+  }], "session-1");
+  assert.equal(patch.staged, true);
+  assert.equal(patch.result, undefined);
+  assert.equal((await store.listPending()).length, 1);
+});
+
+test("startup migration applies legacy pending creates but preserves patches", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  const active = await store.stageProposal([{
     action: "create",
     name: "verification",
     description: "Run the canonical project verification.",
     content: skillBody,
-  }], "session-1");
-  assert.equal(submission.proposal.operations[0]?.action, "create");
-  assert.equal(submission.staged, true);
-  assert.equal(duplicate.staged, false);
-  assert.equal(duplicate.proposal.id, submission.proposal.id);
-  assert.equal((await store.listSkills()).length, 0);
-  assert.equal((await store.listPending()).length, 1);
+  }]);
+  await store.approveProposal(active.id);
+  await store.stageProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "canonical check",
+    newText: "canonical verification check",
+  }]);
+  await store.stageProposal([{
+    action: "create",
+    name: "release-check",
+    description: "Verify a project release.",
+    content: skillBody,
+  }]);
+
+  const migration = await store.applyPendingCreates();
+  assert.deepEqual(migration, { applied: ["release-check"], retained: [] });
+  assert.equal((await store.loadSkill("release-check")).state, "active");
+  assert.equal((await store.listPending()).at(0)?.operations.at(0)?.action, "patch");
 });
 
 test("retrieves relevant skills by trigger terms and word variants", async (t) => {
@@ -159,7 +192,7 @@ test("tracks recalls across completed sessions and stages stale archives", async
   assert.deepEqual((await store.completeSession("session-3", 2)).proposals, []);
   await store.maintainSession("session-4");
   const maintenance = await store.completeSession("session-4", 2);
-  assert.equal(maintenance.proposals[0]?.operations[0]?.name, "verification");
+  assert.equal(maintenance.proposals.at(0)?.operations.at(0)?.name, "verification");
   assert.match(await store.usageReport(2), /2\/4 sessions.*50%.*stale/u);
 
   await rm(join(store.pendingDir, `${maintenance.proposals[0]!.id}.json`));

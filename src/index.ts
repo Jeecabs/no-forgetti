@@ -127,7 +127,7 @@ function formatMemoryProposal(proposal: MemoryReviewProposal): string {
 }
 
 function formatSkillProposal(proposal: SkillProposal): string {
-  const operation = proposal.operations[0];
+  const operation = proposal.operations.at(0);
   if (!operation) return `proposal: ${proposal.id}\n(empty)`;
   return [
     `proposal: ${proposal.id}`,
@@ -269,17 +269,15 @@ export function activateProjectMemoryExtension(
     const t = ctx.ui.theme;
     const entries = frozenBranch.entries.length;
     const segs: string[] = [];
-    if (activeName !== MAIN_MEMORY || entries > 0) {
-      segs.push(activeName === MAIN_MEMORY ? `mem:${entries}` : `mem:${activeName}:${entries}`);
-    }
     if (activeSkillCount > 0) segs.push(`skills:${activeSkillCount}`);
     if (pendingSkillCount > 0) segs.push(`pending:${pendingSkillCount}`);
-    if (segs.length === 0 && !snapshotDirty && !skillReviewRunning) {
+    if (entries === 0 && segs.length === 0 && !snapshotDirty && !skillReviewRunning) {
       // ponytail: nothing to say — give the footer row back
       ctx.ui.setStatus(STATUS_KEY, undefined);
       return;
     }
-    // Bar fill = memory capacity; bar color = state: dirty (writes not injected) > reviewing > clean.
+    // Bar already communicates memory presence/capacity; avoid repeating it as text.
+    // Bar color = state: dirty (writes not injected) > reviewing > clean.
     const stateColor: StateColor = snapshotDirty ? "warning" : skillReviewRunning ? "accent" : "muted";
     const bar = capacityBar(t, stateColor, memoryCharCount(frozenBranch), store.maxChars);
     ctx.ui.setStatus(STATUS_KEY, `${bar} ${t.fg("muted", segs.join(" "))}`.trimEnd());
@@ -312,12 +310,19 @@ export function activateProjectMemoryExtension(
     const nextSkillStore = dependencies.createSkillStore(projectRoot, nextStore.projectDir);
     try {
       await nextSkillStore.initialize();
+      const migration = await nextSkillStore.applyPendingCreates();
       const maintenance = await nextSkillStore.maintainSession(ctx.sessionManager.getSessionId());
       skillStore = nextSkillStore;
       activeSkillCount = (await nextSkillStore.listSkills()).length;
       pendingSkillCount = (await nextSkillStore.listPending()).length;
+      if (ctx.hasUI && migration.applied.length > 0) {
+        ctx.ui.notify(`Added pending project skills automatically: ${migration.applied.join(", ")}.`, "info");
+      }
+      if (ctx.hasUI && migration.retained.length > 0) {
+        ctx.ui.notify(`Could not safely add pending project skills: ${migration.retained.join(", ")}. They remain pending.`, "warning");
+      }
       if (maintenance.proposals.length > 0 && ctx.hasUI) {
-        const names = maintenance.proposals.map((proposal) => proposal.operations[0]?.name ?? "unknown");
+        const names = maintenance.proposals.map((proposal) => proposal.operations.at(0)?.name ?? "unknown");
         ctx.ui.notify(
           `Project skill retention staged ${maintenance.proposals.length} archive proposal(s): ${names.join(", ")}. Inspect with /project-skills pending.`,
           "info",
@@ -400,16 +405,21 @@ export function activateProjectMemoryExtension(
         reviewTimeout = setTimeout(() => controller.abort(), dependencies.reviewTimeoutMs);
         const plan = await dependencies.requestSkillReviewPlan(ctx, projectSkills, reviewAfterEntryId, controller.signal);
         if (plan.operations.length > 0) {
-          const operation = plan.operations[0]!;
+          const operation = plan.operations.at(0)!;
           const submission = await projectSkills.submitProposal(plan.operations, ctx.sessionManager.getSessionId());
-          if (submission.staged) pendingSkillCount += 1;
-          if (ctx.hasUI) {
-            ctx.ui.notify(
-              submission.staged
-                ? `Project skill review staged ${operation.action} '${operation.name}'. Inspect with /project-skills pending ${submission.proposal.id}`
-                : `Project skill review matched existing pending ${operation.action} '${operation.name}'.`,
-              "info",
-            );
+          if (submission.result) {
+            if (submission.result.changed) activeSkillCount += 1;
+            if (ctx.hasUI) ctx.ui.notify(`Project skill review added '${operation.name}' automatically.`, "info");
+          } else {
+            if (submission.staged) pendingSkillCount += 1;
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                submission.staged
+                  ? `Project skill review staged ${operation.action} '${operation.name}'. Inspect with /project-skills pending ${submission.proposal.id}`
+                  : `Project skill review matched existing pending ${operation.action} '${operation.name}'.`,
+                "info",
+              );
+            }
           }
         } else if (force && ctx.hasUI) {
           ctx.ui.notify("Project skill review: no reusable workflow change found.", "info");
@@ -748,7 +758,7 @@ export function activateProjectMemoryExtension(
         const items = pending.map((proposal) => ({
           value: `${action} ${proposal.id}`,
           label: proposal.id,
-          description: `${proposal.operations[0]?.action ?? "empty"} ${proposal.operations[0]?.name ?? ""}`,
+          description: `${proposal.operations.at(0)?.action ?? "empty"} ${proposal.operations.at(0)?.name ?? ""}`,
         }));
         const filtered = items.filter((item) => item.value.startsWith(normalized));
         return filtered.length ? filtered : null;
@@ -794,7 +804,7 @@ export function activateProjectMemoryExtension(
           ctx,
           pending.length === 0
             ? "No pending project skill proposals."
-            : pending.map((proposal) => `${proposal.id}: ${proposal.operations[0]?.action ?? "empty"} ${proposal.operations[0]?.name ?? ""}`).join("\n"),
+            : pending.map((proposal) => `${proposal.id}: ${proposal.operations.at(0)?.action ?? "empty"} ${proposal.operations.at(0)?.name ?? ""}`).join("\n"),
         );
         return;
       }
@@ -803,7 +813,7 @@ export function activateProjectMemoryExtension(
         if (!ctx.hasUI) throw new Error("Project skill approval requires an interactive UI.");
         const proposal = (await projectSkills.listPending()).find((item) => item.id === value);
         if (!proposal) return ctx.ui.notify(`No pending proposal '${value}'.`, "warning");
-        const operation = proposal.operations[0];
+        const operation = proposal.operations.at(0);
         const confirmed = await ctx.ui.confirm(
           `Approve ${operation?.action ?? "empty"} '${operation?.name ?? value}'?`,
           formatSkillProposal(proposal),
@@ -823,7 +833,7 @@ export function activateProjectMemoryExtension(
         if (!ctx.hasUI) throw new Error("Project skill rejection requires an interactive UI.");
         const proposal = (await projectSkills.listPending()).find((item) => item.id === value);
         if (!proposal) return ctx.ui.notify(`No pending proposal '${value}'.`, "warning");
-        const operation = proposal.operations[0];
+        const operation = proposal.operations.at(0);
         const confirmed = await ctx.ui.confirm(
           `Reject ${operation?.action ?? "empty"} '${operation?.name ?? value}'?`,
           proposal.retention
@@ -1043,7 +1053,7 @@ export function activateProjectMemoryExtension(
       if (maintenance.proposals.length === 0) return;
       pendingSkillCount += maintenance.proposals.length;
       if (ctx.hasUI) {
-        const names = maintenance.proposals.map((proposal) => proposal.operations[0]?.name ?? "unknown");
+        const names = maintenance.proposals.map((proposal) => proposal.operations.at(0)?.name ?? "unknown");
         ctx.ui.notify(`Project skill retention staged archive proposal(s): ${names.join(", ")}.`, "info");
       }
       refreshStatus(ctx);
