@@ -84,7 +84,10 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
     createSkillStore: () => skillStore,
     ...overrides,
   });
-  t.after(() => rm(base, { recursive: true, force: true }));
+  t.after(async () => {
+    await extension.emit("session_shutdown", {}, context);
+    await rm(base, { recursive: true, force: true });
+  });
   return { branch, context, extension, memoryStore, skillStore };
 }
 
@@ -108,6 +111,22 @@ test("registers lifecycle hooks and disables itself for companion agents", async
   assert.equal(companion.handlers.size, 0);
   assert.equal(companion.tools.size, 0);
   assert.equal(companion.commands.size, 0);
+});
+
+test("skill review automatically adds validated creates", async (t) => {
+  const { context, extension, skillStore } = await fixture(t, {
+    requestSkillReviewPlan: async () => ({ operations: [{
+      action: "create",
+      name: "release-check",
+      description: "Verify a project release.",
+      content: "# Release check\n\n## Steps\n\n1. Run release checks. Done when: all checks pass.",
+    }] }),
+  });
+  await extension.emit("session_start", {}, context);
+  await extension.command("project-skills", "review", context);
+
+  assert.equal((await skillStore.loadSkill("release-check")).state, "active");
+  assert.equal((await skillStore.listPending()).length, 0);
 });
 
 test("injects a recalled skill transiently and credits it only after successful settlement", async (t) => {

@@ -355,8 +355,8 @@ export class ProjectSkillStore {
       const skills = await this.listSkills();
       const pending = await this.listPending();
       const pendingArchives = new Set(pending
-        .filter((proposal) => proposal.operations[0]?.action === "archive")
-        .map((proposal) => proposal.operations[0]!.name));
+        .filter((proposal) => proposal.operations.at(0)?.action === "archive")
+        .map((proposal) => proposal.operations.at(0)!.name));
       const stale = skills
         .map((skill) => ({
           skill,
@@ -391,9 +391,9 @@ export class ProjectSkillStore {
   async stageProposal(operations: SkillOperation[], sourceSessionId?: string): Promise<SkillProposal> {
     const proposal = this.createProposal(operations, sourceSessionId);
     return this.withLock(async () => {
-      const operation = proposal.operations[0];
+      const operation = proposal.operations.at(0);
       const existing = (await this.listPending()).find((item) => (
-        item.operations[0]?.action === operation?.action && item.operations[0]?.name === operation?.name
+        item.operations.at(0)?.action === operation?.action && item.operations.at(0)?.name === operation?.name
       ));
       if (existing) return existing;
       await this.atomicWrite(join(this.pendingDir, `${proposal.id}.json`), proposal);
@@ -404,10 +404,37 @@ export class ProjectSkillStore {
   async submitProposal(
     operations: SkillOperation[],
     sourceSessionId?: string,
-  ): Promise<{ proposal: SkillProposal; staged: boolean }> {
+    origin: SkillWriteOrigin = "background_review",
+  ): Promise<{ proposal: SkillProposal; staged: boolean; result?: SkillMutationResult }> {
     const existingIds = new Set((await this.listPending()).map((proposal) => proposal.id));
     const proposal = await this.stageProposal(operations, sourceSessionId);
-    return { proposal, staged: !existingIds.has(proposal.id) };
+    if (proposal.operations.at(0)?.action !== "create") {
+      return { proposal, staged: !existingIds.has(proposal.id) };
+    }
+    return { proposal, staged: false, result: await this.approveProposal(proposal.id, origin) };
+  }
+
+  /**
+   * Repairs the explicit-approval regression shipped before creates became automatic.
+   * Older project stores may still contain valid create proposals, so startup applies
+   * those safely while leaving destructive patches, archives, and conflicts pending.
+   */
+  async applyPendingCreates(): Promise<{ applied: string[]; retained: string[] }> {
+    const applied: string[] = [];
+    const retained: string[] = [];
+    for (const proposal of await this.listPending()) {
+      const operation = proposal.operations.at(0);
+      if (operation?.action !== "create") continue;
+      try {
+        const result = await this.approveProposal(proposal.id, "background_review");
+        if (result.changed) applied.push(operation.name);
+        else retained.push(operation.name);
+      } catch {
+        // Conflicts or concurrent changes remain pending for explicit resolution.
+        retained.push(operation.name);
+      }
+    }
+    return { applied, retained };
   }
 
   async listPending(): Promise<SkillProposal[]> {
@@ -429,7 +456,7 @@ export class ProjectSkillStore {
     const lines: string[] = [];
     let chars = 0;
     for (const proposal of pending) {
-      const operation = proposal.operations[0];
+      const operation = proposal.operations.at(0);
       const line = `- ${proposal.id}: ${operation?.action ?? "empty"} ${operation?.name ?? ""}`;
       if (chars + line.length + 1 > MAX_SKILL_INDEX_CHARS) {
         lines.push(`[TRUNCATED: ${pending.length - lines.length} more proposals]`);
@@ -446,7 +473,7 @@ export class ProjectSkillStore {
     return this.withLock(async () => {
       const path = join(this.pendingDir, `${safeId}.json`);
       const proposal = await this.readProposal(path, safeId);
-      const operation = proposal.operations[0];
+      const operation = proposal.operations.at(0);
       if (!operation) {
         await unlink(path);
         return { changed: false, message: `Skill proposal '${safeId}' was empty.` };
@@ -472,7 +499,7 @@ export class ProjectSkillStore {
     await this.withLock(async () => {
       const path = join(this.pendingDir, `${safeId}.json`);
       const proposal = await this.readProposal(path, safeId);
-      const operation = proposal.operations[0];
+      const operation = proposal.operations.at(0);
       if (proposal.retention && operation?.action === "archive") {
         const skill = await this.loadSkill(operation.name);
         const completedCount = await this.activity.completedCount();
@@ -656,7 +683,8 @@ export class ProjectSkillStore {
       await this.activity.recordUse(sessionId, skill.generationId);
       let withdrawnRetentionProposals = 0;
       for (const proposal of await this.listPending()) {
-        if (!proposal.retention || proposal.operations[0]?.action !== "archive" || proposal.operations[0].name !== name) continue;
+        const operation = proposal.operations.at(0);
+        if (!proposal.retention || operation?.action !== "archive" || operation.name !== name) continue;
         await unlink(join(this.pendingDir, `${proposal.id}.json`));
         withdrawnRetentionProposals += 1;
       }
