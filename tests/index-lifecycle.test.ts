@@ -159,17 +159,18 @@ test("injects a recalled skill transiently and credits it only after successful 
   assert.equal(await skillStore.activity.completedCount(), 1);
 });
 
-test("shows recalled skill names in the status while they are in use", async (t) => {
-  const statuses: Array<string | undefined> = [];
+test("shows recalled skill names in the working callout while they are in use", async (t) => {
+  const workingMessages: Array<string | undefined> = [];
   const { branch, context, extension } = await fixture(t);
   Object.assign(context, {
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
     ui: {
       theme: { fg: (_color: string, text: string) => text },
       notify: () => undefined,
-      setStatus: (_key: string, value: string | undefined) => statuses.push(value),
+      setStatus: () => undefined,
       setWidget: () => undefined,
+      setWorkingMessage: (value?: string) => workingMessages.push(value),
     },
   });
   await extension.emit("session_start", {}, context);
@@ -180,11 +181,16 @@ test("shows recalled skill names in the status while they are in use", async (t)
     systemPrompt: "base prompt",
     prompt: "verify the canonical project checks",
   }, context);
-  assert.match(statuses.at(-1) ?? "", /using:verification/u);
+  assert.equal(workingMessages.at(-1), undefined);
+
+  await extension.emit("context", {
+    messages: [{ role: "user", content: "verify the canonical project checks" }],
+  }, context);
+  assert.match(workingMessages.at(-1) ?? "", /Using project skill: verification/u);
 
   await extension.emit("agent_end", { messages: [assistantMessage] }, context);
   await extension.emit("agent_settled", {}, context);
-  assert.doesNotMatch(statuses.at(-1) ?? "", /using:/u);
+  assert.equal(workingMessages.at(-1), undefined);
 });
 
 test("routes read-only command output in print and JSON modes", async (t) => {
