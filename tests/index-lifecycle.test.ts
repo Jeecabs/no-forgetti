@@ -159,6 +159,34 @@ test("injects a recalled skill transiently and credits it only after successful 
   assert.equal(await skillStore.activity.completedCount(), 1);
 });
 
+test("shows recalled skill names in the status while they are in use", async (t) => {
+  const statuses: Array<string | undefined> = [];
+  const { branch, context, extension } = await fixture(t);
+  Object.assign(context, {
+    hasUI: true,
+    mode: "interactive",
+    ui: {
+      theme: { fg: (_color: string, text: string) => text },
+      notify: () => undefined,
+      setStatus: (_key: string, value: string | undefined) => statuses.push(value),
+      setWidget: () => undefined,
+    },
+  });
+  await extension.emit("session_start", {}, context);
+  await extension.emit("input", { text: "verify the canonical project checks", source: "interactive" }, context);
+  branch.push(userEntry("user-status", "verify the canonical project checks"));
+
+  await extension.emit("before_agent_start", {
+    systemPrompt: "base prompt",
+    prompt: "verify the canonical project checks",
+  }, context);
+  assert.match(statuses.at(-1) ?? "", /using:verification/u);
+
+  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
+  await extension.emit("agent_settled", {}, context);
+  assert.doesNotMatch(statuses.at(-1) ?? "", /using:/u);
+});
+
 test("routes read-only command output in print and JSON modes", async (t) => {
   const output: string[] = [];
   const { context, extension } = await fixture(t, { writeCommandOutput: (text) => output.push(text) });
