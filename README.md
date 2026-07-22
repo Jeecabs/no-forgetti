@@ -20,8 +20,8 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 ## Design boundary
 
 - **Learning** happens only after a successfully completed turn: apply compact additions, replacements, or removals from recent conversation evidence.
-- **Maintenance** happens inside that same atomic mutation. The reviewer starts consolidating at a 3,000-character working target, before memory reaches its 4,000-character hard limit.
-- No separate scheduled curator is needed. Every review receives exact usage, target, and limit values, then removes documented, stale, or low-value facts before merging overlaps and shortening prose. Project skills have approval, revisions, usage tracking, and reviewable retention archives after 20 inactive sessions.
+- **Maintenance** happens inside that same atomic mutation. Below the 3,000-character working target, reviews cannot cross it; at or above it, every review must make net size progress toward it. The 4,000-character hard limit always applies.
+- No separate scheduled curator is needed. Every review receives exact usage, target, limit, and per-entry importance metadata, then removes contradicted/documented facts before merging overlaps and considering lower-value memories. Project skills have approval, revisions, usage tracking, and reviewable retention archives after 20 inactive sessions.
 - Project skills are deliberately not Pi resources: generated names do not enter the slash-command namespace. The `project_skill` tool fetches one relevant skill on demand.
 - Durable state intentionally lives outside the repository, so memory creates no project-file churn. Session custom entries store only the selected memory branch.
 - The complete bounded memory snapshot is injected as stable context. Project skills use bounded per-turn lexical retrieval from the user prompt, with at most two matched playbooks and 12,000 injected skill characters.
@@ -87,11 +87,13 @@ pi install .
 `project_memory` supports:
 
 - `list`
-- `add(content)`
-- `replace(oldText, content)`
+- `add(content, importance?)`
+- `replace(oldText, content, importance?)`
 - `remove(oldText)`
 
-`oldText` is a unique substring, not an entry ID. Memory is a bounded evolving state with a 3,000-character working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Once memory reaches the working target, reviews must include consolidation rather than an add-only batch. Review changes apply automatically as one atomic batch against the final size, allowing stale entries to be removed or merged before better facts are added. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next automatic review that changes memory. Each entry stores creation/update timestamps, source session, and whether its first/latest write came from the foreground assistant tool or background review; automatic review sees this metadata while refining. Because the complete branch is injected every turn, per-entry recall tracking would add no signal: every active entry is recalled. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
+`oldText` is a unique substring used by the foreground model tool. Background reviews target existing entries by stable ID and can explicitly add, replace, remove, merge, or assess them. Memory is a bounded evolving state with a 3,000-character working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Below the working target, a review's final state cannot cross it; at or above it, the final state must be smaller than the starting state, allowing repeated bounded reviews to converge instead of demanding impossible one-pass cleanup. Review changes apply automatically as one atomic batch against final size.
+
+Importance is `high`, `normal`, or `low` and measures cost of forgetting—not truth or recency. Existing entries roll forward as effective `normal` but remain visibly unassessed. New additions can be assessed immediately; background reviews reassess replacements and merges and can gradually assess untouched legacy entries when evidence supports it. Semantic invalidity wins over importance: contradicted or documented facts can always be removed. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next automatic review that changes memory. Each entry also stores creation/update timestamps, source session, and whether its first/latest write came from the foreground assistant tool or background review. Because the complete branch is injected every turn, per-entry recall tracking would add no signal: every active entry is recalled. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
 
 ## Commands
 

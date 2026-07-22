@@ -7,7 +7,8 @@ import {
   DEFAULT_MAX_CHARS,
   MEMORY_REFINEMENT_TARGET_RATIO,
   type MemoryBranch,
-  type MemoryOperation,
+  type MemoryImportance,
+  type ReviewOperation,
   type ReviewPlan,
 } from "./types.ts";
 
@@ -65,37 +66,84 @@ export function buildReviewTranscript(entries: readonly SessionEntry[], afterEnt
   return full.length <= MAX_TRANSCRIPT_CHARS ? full : `[Earlier context omitted]\n\n${full.slice(-MAX_TRANSCRIPT_CHARS)}`;
 }
 
-export function parseReviewPlan(raw: string): ReviewPlan {
+type ReviewAction = ReviewOperation["action"];
+type ReviewOperationParser = (value: Record<string, unknown>) => ReviewOperation;
+
+function requiredReviewString(value: Record<string, unknown>, key: string, action: ReviewAction): string {
+  const field = value[key];
+  if (typeof field !== "string") throw new Error(`Memory review '${action}' operation requires ${key}.`);
+  return field;
+}
+
+function requiredReviewImportance(value: Record<string, unknown>, action: ReviewAction): MemoryImportance {
+  const importance = value.importance;
+  const allowed: readonly unknown[] = ["high", "normal", "low"];
+  if (!allowed.includes(importance)) throw new Error(`Memory review '${action}' operation requires valid importance.`);
+  return importance as MemoryImportance;
+}
+
+function requiredReviewEntryIds(value: Record<string, unknown>): string[] {
+  if (!Array.isArray(value.entryIds)) throw new Error("Memory review 'merge' operation requires entryIds.");
+  const entryIds = value.entryIds.filter((entryId): entryId is string => typeof entryId === "string");
+  if (entryIds.length !== value.entryIds.length) throw new Error("Memory review 'merge' operation requires entryIds.");
+  return entryIds;
+}
+
+const REVIEW_OPERATION_PARSERS: Record<ReviewAction, ReviewOperationParser> = {
+  add: (value) => ({
+    action: "add",
+    content: requiredReviewString(value, "content", "add"),
+    importance: requiredReviewImportance(value, "add"),
+  }),
+  replace: (value) => ({
+    action: "replace",
+    entryId: requiredReviewString(value, "entryId", "replace"),
+    content: requiredReviewString(value, "content", "replace"),
+    importance: requiredReviewImportance(value, "replace"),
+  }),
+  remove: (value) => ({
+    action: "remove",
+    entryId: requiredReviewString(value, "entryId", "remove"),
+  }),
+  merge: (value) => ({
+    action: "merge",
+    entryIds: requiredReviewEntryIds(value),
+    content: requiredReviewString(value, "content", "merge"),
+    importance: requiredReviewImportance(value, "merge"),
+  }),
+  assess: (value) => ({
+    action: "assess",
+    entryId: requiredReviewString(value, "entryId", "assess"),
+    importance: requiredReviewImportance(value, "assess"),
+  }),
+};
+
+function parseReviewOperation(value: unknown): ReviewOperation {
+  if (!isRecord(value) || typeof value.action !== "string") throw new Error("Memory review operation must be an object with an action.");
+  if (!Object.hasOwn(REVIEW_OPERATION_PARSERS, value.action)) {
+    throw new Error("Memory review operation has an invalid action.");
+  }
+  return REVIEW_OPERATION_PARSERS[value.action as ReviewAction](value);
+}
+
+function reviewJsonCandidate(raw: string): string {
   const trimmed = raw.trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/iu)?.[1]?.trim();
   const candidate = fenced ?? trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1);
   if (!candidate) throw new Error("Memory review returned no JSON object.");
+  return candidate;
+}
 
-  const parsed: unknown = JSON.parse(candidate);
-  if (!isRecord(parsed) || !Array.isArray(parsed.operations)) {
-    throw new Error("Memory review JSON must contain an operations array.");
-  }
+function reviewOperations(value: unknown): unknown[] {
+  if (!isRecord(value)) throw new Error("Memory review JSON must contain an operations array.");
+  if (!Array.isArray(value.operations)) throw new Error("Memory review JSON must contain an operations array.");
+  return value.operations;
+}
 
-  if (parsed.operations.length > 4) throw new Error("Memory review returned more than 4 operations.");
-  const operations: MemoryOperation[] = [];
-  for (const value of parsed.operations) {
-    if (!isRecord(value)) throw new Error("Memory review operation must be an object.");
-    const action = value.action;
-    if (action !== "add" && action !== "replace" && action !== "remove") {
-      throw new Error("Memory review operation has an invalid action.");
-    }
-    if ((action === "add" || action === "replace") && typeof value.content !== "string") {
-      throw new Error(`Memory review '${action}' operation requires content.`);
-    }
-    if ((action === "replace" || action === "remove") && typeof value.oldText !== "string") {
-      throw new Error(`Memory review '${action}' operation requires oldText.`);
-    }
-    const operation: MemoryOperation = { action };
-    if (typeof value.content === "string") operation.content = value.content;
-    if (typeof value.oldText === "string") operation.oldText = value.oldText;
-    operations.push(operation);
-  }
-  return { operations };
+export function parseReviewPlan(raw: string): ReviewPlan {
+  const operations = reviewOperations(JSON.parse(reviewJsonCandidate(raw)) as unknown);
+  if (operations.length > 4) throw new Error("Memory review returned more than 4 operations.");
+  return { operations: operations.map(parseReviewOperation) };
 }
 
 export function buildReviewPrompt(
@@ -107,17 +155,26 @@ export function buildReviewPrompt(
   const refinementTarget = Math.max(1, Math.floor(maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
   const refinementRequired = usedChars >= refinementTarget;
   const current = branch.entries.length
-    ? branch.entries.map((entry) => [
-      `- [created ${entry.createdAt}; updated ${entry.updatedAt};`,
-      `writes ${entry.createdBy ?? "unknown"}→${entry.updatedBy ?? "unknown"}]`,
-      safeContextText(entry.text),
-    ].join(" ")).join("\n")
+    ? branch.entries.map((entry) => {
+      const importance = entry.importanceAssessedAt
+        ? `${entry.importance}; assessed ${entry.importanceAssessedAt}`
+        : `unassessed (effective ${entry.importance})`;
+      return [
+        `- [id ${entry.id}; importance ${importance}; created ${entry.createdAt}; updated ${entry.updatedAt};`,
+        `writes ${entry.createdBy ?? "unknown"}→${entry.updatedBy ?? "unknown"}]`,
+        safeContextText(entry.text),
+      ].join(" ");
+    }).join("\n")
     : "(empty)";
   return [
     "Review the entire completed Pi conversation above for durable project memory, including resumed history.",
     "Actively look for user corrections, preferences, recurring workflow expectations, and non-obvious project facts; do not require the user to say 'remember'.",
-    "Return ONLY JSON with this shape:",
-    '{"operations":[{"action":"add|replace|remove","content":"...","oldText":"..."}]}',
+    "Return ONLY JSON with an operations array. Valid operation shapes:",
+    '{"action":"add","content":"...","importance":"high|normal|low"}',
+    '{"action":"replace","entryId":"...","content":"...","importance":"high|normal|low"}',
+    '{"action":"remove","entryId":"..."}',
+    '{"action":"merge","entryIds":["...","..."],"content":"...","importance":"high|normal|low"}',
+    '{"action":"assess","entryId":"...","importance":"high|normal|low"}',
     "",
     "Save high-confidence learnings that would prevent future rediscovery or user correction:",
     "- project conventions, architecture, verification commands, durable workflows, recurring preferences",
@@ -126,16 +183,21 @@ export function buildReviewPrompt(
     "",
     "Do not save task progress, completed-work logs, temporary paths, issue/PR numbers, commit hashes, raw output, secrets, or facts already obvious from checked-in context files.",
     "Memory is a bounded evolving state, not an append-only log.",
+    "Importance measures cost of forgetting, not truth or recency:",
+    "- high: forgetting likely causes user correction or expensive rediscovery",
+    "- normal: durable and useful, but replaceable",
+    "- low: valid but narrow, redundant, or cheap to rediscover",
+    "Unassessed legacy entries behave as normal until conservatively assessed. Newer assessment metadata is better calibrated, but newer facts do not automatically outrank older facts.",
     `HARD LIMIT: ${maxChars} characters. WORKING TARGET: ${refinementTarget} characters. Current usage: ${usedChars} characters.`,
-    `If the proposed final state would exceed ${refinementTarget} characters, consolidate in the same atomic batch before adding. Never exceed the hard limit.`,
-    "Refine in this order: remove facts duplicated in checked-in docs; remove stale or low-value facts; merge overlapping entries; shorten verbose entries without losing independent high-value facts.",
+    `If current usage is below the working target, the final state must not exceed ${refinementTarget} characters. Never exceed the hard limit.`,
     ...(refinementRequired ? [
-      `REFINEMENT REQUIRED: current memory has reached the ${refinementTarget}-character working target. Do not return an add-only batch; use replace/remove operations to bring it below the target.`,
+      `REFINEMENT REQUIRED: current memory has reached the ${refinementTarget}-character working target. The final state must be smaller than the current ${usedChars} characters; repeated reviews converge toward the target.`,
     ] : []),
-    "The operation batch is atomic and checked against final size, so remove/replace/add can refine full memory in one response.",
+    "Refine in this order: remove contradicted or documented facts regardless of importance; merge overlaps; remove low-importance facts; then consider unassessed or normal facts. Preserve high-importance facts unless contradicted or merged.",
+    "The operation batch is atomic and capacity is checked only against final size, so removals need not precede additions. Operations still execute sequentially; never target an entry after removing or merging it.",
+    "Target existing entries by entryId, never by text. Merge only explicit entryIds; the first ID supplies the retained entry identity and position.",
+    "Every add, replace, merge, and assess operation requires importance. Use assess to classify legacy entries only when evidence supports the classification.",
     "Write compact declarative facts, not instructions. Use at most 4 operations. If nothing durable emerged and refinement is not required, return {\"operations\":[]}.",
-    "For replace/remove, oldText must be a unique substring of one existing entry.",
-    "To merge entries, replace one entry and remove each other entry in separate operations; never join multiple entries inside one oldText.",
     "",
     `CURRENT MEMORY BRANCH (${branch.name}, ${usedChars} characters used):`,
     current,

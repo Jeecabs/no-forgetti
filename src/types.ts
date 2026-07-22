@@ -7,6 +7,7 @@ export const DEFAULT_REVIEW_INTERVAL = 10;
 export const DEFAULT_REVIEW_SIGNAL_THRESHOLD = 4;
 
 export type MemoryWriteOrigin = "assistant_tool" | "background_review";
+export type MemoryImportance = "high" | "normal" | "low";
 
 export interface MemoryEntry {
   id: string;
@@ -16,6 +17,8 @@ export interface MemoryEntry {
   sourceSessionId?: string;
   createdBy?: MemoryWriteOrigin;
   updatedBy?: MemoryWriteOrigin;
+  importance: MemoryImportance;
+  importanceAssessedAt?: string;
 }
 
 export interface MemoryBranch {
@@ -52,7 +55,15 @@ export interface MemoryOperation {
   action: Exclude<MemoryAction, "list">;
   content?: string;
   oldText?: string;
+  importance?: MemoryImportance;
 }
+
+export type ReviewOperation =
+  | { action: "add"; content: string; importance: MemoryImportance }
+  | { action: "replace"; entryId: string; content: string; importance: MemoryImportance }
+  | { action: "remove"; entryId: string }
+  | { action: "merge"; entryIds: string[]; content: string; importance: MemoryImportance }
+  | { action: "assess"; entryId: string; importance: MemoryImportance };
 
 export interface MutationResult {
   changed: boolean;
@@ -61,5 +72,5 @@ export interface MutationResult {
 }
 
 export interface ReviewPlan {
-  operations: MemoryOperation[];
+  operations: ReviewOperation[];
 }

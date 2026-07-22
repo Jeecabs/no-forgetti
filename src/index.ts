@@ -30,15 +30,16 @@ import {
   MAIN_MEMORY,
   type MemoryAction,
   type MemoryBranch,
-  type MemoryOperation,
+  type MemoryImportance,
   type MutationResult,
+  type ReviewOperation,
 } from "./types.ts";
 
 const STATUS_KEY = "no-forgetti";
 const WIDGET_KEY = "no-forgetti";
 const SKILL_RECALL_ENTRY = "no-forgetti-skill-recall";
 const MEMORY_REVIEW_ENTRY = "no-forgetti-memory-review";
-const REVIEW_GLYPHS = { add: "+", replace: "~", remove: "−" } as const;
+const REVIEW_GLYPHS = { add: "+", replace: "~", remove: "−", merge: "⇄", assess: "◆" } as const;
 const REVIEW_LINE_CHARS = 76;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BAR_CELLS = 4;
@@ -106,29 +107,48 @@ function clipReviewLine(value: string): string {
   return line.length <= REVIEW_LINE_CHARS ? line : `${line.slice(0, REVIEW_LINE_CHARS - 1)}…`;
 }
 
+function reviewEntryText(before: MemoryBranch, entryId: string): string {
+  return before.entries.find((entry) => entry.id === entryId)?.text ?? entryId;
+}
+
+function reviewReplacementChange(
+  before: MemoryBranch,
+  operation: Extract<ReviewOperation, { action: "replace" }>,
+): MemoryReviewChange {
+  const previous = before.entries.find((entry) => entry.id === operation.entryId)?.text;
+  const change: MemoryReviewChange = { kind: "replace", text: safeContextText(operation.content) };
+  if (previous) change.oldText = safeContextText(previous);
+  return change;
+}
+
+function existingReviewChange(
+  before: MemoryBranch,
+  operation: Exclude<ReviewOperation, { action: "add" | "merge" }>,
+): MemoryReviewChange {
+  if (operation.action === "remove") {
+    return { kind: "remove", text: safeContextText(reviewEntryText(before, operation.entryId)) };
+  }
+  if (operation.action === "replace") return reviewReplacementChange(before, operation);
+  const text = reviewEntryText(before, operation.entryId);
+  return { kind: "assess", text: safeContextText(`${operation.importance}: ${text}`) };
+}
+
+function reviewChange(before: MemoryBranch, operation: ReviewOperation): MemoryReviewChange {
+  if (operation.action === "add") return { kind: "add", text: safeContextText(operation.content) };
+  if (operation.action === "merge") return { kind: "merge", text: safeContextText(operation.content) };
+  return existingReviewChange(before, operation);
+}
+
 /** Results align 1:1 with the (≤4) operations applyOperations accepted. */
 function reviewChanges(
   before: MemoryBranch,
-  operations: MemoryOperation[],
+  operations: ReviewOperation[],
   results: MutationResult[],
 ): MemoryReviewChange[] {
   const changes: MemoryReviewChange[] = [];
   for (const [index, result] of results.entries()) {
     const operation = operations[index];
-    if (!result.changed || !operation) continue;
-    // Consolidations match no single entry; oldText then stays undefined.
-    const previous = operation.oldText
-      ? before.entries.find((entry) => entry.text.includes(operation.oldText!))?.text
-      : undefined;
-    if (operation.action === "remove") {
-      changes.push({ kind: "remove", text: safeContextText(previous ?? operation.oldText ?? "") });
-    } else {
-      changes.push({
-        kind: operation.action,
-        text: safeContextText(operation.content ?? ""),
-        ...(operation.action === "replace" && previous ? { oldText: safeContextText(previous) } : {}),
-      });
-    }
+    if (result.changed && operation) changes.push(reviewChange(before, operation));
   }
   return changes;
 }
@@ -139,7 +159,10 @@ function errorMessage(error: unknown): string {
 
 function formatBranch(branch: MemoryBranch): string {
   if (branch.entries.length === 0) return `(project memory '${branch.name}' is empty)`;
-  return branch.entries.map((entry, index) => `${index + 1}. ${safeContextText(entry.text)}`).join("\n");
+  return branch.entries.map((entry, index) => {
+    const importance = entry.importanceAssessedAt ? entry.importance : `${entry.importance}?`;
+    return `${index + 1}. [${importance}] ${safeContextText(entry.text)}`;
+  }).join("\n");
 }
 
 function showCommandOutput(
@@ -613,11 +636,12 @@ export function activateProjectMemoryExtension(
       "Manage durable memory scoped to this project. Actions: list, add, replace, remove. " +
       "Save stable project conventions, architecture facts, verification commands, recurring preferences, and non-obvious durable workflows. " +
       "Never save secrets, temporary task progress, completed-work logs, issue/PR numbers, commit hashes, or raw tool output. " +
-      "replace/remove use oldText as a unique substring. Writes persist immediately and are injected automatically at the start of the next turn.",
+      "replace/remove use oldText as a unique substring. importance is high, normal, or low and measures cost of forgetting. Writes persist immediately and are injected automatically at the start of the next turn.",
     promptSnippet: "Read or update durable project-scoped memory",
     promptGuidelines: [
       `Use ${TOOL_NAME} after durable project-specific learning that would prevent future rediscovery or correction.`,
       `Use ${TOOL_NAME} action=replace to consolidate overlapping entries instead of growing memory indefinitely.`,
+      `Assess new memories with importance=high|normal|low when confidence permits; omit importance to leave legacy-compatible normal importance unassessed.`,
       `Do not use ${TOOL_NAME} for task progress, transient failures, secrets, or facts already present in AGENTS.md or checked-in docs.`,
     ],
     executionMode: "sequential",
@@ -625,6 +649,7 @@ export function activateProjectMemoryExtension(
       action: StringEnum(["list", "add", "replace", "remove"] as const),
       content: Type.Optional(Type.String({ description: "Memory text for add/replace" })),
       oldText: Type.Optional(Type.String({ description: "Unique substring for replace/remove" })),
+      importance: Type.Optional(StringEnum(["high", "normal", "low"] as const, { description: "Cost of forgetting this memory" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const memoryStore = requireStore();
@@ -646,7 +671,7 @@ export function activateProjectMemoryExtension(
 
       const result = await memoryStore.applyOperation(
         activeName,
-        { action: params.action, content: params.content, oldText: params.oldText },
+        { action: params.action, content: params.content, oldText: params.oldText, importance: params.importance as MemoryImportance | undefined },
         ctx.sessionManager.getSessionId(),
         "assistant_tool",
       );
@@ -662,6 +687,7 @@ export function activateProjectMemoryExtension(
       let text = theme.fg("toolTitle", theme.bold(`${TOOL_NAME} `)) + theme.fg("muted", args.action);
       if (args.content) text += ` ${theme.fg("dim", `"${firstLine(args.content).slice(0, 80)}"`)}`;
       if (args.oldText) text += ` ${theme.fg("dim", `matching "${firstLine(args.oldText).slice(0, 50)}"`)}`;
+      if (args.importance) text += ` ${theme.fg("dim", `[${args.importance}]`)}`;
       return new Text(text, 0, 0);
     },
     renderResult(result, { expanded, isPartial }, theme) {
@@ -1061,7 +1087,7 @@ export function activateProjectMemoryExtension(
   pi.registerEntryRenderer<{ branch: string; changes: MemoryReviewChange[] }>(MEMORY_REVIEW_ENTRY, (entry, { expanded }, theme) => {
     const changes = Array.isArray(entry.data?.changes)
       ? entry.data.changes.filter((change): change is MemoryReviewChange =>
-          Boolean(change) && typeof change.text === "string" && change.kind in REVIEW_GLYPHS)
+          Boolean(change) && typeof change.text === "string" && Object.hasOwn(REVIEW_GLYPHS, change.kind))
       : [];
     if (changes.length === 0) return undefined;
     const branchSuffix = typeof entry.data?.branch === "string" && entry.data.branch !== MAIN_MEMORY

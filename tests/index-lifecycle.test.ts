@@ -115,6 +115,31 @@ test("registers lifecycle hooks and disables itself for companion agents", async
   assert.equal(companion.commands.size, 0);
 });
 
+test("model tool records assessed importance on new memory", async (t) => {
+  const { context, extension, memoryStore } = await fixture(t);
+  await extension.emit("session_start", {}, context);
+  const tool = extension.tools.get("project_memory") as {
+    execute: (
+      id: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      onUpdate: undefined,
+      context: ExtensionContext,
+    ) => Promise<unknown>;
+  };
+
+  await tool.execute("tool-1", {
+    action: "add",
+    content: "Canonical deploy workflow is expensive to rediscover.",
+    importance: "high",
+  }, undefined, undefined, context);
+
+  const entry = (await memoryStore.loadBranch("main")).entries.at(0);
+  assert.ok(entry);
+  assert.equal(entry.importance, "high");
+  assert.ok(entry.importanceAssessedAt);
+});
+
 test("skill review automatically adds validated creates", async (t) => {
   const { context, extension, skillStore } = await fixture(t, {
     requestSkillReviewPlan: async () => ({ operations: [{
@@ -202,7 +227,7 @@ test("routes read-only command output in print and JSON modes", async (t) => {
 test("memory review applies immediately and next turn injects live state", async (t) => {
   const { context, extension, memoryStore } = await fixture(t, {
     requestReviewPlan: async () => ({
-      operations: [{ action: "add", content: "Tests run with pnpm test." }],
+      operations: [{ action: "add", content: "Tests run with pnpm test.", importance: "normal" }],
     }),
   });
   await extension.emit("session_start", {}, context);
@@ -221,18 +246,20 @@ test("memory review applies immediately and next turn injects live state", async
   assert.match(before.systemPrompt, /Type checks run with pnpm check\./u);
 });
 
-test("memory review appends a change entry with resolved old text", async (t) => {
+test("memory review appends a change entry with resolved entry IDs", async (t) => {
+  let testsId = "";
+  let ciId = "";
   const { context, extension, memoryStore } = await fixture(t, {
     requestReviewPlan: async () => ({
       operations: [
-        { action: "replace", oldText: "pnpm test", content: "Tests run with pnpm check." },
-        { action: "remove", oldText: "Node 18" },
-        { action: "add", content: "Deploys go through the release workflow." },
+        { action: "replace", entryId: testsId, content: "Tests run with pnpm check.", importance: "high" },
+        { action: "remove", entryId: ciId },
+        { action: "add", content: "Deploys go through the release workflow.", importance: "normal" },
       ],
     }),
   });
-  await memoryStore.applyOperation("main", { action: "add", content: "Tests run with pnpm test." });
-  await memoryStore.applyOperation("main", { action: "add", content: "CI runs on Node 18." });
+  testsId = (await memoryStore.applyOperation("main", { action: "add", content: "Tests run with pnpm test." })).branch.entries.at(0)!.id;
+  ciId = (await memoryStore.applyOperation("main", { action: "add", content: "CI runs on Node 18." })).branch.entries.at(1)!.id;
   await extension.emit("session_start", {}, context);
   await extension.command("memory", "review", context);
 
