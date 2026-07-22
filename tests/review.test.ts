@@ -40,6 +40,7 @@ test("review prompt exposes hard capacity and an earlier refinement target", () 
   assert.match(prompt, /Current usage: 26 characters/u);
   assert.match(prompt, /created 2026-01-01T00:00:00.000Z; updated 2026-01-01T00:00:00.000Z/u);
   assert.match(prompt, /If the proposed final state would exceed 3000 characters/u);
+  assert.match(prompt, /never join multiple entries inside one oldText/u);
 });
 
 test("review prompt requires refinement once the working target is reached", () => {

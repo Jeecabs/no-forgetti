@@ -135,6 +135,7 @@ export function buildReviewPrompt(
     "The operation batch is atomic and checked against final size, so remove/replace/add can refine full memory in one response.",
     "Write compact declarative facts, not instructions. Use at most 4 operations. If nothing durable emerged and refinement is not required, return {\"operations\":[]}.",
     "For replace/remove, oldText must be a unique substring of one existing entry.",
+    "To merge entries, replace one entry and remove each other entry in separate operations; never join multiple entries inside one oldText.",
     "",
     `CURRENT MEMORY BRANCH (${branch.name}, ${usedChars} characters used):`,
     current,
