@@ -199,6 +199,28 @@ test("routes read-only command output in print and JSON modes", async (t) => {
   await assert.rejects(extension.command("project-skills", "stats", context), /corresponding model tool/u);
 });
 
+test("memory review applies immediately and next turn injects live state", async (t) => {
+  const { context, extension, memoryStore } = await fixture(t, {
+    requestReviewPlan: async () => ({
+      operations: [{ action: "add", content: "Tests run with pnpm test." }],
+    }),
+  });
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+  assert.deepEqual(
+    (await memoryStore.loadBranch("main")).entries.map((entry) => entry.text),
+    ["Tests run with pnpm test."],
+  );
+
+  await memoryStore.applyOperation("main", { action: "add", content: "Type checks run with pnpm check." });
+  const [before] = await extension.emit("before_agent_start", {
+    systemPrompt: "base prompt",
+    prompt: "continue",
+  }, context) as Array<{ systemPrompt: string }>;
+  assert.match(before.systemPrompt, /Tests run with pnpm test\./u);
+  assert.match(before.systemPrompt, /Type checks run with pnpm check\./u);
+});
+
 test("shutdown prevents a review from starting after a delayed claim", async (t) => {
   let modelStarted = false;
   const { context, extension, memoryStore } = await fixture(t, {

@@ -13,13 +13,13 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 - Memory scope = nearest Git root; when no Git root exists, exact launch directory.
 - Pi `/fork` and `/clone` keep using the same memory branch. They **do not** clone memory automatically.
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
-- Writes persist immediately, but injected context stays frozen until the next session, explicit `/memory refresh`, or successful Pi compaction. Compaction is already a prompt-cache boundary, so it safely adopts the latest memory.
-- Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Reviews stage proposals; memory changes require explicit inspection and approval. Explicit memory signals and durable corrections can trigger review early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes Agent's existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` and `/project-skills review` run them on demand.
+- Writes persist immediately. Every turn reloads and injects the active memory branch, so foreground tools, background review, and other sessions become visible without `/memory refresh`.
+- Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Validated memory changes apply automatically as one atomic refinement batch; `/memory undo` restores the pre-review snapshot. Explicit memory signals and durable corrections can trigger review early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes Agent's existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` and `/project-skills review` run them on demand.
 - Successful complex workflows can form an external project skill. Validated new skills are added automatically; patches and archives remain pending until you inspect and approve them. Skills stay in No Forgetti storage and are fetched through one `project_skill` tool. They are never registered as Pi slash commands and never written into the repository.
 
 ## Design boundary
 
-- **Learning** happens only after a successfully completed turn: propose compact additions, replacements, or removals from recent conversation evidence.
+- **Learning** happens only after a successfully completed turn: apply compact additions, replacements, or removals from recent conversation evidence.
 - **Maintenance** happens inside that same atomic mutation. The reviewer starts consolidating at a 3,000-character working target, before memory reaches its 4,000-character hard limit.
 - No separate scheduled curator is needed. Every review receives exact usage, target, and limit values, then removes documented, stale, or low-value facts before merging overlaps and shortening prose. Project skills have approval, revisions, usage tracking, and reviewable retention archives after 20 inactive sessions.
 - Project skills are deliberately not Pi resources: generated names do not enter the slash-command namespace. The `project_skill` tool fetches one relevant skill on demand.
@@ -91,7 +91,7 @@ pi install .
 - `replace(oldText, content)`
 - `remove(oldText)`
 
-`oldText` is a unique substring, not an entry ID. Memory is a bounded evolving state with a 3,000-character working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Once memory reaches the working target, reviews must include consolidation rather than an add-only batch. Review changes apply as one atomic batch against the final size, allowing stale entries to be removed or merged before better facts are added. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next approved review that changes memory. Entries record whether their latest write came from the foreground assistant tool or an approved background-review proposal. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
+`oldText` is a unique substring, not an entry ID. Memory is a bounded evolving state with a 3,000-character working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Once memory reaches the working target, reviews must include consolidation rather than an add-only batch. Review changes apply automatically as one atomic batch against the final size, allowing stale entries to be removed or merged before better facts are added. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next automatic review that changes memory. Each entry stores creation/update timestamps, source session, and whether its first/latest write came from the foreground assistant tool or background review; automatic review sees this metadata while refining. Because the complete branch is injected every turn, per-entry recall tracking would add no signal: every active entry is recalled. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
 
 ## Commands
 
@@ -101,11 +101,7 @@ pi install .
 /memory branches
 /memory fork experiment
 /memory use main
-/memory refresh
 /memory review
-/memory pending [proposal-id]
-/memory approve <proposal-id>
-/memory reject <proposal-id>
 /memory undo
 
 /project-skills list
@@ -138,7 +134,6 @@ $PI_CODING_AGENT_DIR/no-forgetti/<sha256(project-root)>/
 ├── reviews/
 │   ├── main.json
 │   └── experiment.json
-├── memory-pending/
 ├── revisions/
 │   └── main.json
 ├── skills/
@@ -188,7 +183,7 @@ Bad:
 
 ## Cache behavior
 
-`before_agent_start` appends the same frozen memory block each turn, then performs bounded lexical retrieval for relevant project skills from the current prompt. The `context` hook injects retrieved skills transiently into the latest user message without relying on exact prompt equality, so prompt expansion and later tool-loop calls retain the guidance without writing it into session history. `project_memory` writes update disk and live tool responses but do not mutate that snapshot. `/memory refresh`, `/memory use`, and `/memory fork` are explicit memory cache-invalidating choices.
+`before_agent_start` reloads the active branch and appends its complete memory block each turn, then performs bounded lexical retrieval for relevant project skills from the current prompt. The `context` hook injects retrieved skills transiently into the latest user message without relying on exact prompt equality, so prompt expansion and later tool-loop calls retain the guidance without writing it into session history. `project_memory` writes and automatic review update disk immediately; the next turn picks them up automatically. `/memory use` and `/memory fork` switch which live branch the session reads.
 
 ## Security and contributing
 

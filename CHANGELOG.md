@@ -4,6 +4,8 @@
 
 - Expand project memory's hard limit from 2,200 to 4,000 characters.
 - Start review-driven refinement at a 3,000-character working target and give the reviewer exact capacity guidance.
+- Apply validated memory review batches automatically; remove memory pending/approval commands and discard obsolete staged proposals.
+- Reload active project memory at every turn boundary so writes and refinements require no manual refresh.
 
 ## 0.1.0 — 2026-07-15
 

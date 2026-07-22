@@ -25,5 +25,5 @@ git diff --check
 
 - Explain the user-visible behavior and why the change is needed.
 - Keep persistent-state migrations backward compatible and fail closed on corrupt data.
-- Preserve explicit approval for generated skill changes.
+- Preserve explicit approval for generated skill patches and archives; validated creates auto-apply.
 - Never commit secrets, session transcripts, or No Forgetti's external state.

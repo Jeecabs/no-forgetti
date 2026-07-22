@@ -107,7 +107,11 @@ export function buildReviewPrompt(
   const refinementTarget = Math.max(1, Math.floor(maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
   const refinementRequired = usedChars >= refinementTarget;
   const current = branch.entries.length
-    ? branch.entries.map((entry) => `- ${safeContextText(entry.text)}`).join("\n")
+    ? branch.entries.map((entry) => [
+      `- [created ${entry.createdAt}; updated ${entry.updatedAt};`,
+      `writes ${entry.createdBy ?? "unknown"}→${entry.updatedBy ?? "unknown"}]`,
+      safeContextText(entry.text),
+    ].join(" ")).join("\n")
     : "(empty)";
   return [
     "Review the entire completed Pi conversation above for durable project memory, including resumed history.",
