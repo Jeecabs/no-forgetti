@@ -6,7 +6,9 @@
 - Start review-driven refinement at a 3,000-character working target and give the reviewer exact capacity guidance.
 - Apply validated memory review batches automatically; remove memory pending/approval commands and discard obsolete staged proposals.
 - Reload active project memory at every turn boundary so writes and refinements require no manual refresh.
-- Recover AI-generated multi-entry replacement matches as safe exact-entry consolidations.
+- Add roll-forward high/normal/low memory importance with explicit assessment provenance.
+- Target background refinements by stable entry ID, including explicit merge and assessment operations.
+- Enforce working-target convergence: reviews cannot cross it from below and must shrink memory at or above it.
 
 ## 0.1.0 — 2026-07-15
 

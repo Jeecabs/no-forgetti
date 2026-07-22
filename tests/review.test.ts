@@ -18,19 +18,31 @@ const branch: MemoryBranch = {
       text: "Package commands use pnpm.",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
+      importance: "normal",
     },
   ],
 };
 
-test("parses plain and fenced review JSON", () => {
-  assert.deepEqual(parseReviewPlan('{"operations":[{"action":"add","content":"Use strict mode."}]}'), {
-    operations: [{ action: "add", content: "Use strict mode." }],
-  });
+test("parses ID-targeted review operations with assessed importance", () => {
+  assert.deepEqual(
+    parseReviewPlan('{"operations":[{"action":"add","content":"Use strict mode.","importance":"high"}]}'),
+    { operations: [{ action: "add", content: "Use strict mode.", importance: "high" }] },
+  );
 
   assert.deepEqual(
-    parseReviewPlan('```json\n{"operations":[{"action":"remove","oldText":"strict"}]}\n```'),
-    { operations: [{ action: "remove", oldText: "strict" }] },
+    parseReviewPlan('```json\n{"operations":[{"action":"remove","entryId":"one"}]}\n```'),
+    { operations: [{ action: "remove", entryId: "one" }] },
   );
+
+  assert.deepEqual(parseReviewPlan(JSON.stringify({ operations: [
+    { action: "replace", entryId: "one", content: "Updated.", importance: "normal" },
+    { action: "merge", entryIds: ["one", "two"], content: "Merged.", importance: "high" },
+    { action: "assess", entryId: "three", importance: "low" },
+  ] })), { operations: [
+    { action: "replace", entryId: "one", content: "Updated.", importance: "normal" },
+    { action: "merge", entryIds: ["one", "two"], content: "Merged.", importance: "high" },
+    { action: "assess", entryId: "three", importance: "low" },
+  ] });
 });
 
 test("review prompt exposes hard capacity and an earlier refinement target", () => {
@@ -38,9 +50,11 @@ test("review prompt exposes hard capacity and an earlier refinement target", () 
   assert.match(prompt, /HARD LIMIT: 4000 characters/u);
   assert.match(prompt, /WORKING TARGET: 3000 characters/u);
   assert.match(prompt, /Current usage: 26 characters/u);
+  assert.match(prompt, /id one; importance unassessed \(effective normal\)/u);
   assert.match(prompt, /created 2026-01-01T00:00:00.000Z; updated 2026-01-01T00:00:00.000Z/u);
-  assert.match(prompt, /If the proposed final state would exceed 3000 characters/u);
-  assert.match(prompt, /never join multiple entries inside one oldText/u);
+  assert.match(prompt, /If current usage is below the working target, the final state must not exceed 3000 characters/u);
+  assert.match(prompt, /Target existing entries by entryId, never by text/u);
+  assert.match(prompt, /high: forgetting likely causes user correction or expensive rediscovery/u);
 });
 
 test("review prompt requires refinement once the working target is reached", () => {
@@ -50,7 +64,7 @@ test("review prompt requires refinement once the working target is reached", () 
   };
   const prompt = buildReviewPrompt(fullBranch, "", 4_000);
   assert.match(prompt, /REFINEMENT REQUIRED/u);
-  assert.match(prompt, /Do not return an add-only batch/u);
+  assert.match(prompt, /final state must be smaller than the current 3000 characters/u);
 });
 
 test("review transcript strips tool arguments and results", () => {
@@ -104,7 +118,12 @@ test("rejects malformed review output", () => {
   assert.throws(() => parseReviewPlan("not json"), /no JSON object/u);
   assert.throws(() => parseReviewPlan('{"wrong":[]}'), /operations array/u);
   assert.throws(() => parseReviewPlan('{"operations":[{"action":"noop"}]}'), /invalid action/u);
-  assert.throws(() => parseReviewPlan('{"operations":[{"action":"replace","content":"new"}]}'), /requires oldText/u);
+  assert.throws(() => parseReviewPlan('{"operations":[{"action":"__proto__"}]}'), /invalid action/u);
+  assert.throws(
+    () => parseReviewPlan('{"operations":[{"action":"replace","content":"new","importance":"normal"}]}'),
+    /requires entryId/u,
+  );
+  assert.throws(() => parseReviewPlan('{"operations":[{"action":"add","content":"new"}]}'), /valid importance/u);
 });
 
 test("formats memory as bounded non-authoritative project context", () => {

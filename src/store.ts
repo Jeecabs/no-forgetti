@@ -14,13 +14,16 @@ import {
   DEFAULT_MAX_CHARS,
   DEFAULT_MAX_ENTRY_CHARS,
   MAIN_MEMORY,
+  MEMORY_REFINEMENT_TARGET_RATIO,
   STORE_VERSION,
   type MemoryBranch,
   type MemoryEntry,
+  type MemoryImportance,
   type MemoryOperation,
   type MemoryWriteOrigin,
   type MutationResult,
   type ProjectMetadata,
+  type ReviewOperation,
   type ReviewState,
 } from "./types.ts";
 
@@ -30,6 +33,9 @@ const REVIEW_LEASE_MS = 5 * 60_000;
 const REVIEW_RETRY_BASE_MS = 5 * 60_000;
 const REVIEW_RETRY_MAX_MS = 60 * 60_000;
 const BRANCH_NAME = /^[a-z][a-z0-9_-]{0,63}$/u;
+const ENTRY_ID = /^[a-zA-Z0-9_-]{1,128}$/u;
+const MEMORY_IMPORTANCES: readonly unknown[] = ["high", "normal", "low"];
+const EXISTING_REVIEW_ACTIONS = new Set(["remove", "replace", "merge", "assess"]);
 
 interface StoreOptions {
   storageRoot?: string;
@@ -44,16 +50,13 @@ interface MutationRequest {
   sourceSessionId?: string;
   writeOrigin?: MemoryWriteOrigin;
   enforceCapacity?: boolean;
-  allowReviewConsolidation?: boolean;
 }
 
-interface ReviewConsolidationRequest {
+interface ReviewMutationRequest {
   branch: MemoryBranch;
-  content?: string;
-  oldText: string;
-  timestamp: string;
+  operation: ReviewOperation;
+  sourceSessionId?: string;
   writeOrigin: MemoryWriteOrigin;
-  enforceCapacity: boolean;
 }
 
 function isErrno(error: unknown, code: string): boolean {
@@ -64,6 +67,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function parseImportance(value: unknown, fallback?: MemoryImportance): MemoryImportance | undefined {
+  if (value === undefined) return fallback;
+  if (MEMORY_IMPORTANCES.includes(value)) return value as MemoryImportance;
+  throw new Error("Invalid memory importance.");
+}
+
+function requireImportance(value: unknown): MemoryImportance {
+  const importance = parseImportance(value);
+  if (!importance) throw new Error("Memory review operation requires importance.");
+  return importance;
+}
+
+function validMergeEntryCount(count: number): boolean {
+  return count >= 2 && count <= 8;
+}
+
 function parseMemoryEntry(value: unknown): MemoryEntry {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.text !== "string") {
     throw new Error("Invalid memory entry on disk.");
@@ -72,6 +91,7 @@ function parseMemoryEntry(value: unknown): MemoryEntry {
   const updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : createdAt;
   const createdBy = value.createdBy === "assistant_tool" || value.createdBy === "background_review" ? value.createdBy : undefined;
   const updatedBy = value.updatedBy === "assistant_tool" || value.updatedBy === "background_review" ? value.updatedBy : undefined;
+  const importanceAssessedAt = optionalIsoTimestamp(value.importanceAssessedAt, "memory importance assessment timestamp");
   return {
     id: value.id,
     text: value.text,
@@ -80,6 +100,8 @@ function parseMemoryEntry(value: unknown): MemoryEntry {
     ...(typeof value.sourceSessionId === "string" ? { sourceSessionId: value.sourceSessionId } : {}),
     ...(createdBy ? { createdBy } : {}),
     ...(updatedBy ? { updatedBy } : {}),
+    importance: parseImportance(value.importance, "normal")!,
+    ...(importanceAssessedAt ? { importanceAssessedAt } : {}),
   };
 }
 
@@ -97,27 +119,6 @@ function parseMemoryBranch(value: unknown, expectedName: string): MemoryBranch {
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : createdAt,
     entries: value.entries.map(parseMemoryEntry),
   };
-}
-
-function listedEntryTexts(oldText: string): string[] | undefined {
-  const [first, ...rest] = oldText.split(/\n\s*-\s+/u);
-  if (first === undefined || rest.length === 0) return undefined;
-  return [first.replace(/^\s*-\s+/u, "").trim(), ...rest.map((text) => text.trim())];
-}
-
-function uniqueExactEntryIndex(entries: MemoryEntry[], text: string): number | undefined {
-  const matches = entries.flatMap((entry, index) => entry.text === text ? [index] : []);
-  return matches.length === 1 ? matches.at(0) : undefined;
-}
-
-function reviewConsolidationIndexes(entries: MemoryEntry[], oldText: string): number[] | undefined {
-  const texts = listedEntryTexts(oldText);
-  if (!texts) return undefined;
-  const indexes = texts.map((text) => uniqueExactEntryIndex(entries, text));
-  if (indexes.some((index) => index === undefined)) return undefined;
-  const resolved = indexes.filter((index): index is number => index !== undefined);
-  if (new Set(resolved).size !== texts.length) return undefined;
-  return resolved;
 }
 
 function consolidatedEntries(
@@ -312,7 +313,7 @@ export class ProjectMemoryStore {
 
   async applyOperations(
     name: string,
-    operations: MemoryOperation[],
+    operations: ReviewOperation[],
     sourceSessionId?: string,
     writeOrigin: MemoryWriteOrigin = "background_review",
   ): Promise<MutationResult[]> {
@@ -325,19 +326,12 @@ export class ProjectMemoryStore {
       let changed = false;
       try {
         for (const operation of operations.slice(0, 4).map((item) => this.normalizeReviewOperation(item))) {
-          const result = this.mutate({
-            branch,
-            operation,
-            sourceSessionId,
-            writeOrigin,
-            enforceCapacity: false,
-            allowReviewConsolidation: true,
-          });
+          const result = this.mutateReview({ branch, operation, sourceSessionId, writeOrigin });
           branch = result.branch;
           changed ||= result.changed;
           results.push(result);
         }
-        this.assertCapacity(branch);
+        this.assertReviewCapacity(original, branch);
       } catch (error) {
         return [{
           changed: false,
@@ -416,50 +410,154 @@ export class ProjectMemoryStore {
     });
   }
 
-  private normalizeReviewOperation(operation: MemoryOperation): MemoryOperation {
+  private normalizeReviewOperation(operation: ReviewOperation): ReviewOperation {
     if (!operation || typeof operation !== "object") throw new Error("Invalid memory review operation.");
     if (operation.action === "add") {
-      return { action: "add", content: validateMemoryText(operation.content ?? "", this.maxEntryChars) };
+      return {
+        action: "add",
+        content: validateMemoryText(operation.content, this.maxEntryChars),
+        importance: requireImportance(operation.importance),
+      };
     }
-    if (operation.action === "replace") {
-      const oldText = (operation.oldText ?? "").trim();
-      if (!oldText || oldText.length > this.maxChars + this.maxEntryChars) {
-        throw new Error("Invalid memory review replacement match.");
-      }
-      return { action: "replace", oldText, content: validateMemoryText(operation.content ?? "", this.maxEntryChars) };
-    }
-    if (operation.action === "remove") {
-      const oldText = (operation.oldText ?? "").trim();
-      if (!oldText || oldText.length > this.maxEntryChars) throw new Error("Invalid memory review removal match.");
-      return { action: "remove", oldText };
-    }
-    throw new Error("Invalid memory review operation action.");
+    if (!EXISTING_REVIEW_ACTIONS.has(operation.action)) throw new Error("Invalid memory review operation action.");
+    return this.normalizeExistingReviewOperation(operation as Exclude<ReviewOperation, { action: "add" }>);
   }
 
-  private tryConsolidateReviewEntries({
-    branch,
-    content,
-    oldText,
-    timestamp,
-    writeOrigin,
-    enforceCapacity,
-  }: ReviewConsolidationRequest): MutationResult | undefined {
-    const mergeIndexes = reviewConsolidationIndexes(branch.entries, oldText);
-    if (!mergeIndexes) return undefined;
+  private normalizeExistingReviewOperation(operation: Exclude<ReviewOperation, { action: "add" }>): ReviewOperation {
+    if (operation.action === "remove") return { action: "remove", entryId: this.validateEntryId(operation.entryId) };
+    if (operation.action === "replace") {
+      return {
+        action: "replace",
+        entryId: this.validateEntryId(operation.entryId),
+        content: validateMemoryText(operation.content, this.maxEntryChars),
+        importance: requireImportance(operation.importance),
+      };
+    }
+    if (operation.action === "merge") {
+      return {
+        action: "merge",
+        entryIds: this.validateMergeEntryIds(operation.entryIds),
+        content: validateMemoryText(operation.content, this.maxEntryChars),
+        importance: requireImportance(operation.importance),
+      };
+    }
+    return {
+      action: "assess",
+      entryId: this.validateEntryId(operation.entryId),
+      importance: requireImportance(operation.importance),
+    };
+  }
+
+  private validateEntryId(value: unknown): string {
+    if (typeof value !== "string" || !ENTRY_ID.test(value)) throw new Error("Invalid memory entry ID.");
+    return value;
+  }
+
+  private validateMergeEntryIds(values: unknown): string[] {
+    if (!Array.isArray(values)) throw new Error("Memory review merge requires entry IDs.");
+    if (!validMergeEntryCount(values.length)) throw new Error("Memory review merge requires 2-8 entry IDs.");
+    const entryIds = values.map((entryId) => this.validateEntryId(entryId));
+    if (new Set(entryIds).size !== entryIds.length) throw new Error("Memory review merge entry IDs must be unique.");
+    return entryIds;
+  }
+
+  private cloneBranch(branch: MemoryBranch): MemoryBranch {
+    return { ...branch, entries: branch.entries.map((entry) => ({ ...entry })) };
+  }
+
+  private entryIndex(entries: MemoryEntry[], entryId: string): number {
+    const index = entries.findIndex((entry) => entry.id === entryId);
+    if (index < 0) throw new Error(`No memory entry matches ID '${entryId}'.`);
+    return index;
+  }
+
+  private mutateReview({ branch, operation, sourceSessionId, writeOrigin }: ReviewMutationRequest): MutationResult {
+    if (operation.action === "add") {
+      return this.mutate({ branch, operation, sourceSessionId, writeOrigin, enforceCapacity: false });
+    }
+    return this.mutateExistingReview(branch, operation, writeOrigin);
+  }
+
+  private mutateExistingReview(
+    branch: MemoryBranch,
+    operation: Exclude<ReviewOperation, { action: "add" }>,
+    writeOrigin: MemoryWriteOrigin,
+  ): MutationResult {
+    if (operation.action === "remove") return this.removeReviewedEntry(branch, operation.entryId);
+    if (operation.action === "replace") return this.replaceReviewedEntry(branch, operation, writeOrigin);
+    if (operation.action === "merge") return this.mergeReviewedEntries(branch, operation, writeOrigin);
+    return this.assessReviewedEntry(branch, operation);
+  }
+
+  private removeReviewedEntry(branch: MemoryBranch, entryId: string): MutationResult {
+    const next = this.cloneBranch(branch);
+    next.entries.splice(this.entryIndex(next.entries, entryId), 1);
+    next.updatedAt = this.timestamp();
+    return { changed: true, message: "Memory removed.", branch: next };
+  }
+
+  private replaceReviewedEntry(
+    branch: MemoryBranch,
+    operation: Extract<ReviewOperation, { action: "replace" }>,
+    writeOrigin: MemoryWriteOrigin,
+  ): MutationResult {
+    const next = this.cloneBranch(branch);
+    const index = this.entryIndex(next.entries, operation.entryId);
+    const match = next.entries.at(index)!;
+    if (next.entries.some((entry, entryIndex) => entryIndex !== index && entry.text === operation.content)) {
+      throw new Error("Replacement would duplicate another memory entry.");
+    }
+    const timestamp = this.timestamp();
+    next.entries[index] = {
+      ...match,
+      text: operation.content,
+      updatedAt: timestamp,
+      updatedBy: writeOrigin,
+      importance: operation.importance,
+      importanceAssessedAt: timestamp,
+    };
+    next.updatedAt = timestamp;
+    return { changed: true, message: "Memory replaced.", branch: next };
+  }
+
+  private mergeReviewedEntries(
+    branch: MemoryBranch,
+    operation: Extract<ReviewOperation, { action: "merge" }>,
+    writeOrigin: MemoryWriteOrigin,
+  ): MutationResult {
+    const next = this.cloneBranch(branch);
+    const mergeIndexes = operation.entryIds.map((entryId) => this.entryIndex(next.entries, entryId));
     const merged = new Set(mergeIndexes);
-    const text = validateMemoryText(content ?? "", this.maxEntryChars);
-    assertNoDuplicateOutside(branch.entries, merged, text);
+    assertNoDuplicateOutside(next.entries, merged, operation.content);
     const primaryIndex = mergeIndexes.at(0)!;
-    const primary = branch.entries.at(primaryIndex)!;
-    branch.entries = consolidatedEntries(
-      branch.entries,
-      merged,
-      primaryIndex,
-      { ...primary, text, updatedAt: timestamp, updatedBy: writeOrigin },
-    );
-    if (enforceCapacity) this.assertCapacity(branch);
-    branch.updatedAt = timestamp;
-    return { changed: true, message: "Memory entries consolidated.", branch };
+    const primary = next.entries.at(primaryIndex)!;
+    const timestamp = this.timestamp();
+    next.entries = consolidatedEntries(next.entries, merged, primaryIndex, {
+      ...primary,
+      text: operation.content,
+      updatedAt: timestamp,
+      updatedBy: writeOrigin,
+      importance: operation.importance,
+      importanceAssessedAt: timestamp,
+    });
+    next.updatedAt = timestamp;
+    return { changed: true, message: "Memory entries merged.", branch: next };
+  }
+
+  private assessReviewedEntry(
+    branch: MemoryBranch,
+    operation: Extract<ReviewOperation, { action: "assess" }>,
+  ): MutationResult {
+    const next = this.cloneBranch(branch);
+    const index = this.entryIndex(next.entries, operation.entryId);
+    const timestamp = this.timestamp();
+    next.entries[index] = {
+      ...next.entries.at(index)!,
+      importance: operation.importance,
+      importanceAssessedAt: timestamp,
+    };
+    next.updatedAt = timestamp;
+    return { changed: true, message: "Memory importance assessed.", branch: next };
   }
 
   private mutate({
@@ -468,7 +566,6 @@ export class ProjectMemoryStore {
     sourceSessionId,
     writeOrigin = "assistant_tool",
     enforceCapacity = true,
-    allowReviewConsolidation = false,
   }: MutationRequest): MutationResult {
     const next: MemoryBranch = { ...branch, entries: branch.entries.map((entry) => ({ ...entry })) };
     const timestamp = this.timestamp();
@@ -486,6 +583,8 @@ export class ProjectMemoryStore {
         ...(sourceSessionId ? { sourceSessionId } : {}),
         createdBy: writeOrigin,
         updatedBy: writeOrigin,
+        importance: parseImportance(operation.importance, "normal")!,
+        ...(operation.importance ? { importanceAssessedAt: timestamp } : {}),
       });
       if (enforceCapacity) this.assertCapacity(next);
       next.updatedAt = timestamp;
@@ -497,18 +596,6 @@ export class ProjectMemoryStore {
     const matches = next.entries
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry }) => entry.text.includes(oldText));
-    if (matches.length === 0 && operation.action === "replace" && allowReviewConsolidation) {
-      const consolidation = this.tryConsolidateReviewEntries({
-        branch: next,
-        content: operation.content,
-        oldText,
-        timestamp,
-        writeOrigin,
-        enforceCapacity,
-      });
-      if (consolidation) return consolidation;
-    }
-
     if (matches.length === 0) throw new Error(`No memory entry uniquely matches '${oldText}'.`);
     if (matches.length > 1) throw new Error(`'${oldText}' matches ${matches.length} entries; use a more specific substring.`);
     const match = matches.at(0)!;
@@ -523,10 +610,34 @@ export class ProjectMemoryStore {
     if (next.entries.some((entry, index) => index !== match.index && entry.text === text)) {
       throw new Error("Replacement would duplicate another memory entry.");
     }
-    next.entries[match.index] = { ...match.entry, text, updatedAt: timestamp, updatedBy: writeOrigin };
+    const importance = parseImportance(operation.importance, match.entry.importance)!;
+    next.entries[match.index] = {
+      ...match.entry,
+      text,
+      updatedAt: timestamp,
+      updatedBy: writeOrigin,
+      importance,
+      ...(operation.importance ? { importanceAssessedAt: timestamp } : {}),
+    };
     if (enforceCapacity) this.assertCapacity(next);
     next.updatedAt = timestamp;
     return { changed: true, message: "Memory replaced.", branch: next };
+  }
+
+  private assertReviewCapacity(before: MemoryBranch, after: MemoryBranch): void {
+    this.assertCapacity(after);
+    const target = Math.max(1, Math.floor(this.maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
+    const beforeChars = memoryCharCount(before);
+    const afterChars = memoryCharCount(after);
+    if (beforeChars < target) {
+      if (afterChars > target) {
+        throw new Error(`Project memory review would exceed the working target of ${target} characters (${afterChars}/${target}).`);
+      }
+      return;
+    }
+    if (afterChars >= beforeChars) {
+      throw new Error(`Project memory review must shrink memory above the ${target}-character working target (${beforeChars}→${afterChars}).`);
+    }
   }
 
   private assertCapacity(branch: MemoryBranch): void {
@@ -538,7 +649,11 @@ export class ProjectMemoryStore {
 
   private assertLoadedBranch(branch: MemoryBranch): void {
     if (branch.entries.length > 200) throw new Error(`Memory branch '${branch.name}' has too many entries on disk.`);
+    const entryIds = new Set<string>();
     for (const entry of branch.entries) {
+      if (!ENTRY_ID.test(entry.id)) throw new Error(`Memory branch '${branch.name}' contains an invalid entry ID.`);
+      if (entryIds.has(entry.id)) throw new Error(`Memory branch '${branch.name}' contains duplicate entry IDs.`);
+      entryIds.add(entry.id);
       if (entry.text.length > this.maxEntryChars) {
         throw new Error(`Memory branch '${branch.name}' contains an oversized entry on disk.`);
       }
