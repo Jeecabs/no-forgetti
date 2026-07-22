@@ -221,6 +221,32 @@ test("memory review applies immediately and next turn injects live state", async
   assert.match(before.systemPrompt, /Type checks run with pnpm check\./u);
 });
 
+test("memory review appends a change entry with resolved old text", async (t) => {
+  const { context, extension, memoryStore } = await fixture(t, {
+    requestReviewPlan: async () => ({
+      operations: [
+        { action: "replace", oldText: "pnpm test", content: "Tests run with pnpm check." },
+        { action: "remove", oldText: "Node 18" },
+        { action: "add", content: "Deploys go through the release workflow." },
+      ],
+    }),
+  });
+  await memoryStore.applyOperation("main", { action: "add", content: "Tests run with pnpm test." });
+  await memoryStore.applyOperation("main", { action: "add", content: "CI runs on Node 18." });
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  const entry = extension.entries.find((item) => item.customType === "no-forgetti-memory-review");
+  assert.deepEqual(entry?.data, {
+    branch: "main",
+    changes: [
+      { kind: "replace", text: "Tests run with pnpm check.", oldText: "Tests run with pnpm test." },
+      { kind: "remove", text: "CI runs on Node 18." },
+      { kind: "add", text: "Deploys go through the release workflow." },
+    ],
+  });
+});
+
 test("shutdown prevents a review from starting after a delayed claim", async (t) => {
   let modelStarted = false;
   const { context, extension, memoryStore } = await fixture(t, {
