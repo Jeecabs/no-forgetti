@@ -16,6 +16,7 @@ class FakeExtension {
   readonly handlers = new Map<string, Handler[]>();
   readonly tools = new Map<string, unknown>();
   readonly commands = new Map<string, { handler: (args: string, context: ExtensionContext) => unknown | Promise<unknown> }>();
+  readonly entryRenderers = new Map<string, unknown>();
   readonly entries: Array<{ customType: string; data: unknown }> = [];
 
   readonly api = {
@@ -26,6 +27,7 @@ class FakeExtension {
     },
     registerTool: (tool: { name: string }) => this.tools.set(tool.name, tool),
     registerCommand: (name: string, command: { handler: (args: string, context: ExtensionContext) => unknown | Promise<unknown> }) => this.commands.set(name, command),
+    registerEntryRenderer: (customType: string, renderer: unknown) => this.entryRenderers.set(customType, renderer),
     appendEntry: (customType: string, data: unknown) => this.entries.push({ customType, data }),
   } as unknown as ExtensionAPI;
 
@@ -159,20 +161,8 @@ test("injects a recalled skill transiently and credits it only after successful 
   assert.equal(await skillStore.activity.completedCount(), 1);
 });
 
-test("shows recalled skill names in the working callout while they are in use", async (t) => {
-  const workingMessages: Array<string | undefined> = [];
+test("appends one visible chat entry after a recalled skill is injected", async (t) => {
   const { branch, context, extension } = await fixture(t);
-  Object.assign(context, {
-    hasUI: true,
-    mode: "tui",
-    ui: {
-      theme: { fg: (_color: string, text: string) => text },
-      notify: () => undefined,
-      setStatus: () => undefined,
-      setWidget: () => undefined,
-      setWorkingMessage: (value?: string) => workingMessages.push(value),
-    },
-  });
   await extension.emit("session_start", {}, context);
   await extension.emit("input", { text: "verify the canonical project checks", source: "interactive" }, context);
   branch.push(userEntry("user-status", "verify the canonical project checks"));
@@ -181,16 +171,17 @@ test("shows recalled skill names in the working callout while they are in use", 
     systemPrompt: "base prompt",
     prompt: "verify the canonical project checks",
   }, context);
-  assert.equal(workingMessages.at(-1), undefined);
+  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-skill-recall"), false);
 
-  await extension.emit("context", {
+  const contextEvent = {
     messages: [{ role: "user", content: "verify the canonical project checks" }],
-  }, context);
-  assert.match(workingMessages.at(-1) ?? "", /Using project skill: verification/u);
+  };
+  await extension.emit("context", contextEvent, context);
+  await extension.emit("context", contextEvent, context);
 
-  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
-  await extension.emit("agent_settled", {}, context);
-  assert.equal(workingMessages.at(-1), undefined);
+  const recalls = extension.entries.filter((entry) => entry.customType === "no-forgetti-skill-recall");
+  assert.deepEqual(recalls, [{ customType: "no-forgetti-skill-recall", data: { names: ["verification"] } }]);
+  assert.equal(extension.entryRenderers.has("no-forgetti-skill-recall"), true);
 });
 
 test("routes read-only command output in print and JSON modes", async (t) => {
