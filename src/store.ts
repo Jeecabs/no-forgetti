@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, stat, unlink } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -18,7 +18,6 @@ import {
   type MemoryBranch,
   type MemoryEntry,
   type MemoryOperation,
-  type MemoryReviewProposal,
   type MemoryWriteOrigin,
   type MutationResult,
   type ProjectMetadata,
@@ -45,12 +44,6 @@ function isErrno(error: unknown, code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function validateMemoryProposalId(id: string): string {
-  const normalized = id.trim();
-  if (!/^\d{14}-[0-9a-f]{8}$/u.test(normalized)) throw new Error("Invalid memory proposal id.");
-  return normalized;
 }
 
 function parseMemoryEntry(value: unknown): MemoryEntry {
@@ -124,7 +117,6 @@ export class ProjectMemoryStore {
 
   private readonly branchesDir: string;
   private readonly reviewsDir: string;
-  readonly memoryPendingDir: string;
   private readonly revisionsDir: string;
   private readonly metadataPath: string;
   private readonly lockPath: string;
@@ -137,7 +129,6 @@ export class ProjectMemoryStore {
     this.branchesDir = join(this.projectDir, "branches");
     this.reviewsDir = join(this.projectDir, "reviews");
     this.revisionsDir = join(this.projectDir, "revisions");
-    this.memoryPendingDir = join(this.projectDir, "memory-pending");
     this.metadataPath = join(this.projectDir, "project.json");
     this.lockPath = join(this.projectDir, ".lock");
     this.maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
@@ -150,7 +141,6 @@ export class ProjectMemoryStore {
     await mkdir(this.branchesDir, { recursive: true, mode: 0o700 });
     await mkdir(this.reviewsDir, { recursive: true, mode: 0o700 });
     await mkdir(this.revisionsDir, { recursive: true, mode: 0o700 });
-    await mkdir(this.memoryPendingDir, { recursive: true, mode: 0o700 });
     await this.withLock(async () => {
       const timestamp = this.timestamp();
       const metadata = await this.readJsonIfExists(this.metadataPath);
@@ -184,6 +174,10 @@ export class ProjectMemoryStore {
       } else {
         parseReviewState(review);
       }
+
+      // Memory reviews now apply atomically. Discard obsolete proposals only
+      // after validating active state; corrupt stores must remain untouched.
+      await rm(join(this.projectDir, "memory-pending"), { recursive: true, force: true });
     });
   }
 
@@ -273,7 +267,7 @@ export class ProjectMemoryStore {
       const results: MutationResult[] = [];
       let changed = false;
       try {
-        for (const operation of operations.slice(0, 4)) {
+        for (const operation of operations.slice(0, 4).map((item) => this.normalizeReviewOperation(item))) {
           const result = this.mutate(branch, operation, sourceSessionId, writeOrigin, false);
           branch = result.branch;
           changed ||= result.changed;
@@ -293,76 +287,6 @@ export class ProjectMemoryStore {
       }
       return results;
     });
-  }
-
-  async stageReviewProposal(
-    name: string,
-    operations: MemoryOperation[],
-    sourceSessionId?: string,
-  ): Promise<MemoryReviewProposal | undefined> {
-    const branchName = this.validateBranchName(name);
-    if (operations.length === 0) return undefined;
-    return this.withLock(async () => {
-      const original = parseMemoryBranch(await this.readJson(this.branchPath(branchName)), branchName);
-      this.assertLoadedBranch(original);
-      let branch = original;
-      const normalized = operations.slice(0, 4).map((operation) => this.normalizeReviewOperation(operation));
-      for (const operation of normalized) branch = this.mutate(branch, operation, sourceSessionId, "background_review", false).branch;
-      this.assertCapacity(branch);
-
-      const existing = (await this.listPendingReviews()).find((proposal) => (
-        proposal.branch === branchName && JSON.stringify(proposal.operations) === JSON.stringify(normalized)
-      ));
-      if (existing) return existing;
-      const proposal: MemoryReviewProposal = {
-        version: STORE_VERSION,
-        id: `${this.timestamp().replace(/[^0-9]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`,
-        branch: branchName,
-        createdAt: this.timestamp(),
-        ...(sourceSessionId ? { sourceSessionId } : {}),
-        operations: normalized,
-      };
-      await this.atomicWrite(join(this.memoryPendingDir, `${proposal.id}.json`), proposal);
-      return proposal;
-    });
-  }
-
-  async listPendingReviews(): Promise<MemoryReviewProposal[]> {
-    const entries = await readdir(this.memoryPendingDir, { withFileTypes: true });
-    const proposals: MemoryReviewProposal[] = [];
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const filenameId = validateMemoryProposalId(entry.name.slice(0, -5));
-      const value = await this.readJson(join(this.memoryPendingDir, entry.name));
-      if (!isRecord(value) || value.version !== STORE_VERSION || value.id !== filenameId || !Array.isArray(value.operations)) {
-        throw new Error("Invalid memory review proposal.");
-      }
-      proposals.push({
-        version: STORE_VERSION,
-        id: filenameId,
-        branch: this.validateBranchName(String(value.branch ?? "")),
-        createdAt: optionalIsoTimestamp(value.createdAt, "memory proposal timestamp") ?? this.timestamp(),
-        ...(typeof value.sourceSessionId === "string" ? { sourceSessionId: value.sourceSessionId } : {}),
-        operations: value.operations.map((operation) => this.normalizeReviewOperation(operation as MemoryOperation)),
-      });
-    }
-    return proposals.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  }
-
-  async approveReviewProposal(id: string): Promise<MutationResult[]> {
-    const safeId = validateMemoryProposalId(id);
-    const proposal = (await this.listPendingReviews()).find((item) => item.id === safeId);
-    if (!proposal) throw new Error(`No pending memory proposal '${safeId}'.`);
-    const results = await this.applyOperations(proposal.branch, proposal.operations, proposal.sourceSessionId, "background_review");
-    if (!results.some((result) => result.message.startsWith("Review batch rejected;"))) {
-      await this.withLock(async () => unlink(join(this.memoryPendingDir, `${safeId}.json`)));
-    }
-    return results;
-  }
-
-  async rejectReviewProposal(id: string): Promise<void> {
-    const safeId = validateMemoryProposalId(id);
-    await this.withLock(async () => unlink(join(this.memoryPendingDir, `${safeId}.json`)));
   }
 
   async undoReview(name: string): Promise<MutationResult> {

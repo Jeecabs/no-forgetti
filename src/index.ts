@@ -30,7 +30,6 @@ import {
   MAIN_MEMORY,
   type MemoryAction,
   type MemoryBranch,
-  type MemoryReviewProposal,
   type MutationResult,
 } from "./types.ts";
 
@@ -41,7 +40,7 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const BAR_CELLS = 4;
 const BAR_LEVELS = ["⣀", "⣤", "⣶", "⣿"] as const;
 
-type StateColor = "muted" | "warning" | "accent";
+type StateColor = "muted" | "accent";
 
 /** 4-cell braille bar, 16 fill levels; filled cells take the state color, empty cells are dim. */
 function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used: number, max: number): string {
@@ -118,15 +117,6 @@ function showCommandOutput(
   throw new Error("Command output requires TUI/RPC mode; use the corresponding model tool in JSON mode.");
 }
 
-function formatMemoryProposal(proposal: MemoryReviewProposal): string {
-  const operations = proposal.operations.map((operation, index) => [
-    `${index + 1}. ${operation.action}`,
-    ...(operation.oldText ? [`match: ${operation.oldText}`] : []),
-    ...(operation.content ? [`content: ${operation.content}`] : []),
-  ].join("\n"));
-  return [`proposal: ${proposal.id}`, `branch: ${proposal.branch}`, ...operations].join("\n\n");
-}
-
 function formatSkillProposal(proposal: SkillProposal): string {
   const operation = proposal.operations.at(0);
   if (!operation) return `proposal: ${proposal.id}\n(empty)`;
@@ -167,7 +157,6 @@ export function activateProjectMemoryExtension(
   let skillStore: ProjectSkillStore | undefined;
   let activeName = MAIN_MEMORY;
   let frozenBranch: MemoryBranch | undefined;
-  let snapshotDirty = false;
   let reviewPromise: Promise<void> | undefined;
   let reviewController: AbortController | undefined;
   let pendingUserInputs: string[] = [];
@@ -272,14 +261,13 @@ export function activateProjectMemoryExtension(
     const segs: string[] = [];
     if (activeSkillCount > 0) segs.push(`skills:${activeSkillCount}`);
     if (pendingSkillCount > 0) segs.push(`pending:${pendingSkillCount}`);
-    if (entries === 0 && segs.length === 0 && !snapshotDirty && !skillReviewRunning) {
+    if (entries === 0 && segs.length === 0 && !skillReviewRunning) {
       // ponytail: nothing to say — give the footer row back
       ctx.ui.setStatus(STATUS_KEY, undefined);
       return;
     }
     // Bar already communicates memory presence/capacity; avoid repeating it as text.
-    // Bar color = state: dirty (writes not injected) > reviewing > clean.
-    const stateColor: StateColor = snapshotDirty ? "warning" : skillReviewRunning ? "accent" : "muted";
+    const stateColor: StateColor = skillReviewRunning ? "accent" : "muted";
     const bar = capacityBar(t, stateColor, memoryCharCount(frozenBranch), store.maxChars);
     ctx.ui.setStatus(STATUS_KEY, `${bar} ${t.fg("muted", segs.join(" "))}`.trimEnd());
   }
@@ -365,7 +353,6 @@ export function activateProjectMemoryExtension(
     pendingUserInputs = [];
     lastAgentRunSuccessful = false;
     retrievedSkill = undefined;
-    snapshotDirty = false;
     refreshStatus(ctx);
   }
 
@@ -376,7 +363,6 @@ export function activateProjectMemoryExtension(
     activeName = branch.name;
     frozenBranch = branch;
     reviewExistingSession = false;
-    snapshotDirty = false;
     pi.appendEntry(ACTIVE_MEMORY_ENTRY, { name: activeName });
     if (boundaryEntryId) appendReviewCursor(activeName, boundaryEntryId, "branch-boundary");
     else reviewCursorId = undefined;
@@ -472,17 +458,25 @@ export function activateProjectMemoryExtension(
           afterEntryId: reviewAfterEntryId,
           maxChars: memoryStore.maxChars,
         });
-        const proposal = await memoryStore.stageReviewProposal(
+        const results = await memoryStore.applyOperations(
           reviewBranchName,
           plan.operations,
           ctx.sessionManager.getSessionId(),
+          "background_review",
         );
+        const rejected = results.find((result) => result.message.startsWith("Review batch rejected;"));
+        if (rejected) throw new Error(rejected.message);
+        const changed = results.filter((result) => result.changed);
+        if (reviewBranchName === activeName && changed.length > 0) {
+          frozenBranch = changed.at(-1)!.branch;
+          refreshStatus(ctx);
+        }
         if (throughEntryId) appendReviewCursor(reviewBranchName, throughEntryId, "reviewed");
         success = true;
-        if (ctx.hasUI && (force || proposal)) {
+        if (ctx.hasUI && (force || changed.length > 0)) {
           ctx.ui.notify(
-            proposal
-              ? `Project memory review staged proposal '${proposal.id}'. Inspect with /memory pending ${proposal.id}.`
+            changed.length > 0
+              ? `Project memory review updated memory: ${changed.map((result) => result.message).join(" ")}`
               : "Project memory review: nothing durable to save.",
             "info",
           );
@@ -577,7 +571,7 @@ export function activateProjectMemoryExtension(
       "Manage durable memory scoped to this project. Actions: list, add, replace, remove. " +
       "Save stable project conventions, architecture facts, verification commands, recurring preferences, and non-obvious durable workflows. " +
       "Never save secrets, temporary task progress, completed-work logs, issue/PR numbers, commit hashes, or raw tool output. " +
-      "replace/remove use oldText as a unique substring. Writes persist immediately but the injected context stays frozen until the next session or explicit /memory refresh.",
+      "replace/remove use oldText as a unique substring. Writes persist immediately and are injected automatically at the start of the next turn.",
     promptSnippet: "Read or update durable project-scoped memory",
     promptGuidelines: [
       `Use ${TOOL_NAME} after durable project-specific learning that would prevent future rediscovery or correction.`,
@@ -614,9 +608,9 @@ export function activateProjectMemoryExtension(
         ctx.sessionManager.getSessionId(),
         "assistant_tool",
       );
-      snapshotDirty ||= result.changed;
+      if (result.changed) frozenBranch = result.branch;
       refreshStatus(ctx);
-      const suffix = result.changed ? " Injected context remains frozen; visible next session or after /memory refresh." : "";
+      const suffix = result.changed ? " Visible in project context next turn." : "";
       return {
         content: [{ type: "text", text: `${result.message}${suffix}` }],
         details: toolDetails(params.action, result, memoryStore),
@@ -859,7 +853,7 @@ export function activateProjectMemoryExtension(
   });
 
   pi.registerCommand("memory", {
-    description: "Project memory. Usage: /memory status|show|branches|fork|use|refresh|review|pending|approve|reject|undo",
+    description: "Project memory. Usage: /memory status|show|branches|fork|use|review|undo",
     getArgumentCompletions: async (prefix) => {
       const base = [
         { value: "status", label: "status", description: "Show project memory status" },
@@ -867,13 +861,8 @@ export function activateProjectMemoryExtension(
         { value: "branches", label: "branches", description: "List memory branches" },
         { value: "fork ", label: "fork <name>", description: "Explicitly clone active memory and switch this session" },
         { value: "use ", label: "use <name>", description: "Switch this session to an existing memory branch" },
-        { value: "refresh", label: "refresh", description: "Reload live memory into this session context" },
-        { value: "review", label: "review", description: "Stage a self-learning review proposal" },
-        { value: "pending", label: "pending", description: "List pending memory proposals" },
-        { value: "pending ", label: "pending <id>", description: "Inspect a pending memory proposal" },
-        { value: "approve ", label: "approve <id>", description: "Approve a memory proposal" },
-        { value: "reject ", label: "reject <id>", description: "Reject a memory proposal" },
-        { value: "undo", label: "undo", description: "Undo the last approved memory review" },
+        { value: "review", label: "review", description: "Run self-learning memory refinement now" },
+        { value: "undo", label: "undo", description: "Undo the last automatic memory review" },
       ];
       if (prefix.startsWith("use ") && store) {
         const names = await store.listBranches();
@@ -894,7 +883,7 @@ export function activateProjectMemoryExtension(
         presentCommandOutput(ctx, [
           `project: ${memoryStore.projectRoot}`,
           `storage: ${memoryStore.projectDir}`,
-          `active memory: ${activeName}${snapshotDirty ? " (live writes not injected yet)" : ""}`,
+          `active memory: ${activeName}`,
           `entries: ${live.entries.length}`,
           `capacity: ${memoryCharCount(live)}/${memoryStore.maxChars} chars`,
           "session forks share this memory branch unless you explicitly run /memory fork <name>",
@@ -925,7 +914,6 @@ export function activateProjectMemoryExtension(
         const branch = await memoryStore.forkBranch(activeName, value);
         activeName = branch.name;
         frozenBranch = branch;
-        snapshotDirty = false;
         pi.appendEntry(ACTIVE_MEMORY_ENTRY, { name: activeName });
         if (boundaryEntryId) appendReviewCursor(activeName, boundaryEntryId, "branch-boundary");
         else reviewCursorId = undefined;
@@ -948,62 +936,9 @@ export function activateProjectMemoryExtension(
         return;
       }
 
-      if (subcommand === "refresh") {
-        await ctx.waitForIdle();
-        await reviewPromise;
-        frozenBranch = await memoryStore.loadBranch(activeName);
-        snapshotDirty = false;
-        refreshStatus(ctx);
-        ctx.ui.notify(`Reloaded project memory '${activeName}'. Next turn uses the fresh snapshot.`, "info");
-        return;
-      }
-
       if (subcommand === "review") {
         await ctx.waitForIdle();
         await runReview(ctx, true);
-        return;
-      }
-
-      if (subcommand === "pending") {
-        const pending = await memoryStore.listPendingReviews();
-        if (value) {
-          const proposal = pending.find((item) => item.id === value);
-          if (!proposal) return ctx.ui.notify(`No pending memory proposal '${value}'.`, "warning");
-          presentCommandOutput(ctx, formatMemoryProposal(proposal));
-          return;
-        }
-        presentCommandOutput(ctx, pending.length === 0
-          ? "No pending memory proposals."
-          : pending.map((proposal) => `${proposal.id}: ${proposal.branch} · ${proposal.operations.length} operation(s)`).join("\n"));
-        return;
-      }
-
-      if (subcommand === "approve") {
-        if (!value) return ctx.ui.notify("Usage: /memory approve <proposal-id>", "warning");
-        if (!ctx.hasUI) throw new Error("Memory proposal approval requires an interactive UI.");
-        const proposal = (await memoryStore.listPendingReviews()).find((item) => item.id === value);
-        if (!proposal) return ctx.ui.notify(`No pending memory proposal '${value}'.`, "warning");
-        const confirmed = await ctx.ui.confirm(`Approve memory proposal '${value}'?`, formatMemoryProposal(proposal));
-        if (!confirmed) return;
-        await ctx.waitForIdle();
-        const results = await memoryStore.approveReviewProposal(value);
-        const changed = results.filter((result) => result.changed);
-        if (proposal.branch === activeName) snapshotDirty ||= changed.length > 0;
-        refreshStatus(ctx);
-        ctx.ui.notify(changed.length > 0
-          ? `${changed.map((result) => result.message).join(" ")} Refresh memory to inject approved changes.`
-          : "Memory proposal made no changes.", "info");
-        return;
-      }
-
-      if (subcommand === "reject") {
-        if (!value) return ctx.ui.notify("Usage: /memory reject <proposal-id>", "warning");
-        if (!ctx.hasUI) throw new Error("Memory proposal rejection requires an interactive UI.");
-        const confirmed = await ctx.ui.confirm(`Reject memory proposal '${value}'?`, "This discards the proposal without changing memory.");
-        if (!confirmed) return;
-        await ctx.waitForIdle();
-        await memoryStore.rejectReviewProposal(value);
-        ctx.ui.notify(`Rejected memory proposal '${value}'.`, "info");
         return;
       }
 
@@ -1011,13 +946,13 @@ export function activateProjectMemoryExtension(
         await ctx.waitForIdle();
         await reviewPromise;
         const result = await memoryStore.undoReview(activeName);
-        snapshotDirty = !frozenBranch || JSON.stringify(result.branch.entries) !== JSON.stringify(frozenBranch.entries);
+        frozenBranch = result.branch;
         refreshStatus(ctx);
-        ctx.ui.notify(`${result.message} Injected context remains unchanged until /memory refresh or the next session.`, "info");
+        ctx.ui.notify(`${result.message} Previous memory will be injected next turn.`, "info");
         return;
       }
 
-      ctx.ui.notify("Usage: /memory status|show|branches|fork|use|refresh|review|pending|approve|reject|undo", "warning");
+      ctx.ui.notify("Usage: /memory status|show|branches|fork|use|review|undo", "warning");
     },
   });
 
@@ -1104,12 +1039,15 @@ export function activateProjectMemoryExtension(
   pi.on("session_compact", async (_event, ctx) => {
     if (!store) return;
     frozenBranch = await store.loadBranch(activeName);
-    snapshotDirty = false;
     refreshStatus(ctx);
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    if (!store || !frozenBranch) return;
+    if (!store) return;
+    // Memory is live project state: pick up background, tool, and cross-session
+    // writes at every turn boundary without requiring manual refresh.
+    frozenBranch = await store.loadBranch(activeName);
+    refreshStatus(ctx);
     const blocks = [event.systemPrompt];
     const memoryBlock = formatMemoryContext(frozenBranch, store.maxChars);
     if (memoryBlock) blocks.push(memoryBlock);

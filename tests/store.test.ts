@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -109,22 +109,49 @@ test("review batch consolidates atomically against final capacity", async (t) =>
   assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), ["Project commands use pnpm."]);
 });
 
-test("background memory reviews remain pending until explicit approval", async (t) => {
-  const { base, store } = await fixture();
+test("background memory reviews apply immediately with provenance metadata", async (t) => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { base, store } = await fixture({ now: () => now });
   t.after(() => rm(base, { recursive: true, force: true }));
-  const proposal = await store.stageReviewProposal("main", [{ action: "add", content: "Tests run with pnpm test." }], "session-1");
-  assert.ok(proposal);
-  assert.equal((await store.loadBranch("main")).entries.length, 0);
-  assert.equal((await store.listPendingReviews()).length, 1);
-  const results = await store.approveReviewProposal(proposal.id);
-  assert.equal(results.some((result) => result.changed), true);
-  assert.equal((await store.loadBranch("main")).entries.length, 1);
-  assert.equal((await store.listPendingReviews()).length, 0);
 
-  const rejected = await store.stageReviewProposal("main", [{ action: "remove", oldText: "pnpm test" }], "session-2");
-  assert.ok(rejected);
-  await store.rejectReviewProposal(rejected.id);
-  assert.equal((await store.loadBranch("main")).entries.length, 1);
+  const results = await store.applyOperations(
+    "main",
+    [{ action: "add", content: "Tests run with pnpm test." }],
+    "session-1",
+    "background_review",
+  );
+  assert.equal(results.some((result) => result.changed), true);
+  const entry = (await store.loadBranch("main")).entries.at(0);
+  assert.ok(entry);
+  assert.equal(entry.sourceSessionId, "session-1");
+  assert.equal(entry.createdBy, "background_review");
+  assert.equal(entry.updatedBy, "background_review");
+  assert.equal(entry.createdAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(entry.updatedAt, "2026-01-01T00:00:00.000Z");
+
+  now = new Date("2026-01-02T00:00:00.000Z");
+  await store.applyOperations("main", [{
+    action: "replace",
+    oldText: "pnpm test",
+    content: "Tests and type checks run with pnpm check.",
+  }], "session-2", "background_review");
+  const refined = (await store.loadBranch("main")).entries.at(0);
+  assert.ok(refined);
+  assert.equal(refined.createdAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(refined.updatedAt, "2026-01-02T00:00:00.000Z");
+  assert.equal(refined.createdBy, "background_review");
+  assert.equal(refined.updatedBy, "background_review");
+});
+
+test("initialization discards obsolete pending memory proposals", async (t) => {
+  const { base, project, storage, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const pendingDir = join(store.projectDir, "memory-pending");
+  await mkdir(pendingDir);
+  await writeFile(join(pendingDir, "20260722015516-08854b1c.json"), "{}\n");
+
+  await new ProjectMemoryStore(project, { storageRoot: storage }).initialize();
+  await assert.rejects(stat(pendingDir), { code: "ENOENT" });
 });
 
 test("explicit memory fork copies then diverges", async (t) => {

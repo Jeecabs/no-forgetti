@@ -10,6 +10,6 @@ Include the affected version, impact, reproduction steps, and any suggested miti
 
 No Forgetti is a Pi extension and therefore runs with the same filesystem, process, and network permissions as Pi. Review the source before installation.
 
-Project memory and generated skill proposals stay under `$PI_CODING_AGENT_DIR/no-forgetti/` by default. Background reviews call the currently configured model provider. Generated skills do not become active until explicitly approved.
+Project memory and generated skill state stay under `$PI_CODING_AGENT_DIR/no-forgetti/` by default. Background reviews call the currently configured model provider. Validated memory refinements and new skills apply automatically; skill patches and archives still require explicit approval. Memory keeps one bounded pre-review snapshot for `/memory undo`.
 
 Only the latest release and current `main` branch receive security fixes.
