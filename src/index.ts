@@ -30,12 +30,16 @@ import {
   MAIN_MEMORY,
   type MemoryAction,
   type MemoryBranch,
+  type MemoryOperation,
   type MutationResult,
 } from "./types.ts";
 
 const STATUS_KEY = "no-forgetti";
 const WIDGET_KEY = "no-forgetti";
 const SKILL_RECALL_ENTRY = "no-forgetti-skill-recall";
+const MEMORY_REVIEW_ENTRY = "no-forgetti-memory-review";
+const REVIEW_GLYPHS = { add: "+", replace: "~", remove: "−" } as const;
+const REVIEW_LINE_CHARS = 76;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BAR_CELLS = 4;
 const BAR_LEVELS = ["⣀", "⣤", "⣶", "⣿"] as const;
@@ -89,6 +93,44 @@ interface MemoryToolDetails {
 
 function firstLine(value: string): string {
   return value.split("\n", 1)[0] ?? value;
+}
+
+interface MemoryReviewChange {
+  kind: keyof typeof REVIEW_GLYPHS;
+  text: string;
+  oldText?: string;
+}
+
+function clipReviewLine(value: string): string {
+  const line = firstLine(value.trim());
+  return line.length <= REVIEW_LINE_CHARS ? line : `${line.slice(0, REVIEW_LINE_CHARS - 1)}…`;
+}
+
+/** Results align 1:1 with the (≤4) operations applyOperations accepted. */
+function reviewChanges(
+  before: MemoryBranch,
+  operations: MemoryOperation[],
+  results: MutationResult[],
+): MemoryReviewChange[] {
+  const changes: MemoryReviewChange[] = [];
+  for (const [index, result] of results.entries()) {
+    const operation = operations[index];
+    if (!result.changed || !operation) continue;
+    // Consolidations match no single entry; oldText then stays undefined.
+    const previous = operation.oldText
+      ? before.entries.find((entry) => entry.text.includes(operation.oldText!))?.text
+      : undefined;
+    if (operation.action === "remove") {
+      changes.push({ kind: "remove", text: safeContextText(previous ?? operation.oldText ?? "") });
+    } else {
+      changes.push({
+        kind: operation.action,
+        text: safeContextText(operation.content ?? ""),
+        ...(operation.action === "replace" && previous ? { oldText: safeContextText(previous) } : {}),
+      });
+    }
+  }
+  return changes;
 }
 
 function errorMessage(error: unknown): string {
@@ -473,13 +515,13 @@ export function activateProjectMemoryExtension(
         }
         if (throughEntryId) appendReviewCursor(reviewBranchName, throughEntryId, "reviewed");
         success = true;
-        if (ctx.hasUI && (force || changed.length > 0)) {
-          ctx.ui.notify(
-            changed.length > 0
-              ? `Project memory review updated memory: ${changed.map((result) => result.message).join(" ")}`
-              : "Project memory review: nothing durable to save.",
-            "info",
-          );
+        if (changed.length > 0) {
+          pi.appendEntry(MEMORY_REVIEW_ENTRY, {
+            branch: reviewBranchName,
+            changes: reviewChanges(branch, plan.operations, results),
+          });
+        } else if (force && ctx.hasUI) {
+          ctx.ui.notify("Project memory review: nothing durable to save.", "info");
         }
       } catch (error) {
         if (ctx.hasUI) ctx.ui.notify(`Project memory review failed: ${errorMessage(error)}`, "warning");
@@ -1015,6 +1057,34 @@ export function activateProjectMemoryExtension(
       if (skillStore) await skillStore.recordUserTurn(scoreSkillSignal(text) + complexitySignal);
     }
   }
+
+  pi.registerEntryRenderer<{ branch: string; changes: MemoryReviewChange[] }>(MEMORY_REVIEW_ENTRY, (entry, { expanded }, theme) => {
+    const changes = Array.isArray(entry.data?.changes)
+      ? entry.data.changes.filter((change): change is MemoryReviewChange =>
+          Boolean(change) && typeof change.text === "string" && change.kind in REVIEW_GLYPHS)
+      : [];
+    if (changes.length === 0) return undefined;
+    const branchSuffix = typeof entry.data?.branch === "string" && entry.data.branch !== MAIN_MEMORY
+      ? ` (${entry.data.branch})`
+      : "";
+    const rail = theme.fg("dim", "│ ");
+    const lines = [theme.fg("dim", `╭ no-forgetti · memory review${branchSuffix} · /memory undo`)];
+    for (const change of changes) {
+      const glyph = theme.fg(
+        change.kind === "add" ? "toolDiffAdded" : change.kind === "remove" ? "toolDiffRemoved" : "accent",
+        REVIEW_GLYPHS[change.kind],
+      );
+      const [head = "", ...rest] = (expanded ? change.text.trim() : clipReviewLine(change.text)).split("\n");
+      lines.push(`${rail}${glyph} ${theme.fg("muted", head)}`);
+      for (const extra of rest) lines.push(`${rail}  ${theme.fg("muted", extra)}`);
+      if (expanded && change.oldText) {
+        for (const [index, old] of change.oldText.trim().split("\n").entries()) {
+          lines.push(`${rail}  ${theme.fg("dim", index === 0 ? `was: ${old}` : old)}`);
+        }
+      }
+    }
+    return new Text(lines.join("\n"), 1, 0);
+  });
 
   pi.registerEntryRenderer<{ names: string[] }>(SKILL_RECALL_ENTRY, (entry, _options, theme) => {
     const names = Array.isArray(entry.data?.names)
