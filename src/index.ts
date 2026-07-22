@@ -36,6 +36,7 @@ import {
 
 const STATUS_KEY = "no-forgetti";
 const WIDGET_KEY = "no-forgetti";
+const SKILL_RECALL_ENTRY = "no-forgetti-skill-recall";
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BAR_CELLS = 4;
 const BAR_LEVELS = ["⣀", "⣤", "⣶", "⣿"] as const;
@@ -281,14 +282,6 @@ export function activateProjectMemoryExtension(
     const stateColor: StateColor = snapshotDirty ? "warning" : skillReviewRunning ? "accent" : "muted";
     const bar = capacityBar(t, stateColor, memoryCharCount(frozenBranch), store.maxChars);
     ctx.ui.setStatus(STATUS_KEY, `${bar} ${t.fg("muted", segs.join(" "))}`.trimEnd());
-  }
-
-  function refreshSkillCallout(ctx: ExtensionContext): void {
-    if (ctx.mode !== "tui") return;
-    const names = retrievedSkill?.names;
-    ctx.ui.setWorkingMessage(names?.length
-      ? ctx.ui.theme.fg("accent", `Using project skill: ${names.join(", ")}`)
-      : undefined);
   }
 
   async function loadSessionMemory(ctx: ExtensionContext): Promise<void> {
@@ -1088,6 +1081,14 @@ export function activateProjectMemoryExtension(
     }
   }
 
+  pi.registerEntryRenderer<{ names: string[] }>(SKILL_RECALL_ENTRY, (entry, _options, theme) => {
+    const names = Array.isArray(entry.data?.names)
+      ? entry.data.names.filter((name): name is string => typeof name === "string")
+      : [];
+    if (names.length === 0) return undefined;
+    return new Text(theme.fg("accent", `Using project skill: ${names.join(", ")}`), 1, 0);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     await loadSessionMemory(ctx);
   });
@@ -1132,18 +1133,16 @@ export function activateProjectMemoryExtension(
         if (ctx.hasUI) ctx.ui.notify(`Project skill retrieval failed: ${errorMessage(error)}`, "warning");
       }
     }
-    // Clear any stale override. The callout appears only after context injection succeeds.
-    if (ctx.mode === "tui") ctx.ui.setWorkingMessage();
     return { systemPrompt: blocks.join("\n\n") };
   });
 
-  pi.on("context", async (event, ctx) => {
+  pi.on("context", async (event) => {
     const retrieval = retrievedSkill;
     if (!retrieval) return;
     const messages = injectRetrievedSkillContext(event.messages, retrieval.block);
-    if (messages) {
+    if (messages && !retrieval.presented) {
       retrieval.presented = true;
-      refreshSkillCallout(ctx);
+      pi.appendEntry(SKILL_RECALL_ENTRY, { names: retrieval.names });
     }
     return messages ? { messages } : undefined;
   });
@@ -1165,7 +1164,6 @@ export function activateProjectMemoryExtension(
   pi.on("agent_settled", async (_event, ctx) => {
     const settledSkill = retrievedSkill;
     retrievedSkill = undefined;
-    refreshSkillCallout(ctx);
     if (!store) return;
     const completed = consumeCompletedInputs(ctx);
     if (!lastAgentRunSuccessful || completed.inputs.length === 0) return;
