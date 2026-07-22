@@ -109,6 +109,27 @@ test("review batch consolidates atomically against final capacity", async (t) =>
   assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), ["Project commands use pnpm."]);
 });
 
+test("background review recovers a multi-entry replacement as consolidation", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const general = "For TypeScript verification, do not run legacy tsc; use tsgo only when needed.";
+  const specific = "Use tsgo instead of tsc; root tsconfig needs compatibility changes.";
+  await store.applyOperation("main", { action: "add", content: general });
+  await store.applyOperation("main", { action: "add", content: specific });
+
+  const results = await store.applyOperations("main", [{
+    action: "replace",
+    oldText: `${general}\n - ${specific}`,
+    content: "Use tsgo instead of legacy tsc; root tsconfig may need compatibility changes.",
+  }]);
+
+  assert.equal(results.at(0)?.message, "Memory entries consolidated.");
+  assert.deepEqual(
+    (await store.loadBranch("main")).entries.map((entry) => entry.text),
+    ["Use tsgo instead of legacy tsc; root tsconfig may need compatibility changes."],
+  );
+});
+
 test("background memory reviews apply immediately with provenance metadata", async (t) => {
   let now = new Date("2026-01-01T00:00:00.000Z");
   const { base, store } = await fixture({ now: () => now });

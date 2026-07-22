@@ -38,6 +38,24 @@ interface StoreOptions {
   now?: () => Date;
 }
 
+interface MutationRequest {
+  branch: MemoryBranch;
+  operation: MemoryOperation;
+  sourceSessionId?: string;
+  writeOrigin?: MemoryWriteOrigin;
+  enforceCapacity?: boolean;
+  allowReviewConsolidation?: boolean;
+}
+
+interface ReviewConsolidationRequest {
+  branch: MemoryBranch;
+  content?: string;
+  oldText: string;
+  timestamp: string;
+  writeOrigin: MemoryWriteOrigin;
+  enforceCapacity: boolean;
+}
+
 function isErrno(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
@@ -79,6 +97,45 @@ function parseMemoryBranch(value: unknown, expectedName: string): MemoryBranch {
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : createdAt,
     entries: value.entries.map(parseMemoryEntry),
   };
+}
+
+function listedEntryTexts(oldText: string): string[] | undefined {
+  const [first, ...rest] = oldText.split(/\n\s*-\s+/u);
+  if (first === undefined || rest.length === 0) return undefined;
+  return [first.replace(/^\s*-\s+/u, "").trim(), ...rest.map((text) => text.trim())];
+}
+
+function uniqueExactEntryIndex(entries: MemoryEntry[], text: string): number | undefined {
+  const matches = entries.flatMap((entry, index) => entry.text === text ? [index] : []);
+  return matches.length === 1 ? matches.at(0) : undefined;
+}
+
+function reviewConsolidationIndexes(entries: MemoryEntry[], oldText: string): number[] | undefined {
+  const texts = listedEntryTexts(oldText);
+  if (!texts) return undefined;
+  const indexes = texts.map((text) => uniqueExactEntryIndex(entries, text));
+  if (indexes.some((index) => index === undefined)) return undefined;
+  const resolved = indexes.filter((index): index is number => index !== undefined);
+  if (new Set(resolved).size !== texts.length) return undefined;
+  return resolved;
+}
+
+function consolidatedEntries(
+  entries: MemoryEntry[],
+  mergeIndexes: Set<number>,
+  primaryIndex: number,
+  replacement: MemoryEntry,
+): MemoryEntry[] {
+  return entries.flatMap((entry, index) => {
+    if (index === primaryIndex) return [replacement];
+    return mergeIndexes.has(index) ? [] : [entry];
+  });
+}
+
+function assertNoDuplicateOutside(entries: MemoryEntry[], excludedIndexes: Set<number>, text: string): void {
+  if (entries.some((entry, index) => !excludedIndexes.has(index) && entry.text === text)) {
+    throw new Error("Replacement would duplicate another memory entry.");
+  }
 }
 
 function emptyReviewState(): ReviewState {
@@ -247,7 +304,7 @@ export class ProjectMemoryStore {
     return this.withLock(async () => {
       const branch = parseMemoryBranch(await this.readJson(this.branchPath(branchName)), branchName);
       this.assertLoadedBranch(branch);
-      const result = this.mutate(branch, operation, sourceSessionId, writeOrigin);
+      const result = this.mutate({ branch, operation, sourceSessionId, writeOrigin });
       if (result.changed) await this.atomicWrite(this.branchPath(branchName), result.branch);
       return result;
     });
@@ -268,7 +325,14 @@ export class ProjectMemoryStore {
       let changed = false;
       try {
         for (const operation of operations.slice(0, 4).map((item) => this.normalizeReviewOperation(item))) {
-          const result = this.mutate(branch, operation, sourceSessionId, writeOrigin, false);
+          const result = this.mutate({
+            branch,
+            operation,
+            sourceSessionId,
+            writeOrigin,
+            enforceCapacity: false,
+            allowReviewConsolidation: true,
+          });
           branch = result.branch;
           changed ||= result.changed;
           results.push(result);
@@ -359,7 +423,9 @@ export class ProjectMemoryStore {
     }
     if (operation.action === "replace") {
       const oldText = (operation.oldText ?? "").trim();
-      if (!oldText || oldText.length > this.maxEntryChars) throw new Error("Invalid memory review replacement match.");
+      if (!oldText || oldText.length > this.maxChars + this.maxEntryChars) {
+        throw new Error("Invalid memory review replacement match.");
+      }
       return { action: "replace", oldText, content: validateMemoryText(operation.content ?? "", this.maxEntryChars) };
     }
     if (operation.action === "remove") {
@@ -370,13 +436,40 @@ export class ProjectMemoryStore {
     throw new Error("Invalid memory review operation action.");
   }
 
-  private mutate(
-    branch: MemoryBranch,
-    operation: MemoryOperation,
-    sourceSessionId?: string,
-    writeOrigin: MemoryWriteOrigin = "assistant_tool",
+  private tryConsolidateReviewEntries({
+    branch,
+    content,
+    oldText,
+    timestamp,
+    writeOrigin,
+    enforceCapacity,
+  }: ReviewConsolidationRequest): MutationResult | undefined {
+    const mergeIndexes = reviewConsolidationIndexes(branch.entries, oldText);
+    if (!mergeIndexes) return undefined;
+    const merged = new Set(mergeIndexes);
+    const text = validateMemoryText(content ?? "", this.maxEntryChars);
+    assertNoDuplicateOutside(branch.entries, merged, text);
+    const primaryIndex = mergeIndexes.at(0)!;
+    const primary = branch.entries.at(primaryIndex)!;
+    branch.entries = consolidatedEntries(
+      branch.entries,
+      merged,
+      primaryIndex,
+      { ...primary, text, updatedAt: timestamp, updatedBy: writeOrigin },
+    );
+    if (enforceCapacity) this.assertCapacity(branch);
+    branch.updatedAt = timestamp;
+    return { changed: true, message: "Memory entries consolidated.", branch };
+  }
+
+  private mutate({
+    branch,
+    operation,
+    sourceSessionId,
+    writeOrigin = "assistant_tool",
     enforceCapacity = true,
-  ): MutationResult {
+    allowReviewConsolidation = false,
+  }: MutationRequest): MutationResult {
     const next: MemoryBranch = { ...branch, entries: branch.entries.map((entry) => ({ ...entry })) };
     const timestamp = this.timestamp();
 
@@ -404,9 +497,21 @@ export class ProjectMemoryStore {
     const matches = next.entries
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry }) => entry.text.includes(oldText));
+    if (matches.length === 0 && operation.action === "replace" && allowReviewConsolidation) {
+      const consolidation = this.tryConsolidateReviewEntries({
+        branch: next,
+        content: operation.content,
+        oldText,
+        timestamp,
+        writeOrigin,
+        enforceCapacity,
+      });
+      if (consolidation) return consolidation;
+    }
+
     if (matches.length === 0) throw new Error(`No memory entry uniquely matches '${oldText}'.`);
     if (matches.length > 1) throw new Error(`'${oldText}' matches ${matches.length} entries; use a more specific substring.`);
-    const match = matches[0];
+    const match = matches.at(0)!;
 
     if (operation.action === "remove") {
       next.entries.splice(match.index, 1);
