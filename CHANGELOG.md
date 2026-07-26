@@ -7,6 +7,7 @@
 - Add recoverable project admission intents spanning branch mutation and revision publication, outcome-bound immutable receipts, intent compaction, and real-process crash tests.
 - Fence review cadence settlement so activity recorded after a review snapshot is preserved.
 - Expand the SQLite observational ledger and `/memory status` with settled, held, and unknown attempt visibility.
+- Redraw the `/memory status` monitor as a closed card: four-sided frame so it no longer dissolves into the editor behind it, sentence-case labels, aligned budget columns with full-width bars, and inline notices instead of a highlighted banner.
 
 ## 0.2.0 — 2026-07-26
 
