@@ -20,7 +20,7 @@ import { requestSkillReviewPlan } from "./skill-review.ts";
 import { buildRetrievedSkillContext, injectRetrievedSkillContext } from "./skill-injection.ts";
 import { ProjectSkillStore } from "./skill-store.ts";
 import { showSkillPicker, showSkillViewer } from "./skill-ui.ts";
-import { DEFAULT_SKILL_RETENTION_SESSIONS, type SkillProposal } from "./skill-types.ts";
+import { DEFAULT_SKILL_RETENTION_SESSIONS, type SkillProposal, type SkillReviewClaim } from "./skill-types.ts";
 import {
   ACTIVE_MEMORY_ENTRY,
   REVIEW_CURSOR_ENTRY,
@@ -69,8 +69,10 @@ function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used
 
 const TOOL_NAME = "project_memory";
 const SKILL_TOOL_NAME = "project_skill";
-const REVIEW_TIMEOUT_MS = 60_000;
+const REVIEW_TIMEOUT_MS = 120_000;
 const SERVICE_MONITOR_POLL_MS = 15_000;
+const REVIEW_ABORT_LIFECYCLE = "lifecycle";
+const REVIEW_ABORT_TIMEOUT = "timeout";
 /** Stamped into durable provenance; tests/manifest.test.ts pins it to package.json. */
 export const EXTENSION_VERSION = "0.2.0";
 
@@ -173,6 +175,33 @@ function reviewChanges(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function settleOnAbort<T>(request: {
+  promise: Promise<T>;
+  signal: AbortSignal;
+  message: string;
+}): Promise<T> {
+  const { promise, signal, message } = request;
+  if (signal.aborted) return Promise.reject(new Error(message));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(new Error(message));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function formatBranch(branch: MemoryBranch): string {
@@ -550,16 +579,32 @@ export function activateProjectMemoryExtension(
     const controller = new AbortController();
     skillReviewController = controller;
     skillReviewPromise = (async () => {
-      let claimed = false;
+      let claim: SkillReviewClaim | undefined;
       let success = false;
+      let cancelled = false;
+      let commitStarted = false;
       let reviewTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        claimed = await projectSkills.claimReviewIfDue(undefined, undefined, force);
-        if (!claimed || controller.signal.aborted) return;
+        claim = await projectSkills.claimReviewIfDue({ force });
+        if (!claim) return;
+        if (controller.signal.aborted) {
+          cancelled = controller.signal.reason === REVIEW_ABORT_LIFECYCLE;
+          return;
+        }
         skillReviewRunning = true;
         refreshStatus(ctx);
-        reviewTimeout = setTimeout(() => controller.abort(), dependencies.reviewTimeoutMs);
-        const plan = await dependencies.requestSkillReviewPlan(ctx, projectSkills, reviewAfterEntryId, controller.signal);
+        reviewTimeout = setTimeout(() => controller.abort(REVIEW_ABORT_TIMEOUT), dependencies.reviewTimeoutMs);
+        const plan = await settleOnAbort({
+          promise: dependencies.requestSkillReviewPlan(ctx, projectSkills, reviewAfterEntryId, controller.signal),
+          signal: controller.signal,
+          message: "Project skill review was aborted.",
+        });
+        if (controller.signal.aborted) throw new Error("Project skill review was aborted.");
+        clearTimeout(reviewTimeout);
+        reviewTimeout = undefined;
+        // Validated model output is the commit point. Local proposal admission is
+        // bounded and atomic; lifecycle cancellation waits for it to finish.
+        commitStarted = true;
         if (plan.operations.length > 0) {
           const operation = plan.operations.at(0)!;
           const submission = await projectSkills.submitProposal(plan.operations, ctx.sessionManager.getSessionId());
@@ -583,10 +628,25 @@ export function activateProjectMemoryExtension(
         if (throughEntryId) appendSkillReviewCursor(throughEntryId);
         success = true;
       } catch (error) {
-        if (ctx.hasUI) ctx.ui.notify(`Project skill review failed: ${errorMessage(error)}`, "warning");
+        const abortReason = !commitStarted && controller.signal.aborted ? controller.signal.reason : undefined;
+        if (abortReason === REVIEW_ABORT_LIFECYCLE) {
+          cancelled = true;
+        } else if (abortReason === REVIEW_ABORT_TIMEOUT) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              "Project skill review timed out; it will retry after backoff on a future completed turn.",
+              "warning",
+            );
+          }
+        } else if (ctx.hasUI) {
+          ctx.ui.notify(`Project skill review failed: ${errorMessage(error)}`, "warning");
+        }
       } finally {
         if (reviewTimeout) clearTimeout(reviewTimeout);
-        if (claimed) await projectSkills.finishReview(success).catch(() => undefined);
+        if (claim) {
+          const outcome = success ? "success" : cancelled ? "cancelled" : "failure";
+          await projectSkills.finishReview({ claim, outcome }).catch(() => undefined);
+        }
         skillReviewRunning = false;
         refreshStatus(ctx);
         if (skillReviewController === controller) skillReviewController = undefined;
@@ -1330,7 +1390,7 @@ export function activateProjectMemoryExtension(
 
   pi.on("session_tree", async (_event, ctx) => {
     reviewController?.abort();
-    skillReviewController?.abort();
+    skillReviewController?.abort(REVIEW_ABORT_LIFECYCLE);
     await reviewPromise?.catch(() => undefined);
     await skillReviewPromise?.catch(() => undefined);
     await loadSessionMemory(ctx);
@@ -1426,7 +1486,7 @@ export function activateProjectMemoryExtension(
     retrievedSkill = undefined;
     pendingUserInputs = [];
     reviewController?.abort();
-    skillReviewController?.abort();
+    skillReviewController?.abort(REVIEW_ABORT_LIFECYCLE);
     await reviewPromise?.catch(() => undefined);
     await skillReviewPromise?.catch(() => undefined);
   });

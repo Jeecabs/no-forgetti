@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -62,14 +62,16 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
   await skillStore.approveProposal(proposal.id);
 
   const branch: Array<Record<string, unknown>> = [];
+  const notifications: Array<{ message: string; type: string }> = [];
   const context = {
     cwd: project,
     hasUI: false,
     mode: "print",
     ui: {
       theme: { fg: (_color: string, text: string) => text },
-      notify: () => undefined,
+      notify: (message: string, type: string) => notifications.push({ message, type }),
       setStatus: () => undefined,
+      setWidget: () => undefined,
     },
     waitForIdle: async () => undefined,
     sessionManager: {
@@ -102,7 +104,7 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
     await extension.emit("session_shutdown", {}, context);
     await rm(base, { recursive: true, force: true });
   });
-  return { branch, context, extension, memoryStore, skillStore, reviewSpool };
+  return { branch, context, extension, memoryStore, skillStore, reviewSpool, notifications };
 }
 
 function userEntry(id: string, text: string): Record<string, unknown> {
@@ -166,6 +168,153 @@ test("skill review automatically adds validated creates", async (t) => {
 
   assert.equal((await skillStore.loadSkill("release-check")).state, "active");
   assert.equal((await skillStore.listPending()).length, 0);
+});
+
+test("skill review reports timeout accurately and records retry backoff", async (t) => {
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    reviewTimeoutMs: 5,
+    requestSkillReviewPlan: async (_ctx, _store, _afterEntryId, signal) =>
+      new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
+      }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  await extension.command("project-skills", "review", context);
+
+  assert.deepEqual(notifications, [{
+    message: "Project skill review timed out; it will retry after backoff on a future completed turn.",
+    type: "warning",
+  }]);
+  const state = JSON.parse(await readFile(skillStore.reviewPath, "utf8")) as {
+    consecutiveFailures: number;
+    nextAttemptAt?: string;
+  };
+  assert.equal(state.consecutiveFailures, 1);
+  assert.ok(state.nextAttemptAt);
+});
+
+test("skill review timeout settles when the reviewer ignores cancellation", async (t) => {
+  let release!: (plan: { operations: [] }) => void;
+  const ignoredCancellation = new Promise<{ operations: [] }>((resolve) => { release = resolve; });
+  const { context, extension, notifications } = await fixture(t, {
+    reviewTimeoutMs: 5,
+    requestSkillReviewPlan: async () => ignoredCancellation,
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+
+  const review = extension.command("project-skills", "review", context);
+  const settledBeforeReviewer = await Promise.race([
+    review.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  release({ operations: [] });
+  await review;
+
+  assert.equal(settledBeforeReviewer, true);
+  assert.deepEqual(notifications, [{
+    message: "Project skill review timed out; it will retry after backoff on a future completed turn.",
+    type: "warning",
+  }]);
+});
+
+test("skill review lifecycle cancellation stays silent and preserves cadence", async (t) => {
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    requestSkillReviewPlan: async (_ctx, _store, _afterEntryId, signal) => {
+      entered();
+      return new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
+      });
+    },
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  for (let turn = 0; turn < 10; turn += 1) await skillStore.recordUserTurn();
+  const review = extension.command("project-skills", "review", context);
+  await started;
+  await extension.emit("session_shutdown", {}, context);
+  await review;
+
+  assert.deepEqual(notifications, []);
+  const state = JSON.parse(await readFile(skillStore.reviewPath, "utf8")) as {
+    consecutiveFailures: number;
+    nextAttemptAt?: string;
+  };
+  assert.equal(state.consecutiveFailures, 0);
+  assert.equal(state.nextAttemptAt, undefined);
+  assert.ok(await skillStore.claimReviewIfDue());
+});
+
+test("skill review cancellation during a delayed claim releases its fenced lease", async (t) => {
+  let claimEntered!: () => void;
+  let releaseClaim!: () => void;
+  const claimStarted = new Promise<void>((resolve) => { claimEntered = resolve; });
+  const claimBarrier = new Promise<void>((resolve) => { releaseClaim = resolve; });
+  let modelCalls = 0;
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    requestSkillReviewPlan: async () => {
+      modelCalls += 1;
+      return { operations: [] };
+    },
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  for (let turn = 0; turn < 10; turn += 1) await skillStore.recordUserTurn();
+  const originalClaim = skillStore.claimReviewIfDue.bind(skillStore);
+  skillStore.claimReviewIfDue = async (...args) => {
+    claimEntered();
+    await claimBarrier;
+    return originalClaim(...args);
+  };
+
+  const review = extension.command("project-skills", "review", context);
+  await claimStarted;
+  const shutdown = extension.emit("session_shutdown", {}, context);
+  releaseClaim();
+  await Promise.all([review, shutdown]);
+
+  assert.equal(modelCalls, 0);
+  assert.deepEqual(notifications, []);
+  assert.ok(await originalClaim(), "cancelled claim leaves cadence due");
+});
+
+test("validated skill plans finish atomic admission after the commit point", async (t) => {
+  let submitEntered!: () => void;
+  let releaseSubmit!: () => void;
+  const submitStarted = new Promise<void>((resolve) => { submitEntered = resolve; });
+  const submitBarrier = new Promise<void>((resolve) => { releaseSubmit = resolve; });
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    reviewTimeoutMs: 5,
+    requestSkillReviewPlan: async () => ({ operations: [{
+      action: "create",
+      name: "commit-after-plan",
+      description: "Commit a validated skill plan.",
+      content: "# Commit after plan\n\n## Steps\n\n1. Commit validated output. Done when: admission succeeds.",
+    }] }),
+  });
+  const originalSubmit = skillStore.submitProposal.bind(skillStore);
+  skillStore.submitProposal = async (...args) => {
+    submitEntered();
+    await submitBarrier;
+    return originalSubmit(...args);
+  };
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+
+  const review = extension.command("project-skills", "review", context);
+  await submitStarted;
+  const shutdown = extension.emit("session_shutdown", {}, context);
+  releaseSubmit();
+  await Promise.all([review, shutdown]);
+
+  assert.equal((await skillStore.loadSkill("commit-after-plan")).state, "active");
+  assert.deepEqual(notifications, [{
+    message: "Project skill review added 'commit-after-plan' automatically.",
+    type: "info",
+  }]);
 });
 
 test("injects a recalled skill transiently and credits it only after successful settlement", async (t) => {
