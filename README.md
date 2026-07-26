@@ -177,14 +177,19 @@ Data stays outside the repository:
 ```text
 $PI_CODING_AGENT_DIR/no-forgetti/
 ├── service.json                         # optional reviewer profile; never credentials
-├── review-budget.json
+├── review-budget.json                    # legacy daily aggregate, imported conservatively
 ├── review-workers/                       # per-worker heartbeats for /memory status
 ├── review-ledger.sqlite                  # optional observational WAL shadow
 ├── review-spool/
 │   ├── queued/
 │   ├── running/
 │   ├── outcomes/
-│   └── dead-letter/
+│   ├── dead-letter/
+│   ├── accounting/
+│   │   ├── days/                         # actual, held, and unknown usage
+│   │   └── identities/                   # global immutable attempt identities
+│   ├── provider-results/                 # per-attempt normalized checkpoints
+│   └── proposal-decisions/               # one elected result per job
 └── <sha256(project-root)>/
     ├── project.json
     ├── reviews/
@@ -205,6 +210,7 @@ $PI_CODING_AGENT_DIR/no-forgetti/
     ├── skill-revisions/
     ├── service/
     │   └── commit-receipts/
+    ├── review-admissions/                 # active intents, then compact tombstones
     └── branches/
         ├── main.json
         └── experiment.json

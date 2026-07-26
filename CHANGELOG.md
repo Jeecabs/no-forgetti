@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add filesystem-authoritative per-provider attempt accounting with conservative holds, exact settlement, unknown exposure, global attempt identities, legacy-budget migration, orphan recovery, and durable retry backoff.
+- Checkpoint and elect normalized provider results before memory admission so restarts reuse the same proposal without another provider call.
+- Add recoverable project admission intents spanning branch mutation and revision publication, outcome-bound immutable receipts, intent compaction, and real-process crash tests.
+- Fence review cadence settlement so activity recorded after a review snapshot is preserved.
+- Expand the SQLite observational ledger and `/memory status` with settled, held, and unknown attempt visibility.
+
 ## 0.2.0 — 2026-07-26
 
 - **Breaking:** add embedded, shadow, and opt-in external memory-review authority modes.

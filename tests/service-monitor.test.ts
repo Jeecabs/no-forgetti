@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { FileReviewAttemptAccounting } from "../src/service/accounting.ts";
 import { readReviewServiceMonitor, ReviewWorkerStatusReporter } from "../src/service/monitor.ts";
 import { formatReviewServiceMonitorText } from "../src/service/tui.ts";
 
@@ -62,6 +63,34 @@ test("service monitor exposes queue, worker heartbeat, and exhausted dimensions"
     usedChars: 120,
     maxChars: 4_000,
   }), /calls: 100\/100/u);
+});
+
+test("service monitor exposes settled, held, and unknown attempt accounting", async () => {
+  const { agentDir, root } = await fixture();
+  const now = new Date();
+  const accounting = new FileReviewAttemptAccounting(join(root, "review-spool"), { now: () => now });
+  const reservation = await accounting.reserve({
+    claim: { jobDigest: "a".repeat(64), attempt: 1, leaseToken: "b".repeat(32) },
+    provider: "openai-codex",
+    limits: { maxCalls: 100, maxTokens: 500_000, maxCostNanodollars: 10_000_000_000 },
+    hold: { tokens: 32_000, costNanodollars: 500_000_000 },
+  });
+  assert.ok(reservation);
+  await accounting.commitDispatch(reservation);
+  await accounting.markUnknown(reservation);
+
+  const monitor = await readReviewServiceMonitor(agentDir, now);
+  assert.equal(monitor.budget.calls, 1);
+  assert.equal(monitor.budget.tokens, 32_000);
+  assert.equal(monitor.budget.unknown?.calls, 1);
+  assert.equal(monitor.budget.held?.calls, 0);
+  assert.match(formatReviewServiceMonitorText(monitor, {
+    projectRoot: "/project",
+    branch: "main",
+    entries: 0,
+    usedChars: 0,
+    maxChars: 4_000,
+  }), /0 settled · 0 held · 1 unknown/u);
 });
 
 test("worker heartbeat preserves retry state", async () => {

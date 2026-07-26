@@ -460,6 +460,60 @@ test("review cadence uses signals, backoff, and branch-local state", async (t) =
   await store.finishReview("experiment", true);
 });
 
+test("fenced review success preserves activity recorded after its snapshot", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  for (let i = 0; i < 3; i++) await store.recordUserTurn("main", 1);
+  const claim = await store.claimReview("main", 3, 99);
+  assert.ok(claim);
+  assert.equal(claim.branchName, "main");
+  assert.equal(claim.capturedTurns, 3);
+  assert.equal(claim.capturedSignalScore, 3);
+
+  await store.recordUserTurn("main", 2);
+  assert.equal(await store.finishReviewClaim("main", claim, true), true);
+  assert.ok(await store.claimReview("main", 99, 2), "post-snapshot signal remains due");
+});
+
+test("only the current review generation can settle cadence once", async (t) => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { base, store } = await fixture({ now: () => now });
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  await store.recordUserTurn("main", 4);
+  const stale = await store.claimReview("main", 1, 99);
+  assert.ok(stale);
+
+  now = new Date(now.getTime() + 5 * 60_000 + 1);
+  const current = await store.claimReview("main", 1, 99);
+  assert.ok(current);
+  assert.equal(current.generation, stale.generation + 1);
+  assert.notEqual(current.token, stale.token);
+
+  assert.equal(await store.finishReviewClaim("main", stale, true), false);
+  await store.recordUserTurn("main", 2);
+  assert.equal(await store.finishReviewClaim("main", current, true), true);
+  assert.equal(await store.finishReviewClaim("main", current, true), false);
+  assert.ok(await store.claimReview("main", 99, 2), "current claim subtracts only its snapshot");
+});
+
+test("a serialized claim settles cadence from another store instance", async (t) => {
+  const { base, project, storage, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  await store.recordUserTurn("main");
+  const claim = await store.claimReview("main", 1, 99);
+  assert.ok(claim);
+  const queuedClaim = JSON.parse(JSON.stringify(claim)) as typeof claim;
+  const workerStore = new ProjectMemoryStore(project, { storageRoot: storage });
+  await workerStore.initialize();
+
+  assert.equal(await workerStore.finishReviewClaim("main", queuedClaim, true), true);
+  assert.equal(await store.finishReviewClaim("main", claim, true), false);
+  assert.equal(await store.claimReview("main", 1, 99), undefined);
+});
+
 test("rejects over-limit state bytes before JSON parsing", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));

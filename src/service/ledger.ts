@@ -9,14 +9,21 @@ import {
   encodeReviewOutcome,
   MAX_REVIEW_JOB_BYTES,
   MAX_REVIEW_OUTCOME_BYTES,
+  type ReviewFailure,
   type ReviewJob,
+  type ReviewModelProvenance,
   type ReviewOutcome,
 } from "./protocol.ts";
 
-const LEDGER_VERSION = 1;
+const LEDGER_VERSION = 2;
 const MAX_LEDGER_BYTES = 256 * 1024 * 1024;
+const MAX_SHADOW_ENVELOPE_BYTES = 64 * 1024;
 const LEASE_TOKEN = /^[0-9a-f]{32}$/u;
 const WORKER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const JOB_ID = /^review_[0-9a-f]{40}$/u;
+const PROVIDER_ATTEMPT_ID = /^review_attempt_[0-9a-f]{40}$/u;
+const DIGEST = /^[0-9a-f]{64}$/u;
+const BUDGET_DAY = /^\d{4}-\d{2}-\d{2}$/u;
 
 export interface LedgerAttempt {
   job: ReviewJob;
@@ -44,6 +51,37 @@ export interface ReviewLedgerSnapshot {
   outcome?: ReviewOutcome;
 }
 
+export type LedgerProviderAttemptState = "reserved" | "dispatched" | "settled" | "unknown" | "canceled";
+
+export interface LedgerProviderAttempt {
+  providerAttemptId: string;
+  jobId: string;
+  jobDigest: string;
+  claimAttempt: number;
+  leaseToken: string;
+  provider: string;
+  budgetDay: string;
+  state: LedgerProviderAttemptState;
+  holdTokens: number;
+  holdCostNanodollars: number;
+  requestDigest?: string;
+  usageTokens?: number;
+  usageCostNanodollars?: number;
+  provenance?: ReviewModelProvenance;
+  failure?: ReviewFailure;
+}
+
+export interface LedgerProviderAttemptSnapshot extends LedgerProviderAttempt {
+  selected: boolean;
+}
+
+export interface LedgerSelectedDecision {
+  jobId: string;
+  jobDigest: string;
+  providerAttemptId: string;
+  proposalDigest: string;
+}
+
 /** Optional observational shadow. Spool state, never this interface, fences work. */
 export interface ReviewLedger {
   recordJob(job: ReviewJob, observedAt?: string): void;
@@ -51,6 +89,8 @@ export interface ReviewLedger {
   recordRenewal(attempt: LedgerAttempt): void;
   recordRecovery(attempt: LedgerAttempt, recoveredAt: string): void;
   recordOutcome(attempt: LedgerAttempt, outcome: ReviewOutcome): void;
+  recordProviderAttempt?(attempt: LedgerProviderAttempt): void;
+  recordSelectedDecision?(decision: LedgerSelectedDecision): void;
 }
 
 export class LedgerFenceError extends Error {
@@ -83,6 +123,40 @@ interface DbOutcomeRow {
   envelope: string;
 }
 
+interface DbProviderAttemptRow {
+  provider_attempt_id: string;
+  job_id: string;
+  job_digest: string;
+  claim_attempt: number;
+  lease_token: string;
+  provider: string;
+  budget_day: string;
+  state: LedgerProviderAttemptState;
+  hold_tokens: number;
+  hold_cost_nanodollars: number;
+  request_digest: string | null;
+  usage_tokens: number | null;
+  usage_cost_nanodollars: number | null;
+  provenance_envelope: string | null;
+  failure_envelope: string | null;
+  selected: number;
+}
+
+interface DbSelectedDecisionRow {
+  job_id: string;
+  job_digest: string;
+  provider_attempt_id: string;
+  proposal_digest: string;
+}
+
+interface CheckedProviderAttempt extends LedgerProviderAttempt {
+  requestDigest?: string;
+  usageTokens?: number;
+  usageCostNanodollars?: number;
+  provenanceEnvelope?: string;
+  failureEnvelope?: string;
+}
+
 function checkedIso(value: string, label: string): string {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new Error(`Invalid ${label}.`);
@@ -98,6 +172,102 @@ function validateAttempt(value: LedgerAttempt): LedgerAttempt {
   const leaseUntil = checkedIso(value.leaseUntil, "review lease timestamp");
   if (leaseUntil <= claimedAt) throw new Error("Review lease must end after its claim.");
   return { job, attempt: value.attempt, workerId: value.workerId, leaseToken: value.leaseToken, claimedAt, leaseUntil };
+}
+
+function checkedInteger(value: number, label: string, positive = false): number {
+  if (!Number.isSafeInteger(value) || value < (positive ? 1 : 0)) throw new Error(`Invalid ${label}.`);
+  return value;
+}
+
+function canonicalJson(value: unknown, label: string): string {
+  function encode(item: unknown): string {
+    if (item === null || typeof item === "string" || typeof item === "boolean") return JSON.stringify(item);
+    if (typeof item === "number") {
+      if (!Number.isFinite(item)) throw new Error(`Invalid ${label} envelope.`);
+      return JSON.stringify(item);
+    }
+    if (Array.isArray(item)) return `[${item.map(encode).join(",")}]`;
+    if (!item || typeof item !== "object" || Object.getPrototypeOf(item) !== Object.prototype) {
+      throw new Error(`Invalid ${label} envelope.`);
+    }
+    const record = item as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    if (keys.some((key) => record[key] === undefined)) throw new Error(`Invalid ${label} envelope.`);
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${encode(record[key])}`).join(",")}}`;
+  }
+  const envelope = encode(value);
+  if (Buffer.byteLength(envelope, "utf8") > MAX_SHADOW_ENVELOPE_BYTES) throw new Error(`Review ledger ${label} envelope is oversized.`);
+  return envelope;
+}
+
+function checkedBudgetDay(value: string): string {
+  if (!BUDGET_DAY.test(value)) throw new Error("Invalid review ledger budget day.");
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new Error("Invalid review ledger budget day.");
+  }
+  return value;
+}
+
+function checkedProviderAttempt(value: LedgerProviderAttempt): CheckedProviderAttempt {
+  if (!value || typeof value !== "object") throw new Error("Invalid review ledger provider attempt.");
+  if (!PROVIDER_ATTEMPT_ID.test(value.providerAttemptId)) throw new Error("Invalid review ledger provider attempt id.");
+  if (!JOB_ID.test(value.jobId)) throw new Error("Invalid review ledger provider attempt job id.");
+  if (!DIGEST.test(value.jobDigest)) throw new Error("Invalid review ledger provider attempt job digest.");
+  if (!LEASE_TOKEN.test(value.leaseToken)) throw new Error("Invalid review ledger provider attempt lease token.");
+  if (!WORKER_ID.test(value.provider)) throw new Error("Invalid review ledger provider.");
+  if (!["reserved", "dispatched", "settled", "unknown", "canceled"].includes(value.state)) {
+    throw new Error("Invalid review ledger provider attempt state.");
+  }
+  const checked: CheckedProviderAttempt = {
+    providerAttemptId: value.providerAttemptId,
+    jobId: value.jobId,
+    jobDigest: value.jobDigest,
+    claimAttempt: checkedInteger(value.claimAttempt, "review ledger claim attempt", true),
+    leaseToken: value.leaseToken,
+    provider: value.provider,
+    budgetDay: checkedBudgetDay(value.budgetDay),
+    state: value.state,
+    holdTokens: checkedInteger(value.holdTokens, "review ledger token hold", true),
+    holdCostNanodollars: checkedInteger(value.holdCostNanodollars, "review ledger cost hold"),
+  };
+  if (value.requestDigest !== undefined) {
+    if (!DIGEST.test(value.requestDigest)) throw new Error("Invalid review ledger request digest.");
+    checked.requestDigest = value.requestDigest;
+  }
+  if (value.usageTokens !== undefined) checked.usageTokens = checkedInteger(value.usageTokens, "review ledger usage tokens");
+  if (value.usageCostNanodollars !== undefined) {
+    checked.usageCostNanodollars = checkedInteger(value.usageCostNanodollars, "review ledger usage cost");
+  }
+  if ((checked.usageTokens === undefined) !== (checked.usageCostNanodollars === undefined)) {
+    throw new Error("Review ledger usage tokens and cost must be recorded together.");
+  }
+  if (value.provenance !== undefined) checked.provenanceEnvelope = canonicalJson(value.provenance, "provenance");
+  if (value.failure !== undefined) checked.failureEnvelope = canonicalJson(value.failure, "failure");
+  if ((value.state === "dispatched" || value.state === "settled" || value.state === "unknown") && !checked.requestDigest) {
+    throw new Error("Dispatched review ledger provider attempt requires a request digest.");
+  }
+  if (value.state !== "settled" && (checked.usageTokens !== undefined || checked.provenanceEnvelope || checked.failureEnvelope)) {
+    throw new Error("Only a settled review ledger provider attempt may record a result.");
+  }
+  if (checked.provenanceEnvelope && checked.usageTokens === undefined) {
+    throw new Error("Review ledger provenance requires usage accounting.");
+  }
+  return checked;
+}
+
+function checkedSelectedDecision(value: LedgerSelectedDecision): LedgerSelectedDecision {
+  if (!value || typeof value !== "object" || !JOB_ID.test(value.jobId) || !DIGEST.test(value.jobDigest)
+    || !PROVIDER_ATTEMPT_ID.test(value.providerAttemptId) || !DIGEST.test(value.proposalDigest)) {
+    throw new Error("Invalid review ledger selected decision.");
+  }
+  return { ...value };
+}
+
+function stateCanReach(from: LedgerProviderAttemptState, to: LedgerProviderAttemptState): boolean {
+  if (from === to || from === "reserved") return true;
+  if (from === "dispatched") return to === "unknown" || to === "settled";
+  return from === "unknown" && to === "settled";
 }
 
 interface SchemaColumn {
@@ -154,6 +324,7 @@ export class SQLiteReviewLedger implements ReviewLedger {
       if (journal.journal_mode !== "wal") throw new Error("Review ledger could not enable WAL mode.");
       const version = this.db.prepare("PRAGMA user_version").get() as unknown as { user_version?: unknown };
       if (version.user_version === 0) this.createSchema();
+      else if (version.user_version === 1) this.migrateV1();
       else if (version.user_version !== LEDGER_VERSION) throw new Error(`Unsupported review ledger version: ${String(version.user_version)}.`);
       this.validateSchema();
       this.db.enableDefensive?.(true);
@@ -294,16 +465,147 @@ export class SQLiteReviewLedger implements ReviewLedger {
     this.secureFiles();
   }
 
+  recordProviderAttempt(value: LedgerProviderAttempt): void {
+    this.assertOpen();
+    const attempt = checkedProviderAttempt(value);
+    this.transaction(() => {
+      const existing = this.providerAttemptRow(attempt.providerAttemptId);
+      if (!existing) {
+        this.db.prepare(`
+          INSERT INTO provider_attempts(
+            provider_attempt_id, job_id, job_digest, claim_attempt, lease_token, provider, budget_day, state,
+            hold_tokens, hold_cost_nanodollars, request_digest, usage_tokens, usage_cost_nanodollars,
+            provenance_envelope, failure_envelope
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          attempt.providerAttemptId, attempt.jobId, attempt.jobDigest, attempt.claimAttempt, attempt.leaseToken,
+          attempt.provider, attempt.budgetDay, attempt.state, attempt.holdTokens, attempt.holdCostNanodollars,
+          attempt.requestDigest ?? null, attempt.usageTokens ?? null, attempt.usageCostNanodollars ?? null,
+          attempt.provenanceEnvelope ?? null, attempt.failureEnvelope ?? null,
+        );
+        return;
+      }
+      const sameIdentity = existing.job_id === attempt.jobId && existing.job_digest === attempt.jobDigest
+        && existing.claim_attempt === attempt.claimAttempt && existing.lease_token === attempt.leaseToken
+        && existing.provider === attempt.provider && existing.budget_day === attempt.budgetDay
+        && existing.hold_tokens === attempt.holdTokens && existing.hold_cost_nanodollars === attempt.holdCostNanodollars;
+      const requestMatches = attempt.requestDigest === undefined || existing.request_digest === null
+        || existing.request_digest === attempt.requestDigest;
+      if (!sameIdentity || !requestMatches) throw new Error("Conflicting review ledger provider attempt identity.");
+
+      const resultMatches = (attempt.usageTokens === undefined || existing.usage_tokens === null
+          || existing.usage_tokens === attempt.usageTokens)
+        && (attempt.usageCostNanodollars === undefined || existing.usage_cost_nanodollars === null
+          || existing.usage_cost_nanodollars === attempt.usageCostNanodollars)
+        && (attempt.provenanceEnvelope === undefined || existing.provenance_envelope === null
+          || existing.provenance_envelope === attempt.provenanceEnvelope)
+        && (attempt.failureEnvelope === undefined || existing.failure_envelope === null
+          || existing.failure_envelope === attempt.failureEnvelope);
+      if (!resultMatches) throw new Error("Conflicting review ledger provider attempt result.");
+      if (existing.state === attempt.state) {
+        const exact = existing.request_digest === (attempt.requestDigest ?? null)
+          && existing.usage_tokens === (attempt.usageTokens ?? null)
+          && existing.usage_cost_nanodollars === (attempt.usageCostNanodollars ?? null)
+          && existing.provenance_envelope === (attempt.provenanceEnvelope ?? null)
+          && existing.failure_envelope === (attempt.failureEnvelope ?? null);
+        if (!exact) throw new Error("Conflicting review ledger provider attempt replay.");
+        return;
+      }
+      // Older authority events may be replayed after a later state is already shadowed.
+      if (stateCanReach(attempt.state, existing.state)) return;
+      if (!stateCanReach(existing.state, attempt.state)) {
+        throw new Error("Conflicting review ledger provider attempt transition.");
+      }
+      this.db.prepare(`
+        UPDATE provider_attempts SET state = ?, request_digest = ?, usage_tokens = ?, usage_cost_nanodollars = ?,
+          provenance_envelope = ?, failure_envelope = ?
+        WHERE provider_attempt_id = ?
+      `).run(
+        attempt.state, attempt.requestDigest ?? existing.request_digest, attempt.usageTokens ?? null,
+        attempt.usageCostNanodollars ?? null, attempt.provenanceEnvelope ?? null, attempt.failureEnvelope ?? null,
+        attempt.providerAttemptId,
+      );
+    });
+    this.secureFiles();
+  }
+
+  recordSelectedDecision(value: LedgerSelectedDecision): void {
+    this.assertOpen();
+    const decision = checkedSelectedDecision(value);
+    this.transaction(() => {
+      const prior = this.db.prepare(`
+        SELECT job_id, job_digest, provider_attempt_id, proposal_digest FROM selected_decisions WHERE job_id = ?
+      `).get(decision.jobId) as unknown as DbSelectedDecisionRow | undefined;
+      if (prior) {
+        if (prior.job_digest !== decision.jobDigest || prior.provider_attempt_id !== decision.providerAttemptId
+          || prior.proposal_digest !== decision.proposalDigest) {
+          throw new Error("Conflicting review ledger selected decision.");
+        }
+        return;
+      }
+      const attempt = this.providerAttemptRow(decision.providerAttemptId);
+      if (!attempt || attempt.job_id !== decision.jobId || attempt.job_digest !== decision.jobDigest
+        || attempt.state !== "settled" || attempt.failure_envelope !== null) {
+        throw new Error("Review ledger selected decision requires a matching settled provider attempt.");
+      }
+      const selectedElsewhere = this.db.prepare("SELECT job_id FROM selected_decisions WHERE provider_attempt_id = ?")
+        .get(decision.providerAttemptId) as unknown as { job_id?: unknown } | undefined;
+      if (selectedElsewhere) throw new Error("Conflicting review ledger selected provider attempt.");
+      this.db.prepare(`
+        INSERT INTO selected_decisions(job_id, job_digest, provider_attempt_id, proposal_digest) VALUES (?, ?, ?, ?)
+      `).run(decision.jobId, decision.jobDigest, decision.providerAttemptId, decision.proposalDigest);
+    });
+    this.secureFiles();
+  }
+
+  providerAttempt(providerAttemptId: string): LedgerProviderAttemptSnapshot | undefined {
+    this.assertOpen();
+    if (!PROVIDER_ATTEMPT_ID.test(providerAttemptId)) throw new Error("Invalid review ledger provider attempt id.");
+    const row = this.providerAttemptRow(providerAttemptId);
+    return row ? this.providerAttemptSnapshot(row) : undefined;
+  }
+
+  providerAttempts(jobId: string): LedgerProviderAttemptSnapshot[] {
+    this.assertOpen();
+    if (!JOB_ID.test(jobId)) throw new Error("Invalid review ledger job id.");
+    return (this.db.prepare(`
+      SELECT provider_attempts.*,
+        EXISTS(SELECT 1 FROM selected_decisions WHERE provider_attempt_id = provider_attempts.provider_attempt_id) AS selected
+      FROM provider_attempts WHERE job_id = ? ORDER BY provider_attempt_id
+    `).all(jobId) as unknown as DbProviderAttemptRow[]).map((row) => this.providerAttemptSnapshot(row));
+  }
+
+  selectedDecision(jobId: string): LedgerSelectedDecision | undefined {
+    this.assertOpen();
+    if (!JOB_ID.test(jobId)) throw new Error("Invalid review ledger job id.");
+    const row = this.db.prepare(`
+      SELECT job_id, job_digest, provider_attempt_id, proposal_digest FROM selected_decisions WHERE job_id = ?
+    `).get(jobId) as unknown as DbSelectedDecisionRow | undefined;
+    return row ? {
+      jobId: row.job_id,
+      jobDigest: row.job_digest,
+      providerAttemptId: row.provider_attempt_id,
+      proposalDigest: row.proposal_digest,
+    } : undefined;
+  }
+
   purgeTerminalBefore(cutoff: Date): number {
     this.assertOpen();
     if (!Number.isFinite(cutoff.getTime())) throw new Error("Invalid review ledger retention cutoff.");
-    const result = this.db.prepare(`
-      DELETE FROM jobs
-      WHERE job_id IN (SELECT job_id FROM outcomes WHERE completed_at < ?)
-    `).run(cutoff.toISOString());
+    const removed = this.transaction(() => {
+      const timestamp = cutoff.toISOString();
+      this.db.prepare(`
+        DELETE FROM provider_attempts
+        WHERE job_id IN (SELECT job_id FROM outcomes WHERE completed_at < ?)
+      `).run(timestamp);
+      return this.db.prepare(`
+        DELETE FROM jobs
+        WHERE job_id IN (SELECT job_id FROM outcomes WHERE completed_at < ?)
+      `).run(timestamp).changes;
+    });
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     this.secureFiles();
-    return Number(result.changes);
+    return Number(removed);
   }
 
   snapshot(jobId: string): ReviewLedgerSnapshot | undefined {
@@ -373,12 +675,118 @@ export class SQLiteReviewLedger implements ReviewLedger {
         envelope TEXT NOT NULL CHECK(json_valid(envelope) AND length(CAST(envelope AS BLOB)) <= ${MAX_REVIEW_OUTCOME_BYTES})
       ) STRICT, WITHOUT ROWID;
       CREATE INDEX attempts_state_lease ON attempts(state, lease_until);
+      CREATE TABLE provider_attempts (
+        provider_attempt_id TEXT PRIMARY KEY CHECK(length(provider_attempt_id) = 55),
+        job_id TEXT NOT NULL CHECK(length(job_id) = 47),
+        job_digest TEXT NOT NULL CHECK(length(job_digest) = 64),
+        claim_attempt INTEGER NOT NULL CHECK(claim_attempt > 0),
+        lease_token TEXT NOT NULL CHECK(length(lease_token) = 32),
+        provider TEXT NOT NULL CHECK(length(provider) BETWEEN 1 AND 128),
+        budget_day TEXT NOT NULL CHECK(length(budget_day) = 10),
+        state TEXT NOT NULL CHECK(state IN ('reserved', 'dispatched', 'settled', 'unknown', 'canceled')),
+        hold_tokens INTEGER NOT NULL CHECK(hold_tokens > 0),
+        hold_cost_nanodollars INTEGER NOT NULL CHECK(hold_cost_nanodollars >= 0),
+        request_digest TEXT CHECK(request_digest IS NULL OR length(request_digest) = 64),
+        usage_tokens INTEGER CHECK(usage_tokens IS NULL OR usage_tokens >= 0),
+        usage_cost_nanodollars INTEGER CHECK(usage_cost_nanodollars IS NULL OR usage_cost_nanodollars >= 0),
+        provenance_envelope TEXT CHECK(provenance_envelope IS NULL OR (json_valid(provenance_envelope) AND length(CAST(provenance_envelope AS BLOB)) <= ${MAX_SHADOW_ENVELOPE_BYTES})),
+        failure_envelope TEXT CHECK(failure_envelope IS NULL OR (json_valid(failure_envelope) AND length(CAST(failure_envelope AS BLOB)) <= ${MAX_SHADOW_ENVELOPE_BYTES})),
+        CHECK(
+          (state IN ('reserved', 'canceled') AND request_digest IS NULL AND usage_tokens IS NULL
+            AND usage_cost_nanodollars IS NULL AND provenance_envelope IS NULL AND failure_envelope IS NULL)
+          OR (state IN ('dispatched', 'unknown') AND request_digest IS NOT NULL AND usage_tokens IS NULL
+            AND usage_cost_nanodollars IS NULL AND provenance_envelope IS NULL AND failure_envelope IS NULL)
+          OR (state = 'settled' AND request_digest IS NOT NULL
+            AND ((usage_tokens IS NULL AND usage_cost_nanodollars IS NULL)
+              OR (usage_tokens IS NOT NULL AND usage_cost_nanodollars IS NOT NULL))
+            AND (provenance_envelope IS NULL OR usage_tokens IS NOT NULL))
+        )
+      ) STRICT, WITHOUT ROWID;
+      CREATE TABLE selected_decisions (
+        job_id TEXT PRIMARY KEY CHECK(length(job_id) = 47),
+        job_digest TEXT NOT NULL CHECK(length(job_digest) = 64),
+        provider_attempt_id TEXT NOT NULL UNIQUE REFERENCES provider_attempts(provider_attempt_id) ON DELETE CASCADE,
+        proposal_digest TEXT NOT NULL CHECK(length(proposal_digest) = 64)
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX provider_attempts_job ON provider_attempts(job_id, provider_attempt_id);
+      CREATE INDEX provider_attempts_budget ON provider_attempts(budget_day, provider, state);
+      PRAGMA user_version=${LEDGER_VERSION};
+      COMMIT;
+    `);
+  }
+
+  private migrateV1(): void {
+    this.validateBaseSchema();
+    this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE provider_attempts (
+        provider_attempt_id TEXT PRIMARY KEY CHECK(length(provider_attempt_id) = 55),
+        job_id TEXT NOT NULL CHECK(length(job_id) = 47),
+        job_digest TEXT NOT NULL CHECK(length(job_digest) = 64),
+        claim_attempt INTEGER NOT NULL CHECK(claim_attempt > 0),
+        lease_token TEXT NOT NULL CHECK(length(lease_token) = 32),
+        provider TEXT NOT NULL CHECK(length(provider) BETWEEN 1 AND 128),
+        budget_day TEXT NOT NULL CHECK(length(budget_day) = 10),
+        state TEXT NOT NULL CHECK(state IN ('reserved', 'dispatched', 'settled', 'unknown', 'canceled')),
+        hold_tokens INTEGER NOT NULL CHECK(hold_tokens > 0),
+        hold_cost_nanodollars INTEGER NOT NULL CHECK(hold_cost_nanodollars >= 0),
+        request_digest TEXT CHECK(request_digest IS NULL OR length(request_digest) = 64),
+        usage_tokens INTEGER CHECK(usage_tokens IS NULL OR usage_tokens >= 0),
+        usage_cost_nanodollars INTEGER CHECK(usage_cost_nanodollars IS NULL OR usage_cost_nanodollars >= 0),
+        provenance_envelope TEXT CHECK(provenance_envelope IS NULL OR (json_valid(provenance_envelope) AND length(CAST(provenance_envelope AS BLOB)) <= ${MAX_SHADOW_ENVELOPE_BYTES})),
+        failure_envelope TEXT CHECK(failure_envelope IS NULL OR (json_valid(failure_envelope) AND length(CAST(failure_envelope AS BLOB)) <= ${MAX_SHADOW_ENVELOPE_BYTES})),
+        CHECK(
+          (state IN ('reserved', 'canceled') AND request_digest IS NULL AND usage_tokens IS NULL
+            AND usage_cost_nanodollars IS NULL AND provenance_envelope IS NULL AND failure_envelope IS NULL)
+          OR (state IN ('dispatched', 'unknown') AND request_digest IS NOT NULL AND usage_tokens IS NULL
+            AND usage_cost_nanodollars IS NULL AND provenance_envelope IS NULL AND failure_envelope IS NULL)
+          OR (state = 'settled' AND request_digest IS NOT NULL
+            AND ((usage_tokens IS NULL AND usage_cost_nanodollars IS NULL)
+              OR (usage_tokens IS NOT NULL AND usage_cost_nanodollars IS NOT NULL))
+            AND (provenance_envelope IS NULL OR usage_tokens IS NOT NULL))
+        )
+      ) STRICT, WITHOUT ROWID;
+      CREATE TABLE selected_decisions (
+        job_id TEXT PRIMARY KEY CHECK(length(job_id) = 47),
+        job_digest TEXT NOT NULL CHECK(length(job_digest) = 64),
+        provider_attempt_id TEXT NOT NULL UNIQUE REFERENCES provider_attempts(provider_attempt_id) ON DELETE CASCADE,
+        proposal_digest TEXT NOT NULL CHECK(length(proposal_digest) = 64)
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX provider_attempts_job ON provider_attempts(job_id, provider_attempt_id);
+      CREATE INDEX provider_attempts_budget ON provider_attempts(budget_day, provider, state);
       PRAGMA user_version=${LEDGER_VERSION};
       COMMIT;
     `);
   }
 
   private validateSchema(): void {
+    this.validateBaseSchema();
+    exactSchema(this.db, "provider_attempts", [
+      { name: "provider_attempt_id", type: "TEXT", notnull: 1, pk: 1 },
+      { name: "job_id", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "job_digest", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "claim_attempt", type: "INTEGER", notnull: 1, pk: 0 },
+      { name: "lease_token", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "provider", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "budget_day", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "state", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "hold_tokens", type: "INTEGER", notnull: 1, pk: 0 },
+      { name: "hold_cost_nanodollars", type: "INTEGER", notnull: 1, pk: 0 },
+      { name: "request_digest", type: "TEXT", notnull: 0, pk: 0 },
+      { name: "usage_tokens", type: "INTEGER", notnull: 0, pk: 0 },
+      { name: "usage_cost_nanodollars", type: "INTEGER", notnull: 0, pk: 0 },
+      { name: "provenance_envelope", type: "TEXT", notnull: 0, pk: 0 },
+      { name: "failure_envelope", type: "TEXT", notnull: 0, pk: 0 },
+    ]);
+    exactSchema(this.db, "selected_decisions", [
+      { name: "job_id", type: "TEXT", notnull: 1, pk: 1 },
+      { name: "job_digest", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "provider_attempt_id", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "proposal_digest", type: "TEXT", notnull: 1, pk: 0 },
+    ]);
+  }
+
+  private validateBaseSchema(): void {
     exactSchema(this.db, "jobs", [
       { name: "job_id", type: "TEXT", notnull: 1, pk: 1 },
       { name: "digest", type: "TEXT", notnull: 1, pk: 0 },
@@ -413,6 +821,37 @@ export class SQLiteReviewLedger implements ReviewLedger {
     return this.db.prepare(`
       SELECT digest, envelope, state, active_attempt, active_lease_token FROM jobs WHERE job_id = ?
     `).get(jobId) as unknown as DbJobRow | undefined;
+  }
+
+  private providerAttemptRow(providerAttemptId: string): DbProviderAttemptRow | undefined {
+    return this.db.prepare(`
+      SELECT provider_attempts.*,
+        EXISTS(SELECT 1 FROM selected_decisions WHERE provider_attempt_id = provider_attempts.provider_attempt_id) AS selected
+      FROM provider_attempts WHERE provider_attempt_id = ?
+    `).get(providerAttemptId) as unknown as DbProviderAttemptRow | undefined;
+  }
+
+  private providerAttemptSnapshot(row: DbProviderAttemptRow): LedgerProviderAttemptSnapshot {
+    return {
+      providerAttemptId: row.provider_attempt_id,
+      jobId: row.job_id,
+      jobDigest: row.job_digest,
+      claimAttempt: Number(row.claim_attempt),
+      leaseToken: row.lease_token,
+      provider: row.provider,
+      budgetDay: row.budget_day,
+      state: row.state,
+      holdTokens: Number(row.hold_tokens),
+      holdCostNanodollars: Number(row.hold_cost_nanodollars),
+      ...(row.request_digest === null ? {} : { requestDigest: row.request_digest }),
+      ...(row.usage_tokens === null ? {} : { usageTokens: Number(row.usage_tokens) }),
+      ...(row.usage_cost_nanodollars === null ? {} : { usageCostNanodollars: Number(row.usage_cost_nanodollars) }),
+      ...(row.provenance_envelope === null ? {} : {
+        provenance: JSON.parse(row.provenance_envelope) as ReviewModelProvenance,
+      }),
+      ...(row.failure_envelope === null ? {} : { failure: JSON.parse(row.failure_envelope) as ReviewFailure }),
+      selected: row.selected === 1,
+    };
   }
 
   private transaction<T>(fn: () => T): T {

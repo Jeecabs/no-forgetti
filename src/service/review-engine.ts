@@ -1,7 +1,7 @@
 import { buildReviewPrompt, parseReviewPlan } from "../review.ts";
 import type { ReviewPlan } from "../types.ts";
 import { createReviewOutcome, parseReviewJob, type ReviewJob } from "./protocol.ts";
-import type { ModelRunner, ReviewModelProvenance } from "./model-runner.ts";
+import type { ModelRunHooks, ModelRunner, ReviewModelProvenance } from "./model-runner.ts";
 
 export const REVIEWER_SYSTEM_PROMPT = [
   "You are a conservative project-memory curator.",
@@ -58,7 +58,7 @@ export class ReviewEngine {
     this.runner = runner;
   }
 
-  async review(job: ReviewJob, signal?: AbortSignal): Promise<ReviewProposal> {
+  async review(job: ReviewJob, signal?: AbortSignal, hooks?: ModelRunHooks): Promise<ReviewProposal> {
     let checked: ReviewJob;
     try {
       checked = parseReviewJob(job);
@@ -73,7 +73,7 @@ export class ReviewEngine {
       systemPrompt: REVIEWER_SYSTEM_PROMPT,
       prompt: buildExternalReviewPrompt(checked),
       signal,
-    });
+    }, hooks);
 
     let plan: ReviewPlan;
     try {

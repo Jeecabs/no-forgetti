@@ -35,6 +35,7 @@ function provenance(completedAt = "2026-01-03T00:00:00.000Z") {
     provider: "test-provider",
     model: "test-model",
     api: "test-api",
+    responseId: "response-123",
     startedAt: "2026-01-02T23:59:59.000Z",
     completedAt,
     durationMs: 1_000,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import { ModelsError, type Usage } from "@earendil-works/pi-ai";
@@ -22,9 +23,22 @@ export interface ModelRunResult {
   provenance: ReviewModelProvenance;
 }
 
+export interface ModelDispatchContext {
+  provider: string;
+  model: string;
+  api: string;
+  requestDigest: string;
+  hold: { tokens: number; costUsd: number };
+}
+
+export interface ModelRunHooks {
+  beforeDispatch?: (context: ModelDispatchContext) => void | Promise<void>;
+  observe?: (provenance: ReviewModelProvenance) => void | Promise<void>;
+}
+
 /** Narrow tool-less seam used by ReviewEngine and its fakes. */
 export interface ModelRunner {
-  run(request: ModelRunRequest): Promise<ModelRunResult>;
+  run(request: ModelRunRequest, hooks?: ModelRunHooks): Promise<ModelRunResult>;
 }
 
 export type ModelRunErrorCode =
@@ -61,6 +75,7 @@ export interface PiModelRunnerOptions {
   maxOutputTokens?: number;
   timeoutMs?: number;
   now?: () => Date;
+  createModelRuntime?: typeof ModelRuntime.create;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -100,6 +115,36 @@ function authProviderFailure(message: string): boolean {
   return /(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|invalid token|provider is not configured|credentials? unavailable)/iu.test(message);
 }
 
+function dispatchContext(
+  request: ModelRunRequest,
+  model: { provider: string; id: string; api: string; contextWindow: number; maxTokens: number; cost: { input: number; output: number; cacheRead: number; cacheWrite: number; tiers?: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number }> } },
+  maxOutputTokens: number,
+): ModelDispatchContext {
+  const outputTokens = Math.min(maxOutputTokens, model.maxTokens);
+  const inputTokens = Math.min(
+    model.contextWindow,
+    Buffer.byteLength(`${request.systemPrompt}\n${request.prompt}`, "utf8") + 4_096,
+  );
+  const rates = [model.cost, ...(model.cost.tiers ?? [])];
+  const maxRate = (key: "input" | "output" | "cacheRead" | "cacheWrite") => Math.max(...rates.map((rate) => rate[key]));
+  // Input/cache categories may overlap in provider reports. Summing all three
+  // rate ceilings is deliberately conservative for a hard reservation.
+  const costUsd = (
+    inputTokens * (maxRate("input") + maxRate("cacheRead") + maxRate("cacheWrite"))
+    + outputTokens * maxRate("output")
+  ) / 1_000_000;
+  const requestDigest = createHash("sha256")
+    .update(`review-model-request/v1\n${model.provider}\n${model.id}\n${model.api}\n${request.systemPrompt}\n${request.prompt}`, "utf8")
+    .digest("hex");
+  return {
+    provider: model.provider,
+    model: model.id,
+    api: model.api,
+    requestDigest,
+    hold: { tokens: inputTokens + outputTokens, costUsd },
+  };
+}
+
 /**
  * Direct Pi model adapter. Credentials and custom models are reloaded from
  * agentDir for every call; neither resolved auth nor provider headers cross the
@@ -112,6 +157,7 @@ export class PiModelRunner implements ModelRunner {
   private readonly maxOutputTokens: number;
   private readonly timeoutMs: number;
   private readonly clock: () => Date;
+  private readonly createModelRuntime: typeof ModelRuntime.create;
 
   constructor(profile: ReviewerProfile, options: PiModelRunnerOptions = {}) {
     this.profile = { ...profile };
@@ -122,9 +168,10 @@ export class PiModelRunner implements ModelRunner {
     );
     this.timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS, "review timeout");
     this.clock = options.now ?? (() => new Date());
+    this.createModelRuntime = options.createModelRuntime ?? ModelRuntime.create;
   }
 
-  async run(request: ModelRunRequest): Promise<ModelRunResult> {
+  async run(request: ModelRunRequest, hooks: ModelRunHooks = {}): Promise<ModelRunResult> {
     if (!request.prompt) throw new Error("Review prompt is required.");
     if (!request.systemPrompt) throw new Error("Review system prompt is required.");
     if (request.signal?.aborted) {
@@ -133,7 +180,7 @@ export class PiModelRunner implements ModelRunner {
 
     let modelRuntime: ModelRuntime;
     try {
-      modelRuntime = await ModelRuntime.create({
+      modelRuntime = await this.createModelRuntime({
         authPath: join(this.agentDir, "auth.json"),
         modelsPath: join(this.agentDir, "models.json"),
       });
@@ -157,6 +204,26 @@ export class PiModelRunner implements ModelRunner {
         { retryable: true },
       );
     }
+    let auth;
+    try {
+      auth = await modelRuntime.getAuth(model);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ModelRunError("auth_unavailable", `Reviewer model credentials are unavailable: ${message}`, {
+        retryable: true,
+        cause: error,
+      });
+    }
+    if (!auth) {
+      throw new ModelRunError(
+        "auth_unavailable",
+        `Reviewer provider '${this.profile.provider}' is not configured.`,
+        { retryable: true },
+      );
+    }
+    if (request.signal?.aborted) {
+      throw new ModelRunError("aborted", "Review model call was aborted.", { retryable: true });
+    }
     const started = validDate(this.clock);
     const timeoutController = new AbortController();
     const timeout = setTimeout(() => timeoutController.abort(), this.timeoutMs);
@@ -166,32 +233,57 @@ export class PiModelRunner implements ModelRunner {
       : timeoutController.signal;
 
     try {
-      const response = await modelRuntime.completeSimple(
-        model,
-        {
-          systemPrompt: request.systemPrompt,
-          messages: [{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: started.getTime() }],
-        },
-        {
-          maxTokens: Math.min(this.maxOutputTokens, model.maxTokens),
-          ...(this.profile.reasoningEffort === "off" ? {} : { reasoning: this.profile.reasoningEffort }),
-          signal,
-          timeoutMs: this.timeoutMs,
-          // The durable daemon owns retries and their budget accounting.
-          maxRetries: 0,
-        },
-      );
+      await hooks.beforeDispatch?.(dispatchContext(request, model, this.maxOutputTokens));
+      let response;
+      try {
+        response = await modelRuntime.completeSimple(
+          model,
+          {
+            systemPrompt: request.systemPrompt,
+            messages: [{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: started.getTime() }],
+          },
+          {
+            maxTokens: Math.min(this.maxOutputTokens, model.maxTokens),
+            ...(this.profile.reasoningEffort === "off" ? {} : { reasoning: this.profile.reasoningEffort }),
+            ...(auth.auth.apiKey === undefined ? {} : { apiKey: auth.auth.apiKey }),
+            ...(auth.auth.headers === undefined ? {} : { headers: auth.auth.headers }),
+            ...(auth.env === undefined ? {} : { env: auth.env }),
+            signal,
+            timeoutMs: this.timeoutMs,
+            // The durable daemon owns retries and their budget accounting.
+            maxRetries: 0,
+          },
+        );
+      } catch (error) {
+        if (error instanceof ModelRunError) throw error;
+        if (request.signal?.aborted) {
+          throw new ModelRunError("aborted", "Review model call was aborted.", { retryable: true, cause: error });
+        }
+        if (timeoutController.signal.aborted) {
+          throw new ModelRunError("model_timeout", "Review model call timed out.", { retryable: true, cause: error });
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        const authFailure = error instanceof ModelsError
+          ? error.code === "auth" || error.code === "oauth"
+          : authProviderFailure(message);
+        throw new ModelRunError(authFailure ? "auth_unavailable" : "provider_error", message, {
+          retryable: authFailure || retryableProviderFailure(message),
+          cause: error,
+        });
+      }
       const completed = validDate(this.clock);
       const provenance: ReviewModelProvenance = {
         provider: response.provider || model.provider,
         model: model.id,
         api: response.api || model.api,
         ...(response.responseModel ? { responseModel: response.responseModel } : {}),
+        ...(response.responseId ? { responseId: response.responseId } : {}),
         startedAt: started.toISOString(),
         completedAt: completed.toISOString(),
         durationMs: Math.max(0, completed.getTime() - started.getTime()),
         usage: usageOf(response.usage),
       };
+      await hooks.observe?.(provenance);
 
       if (response.stopReason === "aborted") {
         const timedOut = timeoutController.signal.aborted && !request.signal?.aborted;
@@ -233,22 +325,6 @@ export class PiModelRunner implements ModelRunner {
         });
       }
       return { text, provenance };
-    } catch (error) {
-      if (error instanceof ModelRunError) throw error;
-      if (request.signal?.aborted) {
-        throw new ModelRunError("aborted", "Review model call was aborted.", { retryable: true, cause: error });
-      }
-      if (timeoutController.signal.aborted) {
-        throw new ModelRunError("model_timeout", "Review model call timed out.", { retryable: true, cause: error });
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      const authFailure = error instanceof ModelsError
-        ? error.code === "auth" || error.code === "oauth"
-        : authProviderFailure(message);
-      throw new ModelRunError(authFailure ? "auth_unavailable" : "provider_error", message, {
-        retryable: authFailure || retryableProviderFailure(message),
-        cause: error,
-      });
     } finally {
       clearTimeout(timeout);
     }

@@ -1,18 +1,26 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { fauxAssistantMessage, fauxProvider, type AssistantMessage } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+
+import { FileReviewAttemptAccounting, type ReviewAttemptAccounting } from "../src/service/accounting.ts";
 import { parseReviewCliArgs } from "../src/service/cli.ts";
 import { classifyReviewFailure, InMemoryReviewBudgetAccount, ReviewDaemon } from "../src/service/daemon.ts";
+import { ReviewDecisionStore } from "../src/service/decisions.ts";
 import {
   ModelRunError,
+  PiModelRunner,
+  type ModelRunHooks,
   type ModelRunRequest,
   type ModelRunResult,
   type ModelRunner,
   type ReviewModelProvenance,
 } from "../src/service/model-runner.ts";
+import { SQLiteReviewLedger } from "../src/service/ledger.ts";
 import { createReviewJob } from "../src/service/protocol.ts";
 import { ReviewEngine, ReviewEngineError } from "../src/service/review-engine.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
@@ -74,6 +82,230 @@ class FakeModelRunner implements ModelRunner {
     return this.result;
   }
 }
+
+class CheckpointModelRunner implements ModelRunner {
+  calls = 0;
+  dispatches = 0;
+  private readonly behavior: "completed" | "unknown" | "configuration";
+
+  constructor(behavior: "completed" | "unknown" | "configuration" = "completed") {
+    this.behavior = behavior;
+  }
+
+  async run(_request: ModelRunRequest, hooks?: ModelRunHooks): Promise<ModelRunResult> {
+    this.calls += 1;
+    if (this.behavior === "configuration") {
+      throw new ModelRunError("auth_unavailable", "Provider is not configured.", { retryable: true });
+    }
+    await hooks?.beforeDispatch?.({
+      provider: provenance.provider,
+      model: provenance.model,
+      api: provenance.api,
+      requestDigest: "1".repeat(64),
+      hold: { tokens: 400, costUsd: 0.5 },
+    });
+    this.dispatches += 1;
+    if (this.behavior === "unknown") {
+      throw new ModelRunError("provider_error", "Connection lost after dispatch.", { retryable: true });
+    }
+    await hooks?.observe?.(provenance);
+    return { text: '{"operations":[]}', provenance };
+  }
+}
+
+async function fauxPiModelRunner(
+  response: AssistantMessage | ((events: string[]) => AssistantMessage),
+  events: string[],
+): Promise<{ runner: PiModelRunner; callCount: () => number }> {
+  const agentDir = await mkdtemp(join(tmpdir(), "no-forgetti-model-runner-"));
+  const runtime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: join(agentDir, "models.json"),
+  });
+  const faux = fauxProvider();
+  faux.setResponses([
+    typeof response === "function"
+      ? () => response(events)
+      : response,
+  ]);
+  runtime.registerNativeProvider(faux.provider);
+  const times = [
+    new Date("2026-01-03T00:00:00.000Z"),
+    new Date("2026-01-03T00:00:01.000Z"),
+  ];
+  const runner = new PiModelRunner({
+    provider: "faux",
+    model: "faux-1",
+    reasoningEffort: "off",
+    maxCallsPerDay: 1,
+    maxTokensPerDay: 1_000,
+    maxCostPerDayUsd: 1,
+  }, {
+    agentDir,
+    now: () => times.shift()!,
+    createModelRuntime: async () => runtime,
+  });
+  return { runner, callCount: () => faux.state.callCount };
+}
+
+test("model dispatch checkpoint and response observation are awaited in provider order", async () => {
+  const events: string[] = [];
+  const { runner, callCount } = await fauxPiModelRunner(
+    (seen) => {
+      seen.push("provider");
+      return fauxAssistantMessage("{\"operations\":[]}", { responseId: "response-checkpoint-1" });
+    },
+    events,
+  );
+  const hooks: ModelRunHooks = {
+    async beforeDispatch(context) {
+      assert.equal(context.provider, "faux");
+      assert.equal(context.model, "faux-1");
+      assert.match(context.requestDigest, /^[0-9a-f]{64}$/u);
+      assert.ok(context.hold.tokens > 0);
+      assert.ok(context.hold.costUsd >= 0);
+      events.push("dispatch:start");
+      await Promise.resolve();
+      events.push("dispatch:end");
+    },
+    async observe(observed) {
+      events.push(`observe:start:${observed.model}`);
+      await Promise.resolve();
+      events.push("observe:end");
+    },
+  };
+
+  const result = await runner.run({ systemPrompt: "system", prompt: "prompt" }, hooks);
+  events.push("returned");
+
+  assert.equal(result.text, '{"operations":[]}');
+  assert.equal(result.provenance.responseId, "response-checkpoint-1");
+  assert.equal(callCount(), 1, "provider retries must remain disabled");
+  assert.deepEqual(events, [
+    "dispatch:start",
+    "dispatch:end",
+    "provider",
+    "observe:start:faux-1",
+    "observe:end",
+    "returned",
+  ]);
+});
+
+test("failed dispatch checkpoint prevents provider execution", async () => {
+  const events: string[] = [];
+  const { runner, callCount } = await fauxPiModelRunner(fauxAssistantMessage("unused"), events);
+  const checkpointError = new Error("durable dispatch checkpoint failed");
+
+  await assert.rejects(
+    runner.run({ systemPrompt: "system", prompt: "prompt" }, {
+      async beforeDispatch() {
+        throw checkpointError;
+      },
+    }),
+    (error: unknown) => error === checkpointError,
+  );
+  assert.equal(callCount(), 0);
+});
+
+test("provider error responses are observed before their provenance error is thrown", async () => {
+  const events: string[] = [];
+  const { runner, callCount } = await fauxPiModelRunner(
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "Provider overloaded (503)." }),
+    events,
+  );
+  let observed: ReviewModelProvenance | undefined;
+
+  await assert.rejects(
+    runner.run({ systemPrompt: "system", prompt: "prompt" }, {
+      async beforeDispatch() {
+        events.push("dispatch");
+      },
+      async observe(value) {
+        await Promise.resolve();
+        observed = value;
+        events.push("observed");
+      },
+    }),
+    (error: unknown) => {
+      events.push("thrown");
+      return error instanceof ModelRunError
+        && error.code === "provider_error"
+        && error.provenance === observed;
+    },
+  );
+
+  assert.equal(callCount(), 1);
+  assert.deepEqual(events, ["dispatch", "observed", "thrown"]);
+});
+
+test("model and auth configuration failures happen before dispatch checkpoint", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "no-forgetti-model-preflight-"));
+  await writeFile(join(agentDir, "models.json"), JSON.stringify({
+    providers: {
+      checkpoint: {
+        baseUrl: "https://review.invalid/v1",
+        api: "openai-completions",
+        models: [{ id: "reviewer" }],
+      },
+    },
+  }));
+  const profile = {
+    provider: "checkpoint",
+    model: "missing",
+    reasoningEffort: "off" as const,
+    maxCallsPerDay: 1,
+    maxTokensPerDay: 1_000,
+    maxCostPerDayUsd: 1,
+  };
+  const dispatches: string[] = [];
+  const hooks: ModelRunHooks = {
+    async beforeDispatch() {
+      dispatches.push("dispatch");
+    },
+  };
+
+  await assert.rejects(
+    new PiModelRunner(profile, { agentDir }).run({ systemPrompt: "system", prompt: "prompt" }, hooks),
+    (error: unknown) => error instanceof ModelRunError && error.code === "model_not_found",
+  );
+  await assert.rejects(
+    new PiModelRunner({ ...profile, model: "reviewer" }, { agentDir })
+      .run({ systemPrompt: "system", prompt: "prompt" }, hooks),
+    (error: unknown) => error instanceof ModelRunError && error.code === "auth_unavailable",
+  );
+
+  assert.deepEqual(dispatches, []);
+});
+
+test("review engine forwards daemon checkpoints across its model seam", async () => {
+  const events: string[] = [];
+  const runner: ModelRunner = {
+    async run(_request, hooks) {
+      await hooks?.beforeDispatch?.({
+        provider: provenance.provider,
+        model: provenance.model,
+        api: provenance.api,
+        requestDigest: "0".repeat(64),
+        hold: { tokens: 1, costUsd: 0 },
+      });
+      events.push("provider");
+      await hooks?.observe?.(provenance);
+      return { text: '{"operations":[]}', provenance };
+    },
+  };
+
+  await new ReviewEngine(runner).review(job(), undefined, {
+    async beforeDispatch() {
+      events.push("dispatch");
+    },
+    async observe(value) {
+      events.push(`observed:${value.model}`);
+    },
+  });
+  events.push("returned");
+
+  assert.deepEqual(events, ["dispatch", "provider", "observed:fake-reviewer", "returned"]);
+});
 
 test("tool-less review engine builds prompt from job and returns typed proposal with provenance", async () => {
   const reviewJob = job();
@@ -162,6 +394,352 @@ test("daemon drains spool into proposal outcome without a memory mutation interf
   });
 });
 
+test("durable response checkpoint survives restart without provider rerun or duplicate usage", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-durable-daemon-"));
+  let spoolNow = new Date("2026-01-03T12:00:00.000Z");
+  const spool = new ReviewSpool(join(root, "spool"), { now: () => spoolNow });
+  const accounting = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const runner = new CheckpointModelRunner();
+  await spool.enqueue(reviewJob);
+
+  const first = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "checkpoint-worker-1",
+    committer: { async commit() { throw new Error("simulated crash before admission"); } },
+  });
+  assert.equal((await first.processOne()).status, "retry");
+  assert.equal(runner.dispatches, 1);
+  assert.ok(await decisions.loadDecision(reviewJob.id), "response must be durable before admission");
+
+  const noRerun: ModelRunner = {
+    async run() { assert.fail("selected durable response must skip provider"); },
+  };
+  spoolNow = new Date(spoolNow.getTime() + 5_000);
+  const second = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(noRerun),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "checkpoint-worker-2",
+  });
+  assert.equal((await second.processOne()).status, "completed");
+  assert.deepEqual((await accounting.snapshot(provenance.provider)).charged, {
+    calls: 1,
+    tokens: provenance.usage.totalTokens,
+    costNanodollars: 3_100_000,
+  });
+});
+
+test("decision-before-settlement crash reconciles accounting on restart without provider rerun", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-decision-settle-failpoint-"));
+  let spoolNow = new Date("2026-01-03T12:00:00.000Z");
+  const spool = new ReviewSpool(join(root, "spool"), { now: () => spoolNow });
+  const authority = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  let failSettlement = true;
+  const accounting: ReviewAttemptAccounting = {
+    initialize: () => authority.initialize(),
+    reserve: (request) => authority.reserve(request),
+    commitDispatch: (reservation) => authority.commitDispatch(reservation),
+    async settle(reservation, observed) {
+      if (failSettlement) {
+        failSettlement = false;
+        assert.ok(await decisions.loadDecision(reviewJob.id), "decision must precede settlement");
+        throw new Error("simulated crash after decision before settlement");
+      }
+      await authority.settle(reservation, observed);
+    },
+    markUnknown: (reservation) => authority.markUnknown(reservation),
+    cancelPreDispatch: (reservation) => authority.cancelPreDispatch(reservation),
+    snapshot: (provider, day) => authority.snapshot(provider, day),
+  };
+  const runner = new CheckpointModelRunner();
+  await spool.enqueue(reviewJob);
+
+  const first = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "decision-settle-worker-1",
+    leaseMs: 1,
+  });
+  await assert.rejects(first.processOne(), /simulated crash after decision before settlement/u);
+  assert.equal(runner.dispatches, 1);
+  assert.deepEqual((await authority.snapshot(provenance.provider)).held, {
+    calls: 1,
+    tokens: 400,
+    costNanodollars: 500_000_000,
+  });
+
+  spoolNow = new Date("2026-01-03T12:00:01.000Z");
+  await spool.recover();
+  const second = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine({ async run() { assert.fail("durable decision must skip provider rerun"); } }),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "decision-settle-worker-2",
+  });
+  assert.equal((await second.processOne()).status, "completed");
+  assert.deepEqual((await authority.snapshot(provenance.provider)).charged, {
+    calls: 1,
+    tokens: provenance.usage.totalTokens,
+    costNanodollars: 3_100_000,
+  });
+});
+
+test("provider failure checkpoint precedes provenance settlement", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-failure-settlement-order-"));
+  const spool = new ReviewSpool(join(root, "spool"));
+  const authority = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const accounting: ReviewAttemptAccounting = {
+    initialize: () => authority.initialize(),
+    reserve: (request) => authority.reserve(request),
+    commitDispatch: (reservation) => authority.commitDispatch(reservation),
+    async settle(reservation, observed) {
+      const checkpoint = await decisions.loadAttempt(reviewJob.id, reservation.id);
+      assert.equal(checkpoint?.outcome.status, "failed", "failed provider result must precede settlement");
+      await authority.settle(reservation, observed);
+    },
+    markUnknown: (reservation) => authority.markUnknown(reservation),
+    cancelPreDispatch: (reservation) => authority.cancelPreDispatch(reservation),
+    snapshot: (provider, day) => authority.snapshot(provider, day),
+  };
+  const runner: ModelRunner = {
+    async run(_request, hooks) {
+      await hooks?.beforeDispatch?.({
+        provider: provenance.provider,
+        model: provenance.model,
+        api: provenance.api,
+        requestDigest: "2".repeat(64),
+        hold: { tokens: 400, costUsd: 0.5 },
+      });
+      await hooks?.observe?.(provenance);
+      throw new ModelRunError("provider_error", "Provider rejected response.", {
+        retryable: true,
+        provenance,
+      });
+    },
+  };
+  await spool.enqueue(reviewJob);
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "failure-order-worker",
+  });
+
+  assert.equal((await daemon.processOne()).status, "retry");
+  assert.deepEqual((await authority.snapshot(provenance.provider)).charged, {
+    calls: 1,
+    tokens: provenance.usage.totalTokens,
+    costNanodollars: 3_100_000,
+  });
+});
+
+test("SQLite shadow records valid provider state transitions and selected decision", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-daemon-shadow-"));
+  const spool = new ReviewSpool(join(root, "spool"));
+  const accounting = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const ledger = new SQLiteReviewLedger(join(root, "ledger.sqlite"));
+  await spool.enqueue(reviewJob);
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(new CheckpointModelRunner()),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    ledger,
+    workerId: "shadow-worker",
+  });
+
+  assert.equal((await daemon.processOne()).status, "completed");
+  const attempts = ledger.providerAttempts(reviewJob.id);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0]?.state, "settled");
+  assert.equal(attempts[0]?.requestDigest, "1".repeat(64));
+  assert.equal(attempts[0]?.selected, true);
+  ledger.close();
+});
+
+test("SQLite shadow omits request digest from canceled pre-dispatch attempt", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-daemon-canceled-shadow-"));
+  const spool = new ReviewSpool(join(root, "spool"));
+  const authority = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const accounting: ReviewAttemptAccounting = {
+    initialize: () => authority.initialize(),
+    reserve: (request) => authority.reserve(request),
+    async commitDispatch() { throw new Error("dispatch checkpoint failpoint"); },
+    settle: (reservation, observed) => authority.settle(reservation, observed),
+    markUnknown: (reservation) => authority.markUnknown(reservation),
+    cancelPreDispatch: (reservation) => authority.cancelPreDispatch(reservation),
+    snapshot: (provider, day) => authority.snapshot(provider, day),
+  };
+  const decisions = new ReviewDecisionStore(spool.root);
+  const ledger = new SQLiteReviewLedger(join(root, "ledger.sqlite"));
+  await spool.enqueue(reviewJob);
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(new CheckpointModelRunner()),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    ledger,
+    workerId: "canceled-shadow-worker",
+  });
+
+  assert.equal((await daemon.processOne()).status, "retry");
+  const attempts = ledger.providerAttempts(reviewJob.id);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0]?.state, "canceled");
+  assert.equal(attempts[0]?.requestDigest, undefined);
+  ledger.close();
+});
+
+test("drain stops after deferred configuration retry", async () => {
+  const reviewJob = job();
+  const now = new Date().toISOString();
+  const claim = {
+    job: reviewJob,
+    attempt: 1,
+    workerId: "drain-config-worker",
+    leaseToken: "c".repeat(32),
+    claimedAt: now,
+    leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+  };
+  let claims = 0;
+  let defers = 0;
+  const budget = new InMemoryReviewBudgetAccount();
+  const daemon = new ReviewDaemon({
+    spool: {
+      async initialize() {},
+      async recover() {},
+      async claim() {
+        claims += 1;
+        if (claims > 1) throw new Error("drain reclaimed deferred retry in same pass");
+        return claim;
+      },
+      async renew() { return claim; },
+      async finish() { assert.fail("configuration retry must not finish job"); },
+      async defer() { defers += 1; },
+    },
+    engine: new ReviewEngine(new CheckpointModelRunner("configuration")),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    budgetAccount: budget,
+    workerId: "drain-config-worker",
+  });
+
+  assert.deepEqual(await daemon.drain(), {
+    completed: 0,
+    failed: 0,
+    retried: 1,
+    budgetExhausted: false,
+    interrupted: false,
+  });
+  assert.equal(claims, 1);
+  assert.equal(defers, 1);
+  assert.equal((await budget.snapshot()).calls, 0);
+});
+
+test("configuration preflight checkpoints failure, reserves nothing, and defers with backoff", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-config-checkpoint-"));
+  let spoolNow = new Date("2026-01-03T12:00:00.000Z");
+  const spool = new ReviewSpool(join(root, "spool"), { now: () => spoolNow });
+  const accounting = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const runner = new CheckpointModelRunner("configuration");
+  await spool.enqueue(reviewJob);
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 1, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "config-checkpoint-worker",
+  });
+
+  const result = await daemon.processOne();
+  assert.equal(result.status, "retry");
+  assert.equal(runner.dispatches, 0);
+  assert.deepEqual((await accounting.snapshot(provenance.provider)).effective, {
+    calls: 0,
+    tokens: 0,
+    costNanodollars: 0,
+  });
+  assert.equal((await readdir(join(spool.root, "provider-results", reviewJob.id))).length, 1);
+  assert.equal(await spool.claim({ workerId: "config-checkpoint-verifier", leaseMs: 1_000 }), undefined);
+  spoolNow = new Date(spoolNow.getTime() + 60_000);
+  const retried = await spool.claim({ workerId: "config-checkpoint-verifier", leaseMs: 1_000 });
+  assert.equal(retried?.attempt, 2, "defer must become claimable after durable backoff");
+});
+
+test("dispatched failure holds unknown usage and reports later attempt exhaustion distinctly", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-unknown-attempt-"));
+  let spoolNow = new Date("2026-01-03T12:00:00.000Z");
+  const spool = new ReviewSpool(join(root, "spool"), { now: () => spoolNow });
+  const accounting = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const runner = new CheckpointModelRunner("unknown");
+  await spool.enqueue(reviewJob);
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 1, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "unknown-attempt-worker",
+  });
+
+  assert.equal((await daemon.processOne()).status, "retry");
+  assert.deepEqual((await accounting.snapshot(provenance.provider)).unknown, {
+    calls: 1,
+    tokens: 400,
+    costNanodollars: 500_000_000,
+  });
+  spoolNow = new Date(spoolNow.getTime() + 5_000);
+  const exhausted = await daemon.processOne();
+  assert.equal(exhausted.status, "attempt_budget_exhausted");
+  if (exhausted.status === "attempt_budget_exhausted") {
+    assert.equal(exhausted.provider, provenance.provider);
+    assert.deepEqual(exhausted.usage.effective, exhausted.usage.unknown);
+  }
+  assert.equal(runner.dispatches, 1, "exhausted reservation must stop provider dispatch");
+});
+
 test("daemon keeps renewing its lease through proposal admission", async () => {
   const reviewJob = job();
   const claimedAt = new Date().toISOString();
@@ -212,6 +790,9 @@ test("daemon keeps renewing its lease through proposal admission", async () => {
           committedAt: new Date().toISOString(),
           resultingBranchDigest: reviewJob.baseBranchDigest,
           messages: [],
+          transactionVersion: 1 as const,
+          transactionId: reviewJob.id,
+          outcomeDigest: "0".repeat(64),
         };
       },
     },

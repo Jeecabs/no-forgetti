@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -114,6 +114,64 @@ test("expired claim recovery requeues with a new fenced attempt", async () => {
   assert.equal(await spool.finish(second, outcome), "duplicate");
   assert.deepEqual(await spool.getOutcome(job.id), outcome);
   assert.equal(permission((await stat(join(spool.outcomesDir, `${job.id}.json`))).mode), 0o600);
+});
+
+test("defer releases a live claim for an immediate fenced retry", async () => {
+  const spool = await temporarySpool();
+  const job = reviewJob();
+  await spool.enqueue(job);
+  const first = await spool.claim({ workerId: "worker-1", leaseMs: 60_000 });
+  assert.ok(first);
+
+  assert.equal(await spool.defer(first), "deferred");
+  const second = await spool.claim({ workerId: "worker-2", leaseMs: 60_000 });
+  assert.ok(second);
+  assert.equal(second.attempt, 2);
+  assert.notEqual(second.leaseToken, first.leaseToken);
+  await assert.rejects(() => spool.defer(first), ReviewLeaseError);
+});
+
+test("delayed defer is not claimable until its durable availability time", async () => {
+  let time = Date.parse("2026-02-01T00:00:00.000Z");
+  const spool = await temporarySpool({ now: () => new Date(time) });
+  const job = reviewJob();
+  await spool.enqueue(job);
+  const first = await spool.claim({ workerId: "worker-1", leaseMs: 60_000 });
+  assert.ok(first);
+
+  assert.equal(await spool.defer(first, { delayMs: 30_000 }), "deferred");
+  assert.equal(await spool.claim({ workerId: "worker-2", leaseMs: 60_000 }), undefined);
+
+  time += 29_999;
+  assert.equal(await spool.claim({ workerId: "worker-2", leaseMs: 60_000 }), undefined);
+  time += 1;
+  const second = await spool.claim({ workerId: "worker-2", leaseMs: 60_000 });
+  assert.ok(second);
+  assert.equal(second.attempt, 2);
+  assert.notEqual(second.leaseToken, first.leaseToken);
+});
+
+test("recovery completes a crashed delayed defer without losing timing or fencing", async () => {
+  let time = Date.parse("2026-02-01T00:00:00.000Z");
+  const spool = await temporarySpool({ now: () => new Date(time) });
+  const job = reviewJob();
+  await spool.enqueue(job);
+  const first = await spool.claim({ workerId: "worker-1", leaseMs: 60_000 });
+  assert.ok(first);
+  const runningPath = join(spool.runningDir, `${job.id}.json`);
+  const runningRecord = await readFile(runningPath, "utf8");
+
+  await spool.defer(first, { delayMs: 30_000 });
+  // Simulate power loss after durable queue publication but before running unlink.
+  await writeFile(runningPath, runningRecord, { encoding: "utf8", mode: 0o600 });
+  assert.deepEqual(await spool.recover(), { requeued: 0, quarantined: 0, cleaned: 1 });
+  assert.equal(await spool.claim({ workerId: "worker-2", leaseMs: 60_000 }), undefined);
+
+  time += 30_000;
+  const second = await spool.claim({ workerId: "worker-2", leaseMs: 60_000 });
+  assert.ok(second);
+  assert.equal(second.attempt, 2);
+  assert.notEqual(second.leaseToken, first.leaseToken);
 });
 
 test("recovery dead-letters malformed and oversized spool records", async () => {

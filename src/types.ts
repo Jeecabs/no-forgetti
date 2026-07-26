@@ -40,11 +40,21 @@ export interface ProjectMetadata {
   updatedAt: string;
 }
 
+export interface ReviewClaim {
+  branchName: string;
+  generation: number;
+  token: string;
+  capturedTurns: number;
+  capturedSignalScore: number;
+}
+
 export interface ReviewState {
   version: number;
   turnsSinceReview: number;
   signalScore: number;
   consecutiveFailures: number;
+  generation?: number;
+  activeClaim?: ReviewClaim;
   lastReviewedAt?: string;
   lastAttemptAt?: string;
   nextAttemptAt?: string;
@@ -70,6 +80,36 @@ export type ReviewOperation =
 export interface MutationResult {
   changed: boolean;
   message: string;
+  branch: MemoryBranch;
+}
+
+export type ReviewAdmissionStatus = "applied" | "noop" | "stale" | "rejected";
+
+export interface ReviewAdmissionRequest {
+  transactionId: string;
+  branchName: string;
+  expectedBranchDigest: MemoryDigest;
+  /** Binds an external job/outcome envelope without storing that envelope here. */
+  bindingDigest?: MemoryDigest;
+  operations: ReviewOperation[];
+  sourceSessionId?: string;
+}
+
+export interface ReviewAdmissionMetadata {
+  transactionId: string;
+  requestDigest: MemoryDigest;
+  /** Immutable external job/outcome/receipt binding supplied by its caller. */
+  bindingDigest?: MemoryDigest;
+  branchName: string;
+  expectedBranchDigest: MemoryDigest;
+  status: ReviewAdmissionStatus;
+  committedAt: string;
+  resultingBranchDigest: MemoryDigest;
+  messages: string[];
+  revisionId?: string;
+}
+
+export interface ReviewAdmissionResult extends ReviewAdmissionMetadata {
   branch: MemoryBranch;
 }
 

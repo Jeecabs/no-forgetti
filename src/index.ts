@@ -39,6 +39,7 @@ import {
   type MemoryBranch,
   type MemoryImportance,
   type MutationResult,
+  type ReviewClaim,
   type ReviewOperation,
 } from "./types.ts";
 
@@ -639,11 +640,11 @@ export function activateProjectMemoryExtension(
     const controller = new AbortController();
     reviewController = controller;
     reviewPromise = (async () => {
-      let claimed = false;
+      let claimed: ReviewClaim | undefined;
       let success = false;
       let reviewTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        claimed = await memoryStore.claimReviewIfDue(
+        claimed = await memoryStore.claimReview(
           reviewBranchName,
           DEFAULT_REVIEW_INTERVAL,
           DEFAULT_REVIEW_SIGNAL_THRESHOLD,
@@ -704,7 +705,7 @@ export function activateProjectMemoryExtension(
         if (ctx.hasUI) ctx.ui.notify(`Project memory review failed: ${errorMessage(error)}`, "warning");
       } finally {
         if (reviewTimeout) clearTimeout(reviewTimeout);
-        if (claimed) await memoryStore.finishReview(reviewBranchName, success).catch(() => undefined);
+        if (claimed) await memoryStore.finishReviewClaim(reviewBranchName, claimed, success).catch(() => undefined);
         if (reviewController === controller) reviewController = undefined;
         reviewPromise = undefined;
       }
