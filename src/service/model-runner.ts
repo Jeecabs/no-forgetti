@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
 
-import type { Usage } from "@earendil-works/pi-ai";
+import { ModelsError, type Usage } from "@earendil-works/pi-ai";
 import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { ReviewerProfile } from "./config.ts";
@@ -242,7 +242,9 @@ export class PiModelRunner implements ModelRunner {
         throw new ModelRunError("model_timeout", "Review model call timed out.", { retryable: true, cause: error });
       }
       const message = error instanceof Error ? error.message : String(error);
-      const authFailure = authProviderFailure(message);
+      const authFailure = error instanceof ModelsError
+        ? error.code === "auth" || error.code === "oauth"
+        : authProviderFailure(message);
       throw new ModelRunError(authFailure ? "auth_unavailable" : "provider_error", message, {
         retryable: authFailure || retryableProviderFailure(message),
         cause: error,
