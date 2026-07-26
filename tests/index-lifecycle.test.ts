@@ -334,8 +334,8 @@ test("shutdown prevents a review from starting after a delayed claim", async (t)
   let claimEntered!: () => void;
   const claimStarted = new Promise<void>((resolve) => { claimEntered = resolve; });
   const claimBarrier = new Promise<void>((resolve) => { releaseClaim = resolve; });
-  const originalClaim = memoryStore.claimReviewIfDue.bind(memoryStore);
-  memoryStore.claimReviewIfDue = async (...args) => {
+  const originalClaim = memoryStore.claimReview.bind(memoryStore);
+  memoryStore.claimReview = async (...args) => {
     claimEntered();
     await claimBarrier;
     return originalClaim(...args);

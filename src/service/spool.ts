@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, rename, stat, unlink } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { atomicWriteFile } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
@@ -34,6 +34,7 @@ interface QueueRecord {
   version: 1;
   job: ReviewJob;
   nextAttempt: number;
+  availableAt?: string;
 }
 
 interface RunningRecord extends LedgerAttempt {
@@ -55,8 +56,14 @@ export interface ClaimOptions {
   leaseMs: number;
 }
 
+export interface DeferOptions {
+  /** Keep the next fenced attempt unavailable for this durable delay. */
+  delayMs?: number;
+}
+
 export type EnqueueResult = "enqueued" | "duplicate" | "quarantined";
 export type FinishResult = "finished" | "duplicate";
+export type DeferResult = "deferred";
 
 export interface RecoveryResult {
   requeued: number;
@@ -121,9 +128,17 @@ function leaseToken(value: unknown): string {
 
 function parseQueueRecord(value: unknown): QueueRecord {
   if (!isRecord(value)) throw new Error("Invalid queued review record.");
-  exactKeys(value, ["version", "job", "nextAttempt"]);
+  const hasAvailableAt = Object.hasOwn(value, "availableAt");
+  exactKeys(value, hasAvailableAt
+    ? ["version", "job", "nextAttempt", "availableAt"]
+    : ["version", "job", "nextAttempt"]);
   if (value.version !== SPOOL_RECORD_VERSION) throw new Error("Unsupported queued review record version.");
-  return { version: 1, job: parseReviewJob(value.job), nextAttempt: positiveInteger(value.nextAttempt, "queued review attempt") };
+  return {
+    version: 1,
+    job: parseReviewJob(value.job),
+    nextAttempt: positiveInteger(value.nextAttempt, "queued review attempt"),
+    ...(hasAvailableAt ? { availableAt: isoTimestamp(value.availableAt, "queued review availability timestamp") } : {}),
+  };
 }
 
 function parseRunningRecord(value: unknown): RunningRecord {
@@ -165,6 +180,12 @@ function boundedRecord(value: unknown, maxBytes: number, label: string): string 
 
 function checkedLeaseMs(value: number): number {
   if (!Number.isSafeInteger(value) || value < MIN_LEASE_MS || value > MAX_LEASE_MS) throw new Error("Invalid review lease duration.");
+  return value;
+}
+
+function checkedDeferDelayMs(value: number | undefined): number {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid review defer delay.");
   return value;
 }
 
@@ -233,7 +254,8 @@ export class ReviewSpool {
     const owner = workerId(options.workerId);
     const duration = checkedLeaseMs(options.leaseMs);
     return this.lock(async () => {
-      await this.recoverUnlocked(this.now());
+      const at = this.now();
+      await this.recoverUnlocked(at);
       const names = await this.recordNames(this.queuedDir);
       for (const name of names) {
         const path = join(this.queuedDir, name);
@@ -258,6 +280,8 @@ export class ReviewSpool {
           else await this.quarantineFile(path);
           continue;
         }
+
+        if (queued.availableAt && queued.availableAt > at.toISOString()) continue;
 
         const claimedAt = this.now();
         const claim: RunningRecord = {
@@ -297,6 +321,25 @@ export class ReviewSpool {
     });
   }
 
+  async defer(value: ReviewClaim, options: DeferOptions = {}): Promise<DeferResult> {
+    const delayMs = checkedDeferDelayMs(options.delayMs);
+    return this.lock(async () => {
+      const claim = await this.requireCurrentClaim(value, true);
+      const now = this.now();
+      const availableAt = new Date(now.getTime() + delayMs);
+      if (!Number.isFinite(availableAt.getTime())) throw new Error("Invalid review defer delay.");
+      const queued: QueueRecord = {
+        version: 1,
+        job: claim.job,
+        nextAttempt: claim.attempt + 1,
+        ...(delayMs > 0 ? { availableAt: availableAt.toISOString() } : {}),
+      };
+      await this.writeRecord(this.queuePath(claim.job.id), queued, MAX_QUEUE_RECORD_BYTES, "Queued review record");
+      await this.remove(this.runningPath(claim.job.id));
+      return "deferred" as const;
+    });
+  }
+
   async finish(value: ReviewClaim, result: ReviewOutcome): Promise<FinishResult> {
     const supplied = this.validateClaim(value);
     const outcome = decodeReviewOutcome(encodeReviewOutcome(result));
@@ -332,6 +375,25 @@ export class ReviewSpool {
         this.ledger?.recordOutcome(claim, outcome);
       });
       return "finished";
+    });
+  }
+
+  async activeClaims(at = this.now()): Promise<ReviewClaim[]> {
+    if (!Number.isFinite(at.getTime())) throw new Error("Invalid review active-claim time.");
+    return this.lock(async () => {
+      await this.recoverUnlocked(at);
+      const claims: ReviewClaim[] = [];
+      for (const name of await this.recordNames(this.runningDir)) {
+        const path = join(this.runningDir, name);
+        try {
+          const running = await this.readRunning(path);
+          if (name !== `${running.job.id}.json`) throw new Error("Running review filename does not match job id.");
+          claims.push(this.publicClaim(running));
+        } catch {
+          await this.quarantineFile(path);
+        }
+      }
+      return claims;
     });
   }
 
@@ -397,13 +459,21 @@ export class ReviewSpool {
         }
         continue;
       }
-      if (running.leaseUntil > at.toISOString()) continue;
-
-      const queued = await this.readQueueIfPresent(running.job.id);
+      let queued = await this.readQueueIfPresent(running.job.id);
       if (queued && queued.job.digest !== running.job.digest) {
         await this.quarantineFile(this.queuePath(running.job.id));
         result.quarantined += 1;
+        queued = undefined;
       }
+      // Queue-first defer is crash-atomic: a higher fenced attempt proves the
+      // durable defer committed, even if removing the running record did not.
+      if (queued && queued.nextAttempt > running.attempt) {
+        await this.remove(path);
+        result.cleaned += 1;
+        continue;
+      }
+      if (running.leaseUntil > at.toISOString()) continue;
+
       const record: QueueRecord = {
         version: 1,
         job: running.job,
@@ -516,6 +586,8 @@ export class ReviewSpool {
     try {
       await rename(path, target);
       await chmod(target, 0o600);
+      await this.syncDirectory(dirname(path));
+      if (dirname(target) !== dirname(path)) await this.syncDirectory(dirname(target));
     } catch (error) {
       if (!errno(error, "ENOENT")) throw error;
     }
@@ -640,8 +712,22 @@ export class ReviewSpool {
   }
 
   private async remove(path: string): Promise<void> {
+    let removed = true;
     await unlink(path).catch((error) => {
-      if (!errno(error, "ENOENT")) throw error;
+      if (errno(error, "ENOENT")) removed = false;
+      else throw error;
     });
+    if (!removed) return;
+    await this.syncDirectory(dirname(path));
+  }
+
+  private async syncDirectory(path: string): Promise<void> {
+    const directory = await open(path, "r").catch(() => undefined);
+    if (!directory) return;
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
 }

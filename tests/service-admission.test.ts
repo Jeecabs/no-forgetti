@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { ProjectMemoryStore } from "../src/store.ts";
-import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
+import { admissionBindingDigest, FileMemoryProposalCommitter } from "../src/service/admission.ts";
 import { createReviewJob, createReviewOutcome, type ReviewModelProvenance } from "../src/service/protocol.ts";
 
 const provenance: ReviewModelProvenance = {
@@ -64,6 +64,58 @@ test("external admission applies a proposal once through branch CAS", async (t) 
   const duplicate = await committer.commit(job, outcome);
   assert.deepEqual(duplicate, receipt);
   assert.equal((await store.loadBranch("main")).entries.length, 1);
+
+  const admissionEntries = await readdir(join(store.projectDir, "review-admissions"), { withFileTypes: true });
+  assert.deepEqual(admissionEntries.filter((entry) => entry.isFile()).map((entry) => entry.name), []);
+  const retiredFiles = await readdir(join(store.projectDir, "review-admissions", "retired"));
+  assert.deepEqual(retiredFiles, [`${job.id}.json`]);
+  const tombstone = await readFile(join(store.projectDir, "review-admissions", "retired", retiredFiles[0]!), "utf8");
+  assert.doesNotMatch(tombstone, /private-session|canonical check|Canonical verification/u);
+  assert.equal(await store.getReviewAdmissionResult(job.id), undefined);
+  assert.equal(
+    (await store.getReviewAdmissionMetadata(job.id, admissionBindingDigest(job, outcome)))?.resultingBranchDigest,
+    receipt.resultingBranchDigest,
+  );
+});
+
+test("receipt recovery reuses a committed store transaction instead of reporting stale", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  const branch = await store.loadBranch("main");
+  const job = createReviewJob({
+    projectKey: store.projectKey,
+    sessionId: "private-session",
+    throughEntryId: "entry-1",
+    transcript: "USER: remember the recovery check",
+    branch,
+    baseBranchDigest: store.branchDigest(branch),
+    maxChars: store.maxChars,
+  });
+  const outcome = createReviewOutcome(job, {
+    status: "completed",
+    operations: [{ action: "add", content: "Recovery keeps the original admission.", importance: "high" }],
+    provenance,
+    completedAt: provenance.completedAt,
+  });
+
+  const committed = await store.applyReviewAdmission({
+    transactionId: job.id,
+    branchName: "main",
+    expectedBranchDigest: job.baseBranchDigest,
+    bindingDigest: admissionBindingDigest(job, outcome),
+    operations: outcome.status === "completed" ? outcome.operations : [],
+  });
+  assert.equal(committed.status, "applied");
+  await store.applyOperation("main", { action: "add", content: "Later foreground memory remains visible." });
+
+  const receipt = await new FileMemoryProposalCommitter(agentDir).commit(job, outcome);
+  assert.equal(receipt.status, "applied");
+  assert.equal(receipt.resultingBranchDigest, committed.resultingBranchDigest);
+  assert.equal(receipt.revisionId, committed.revisionId);
+  assert.equal((await readdir(join(store.projectDir, "revisions", "main"))).length, 1);
+  assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), [
+    "Recovery keeps the original admission.",
+    "Later foreground memory remains visible.",
+  ]);
 });
 
 test("external admission records stale proposals without overwriting foreground memory", async (t) => {

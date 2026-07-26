@@ -1,17 +1,19 @@
+import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+import { FileReviewAttemptAccounting } from "./accounting.ts";
 import { FileMemoryProposalCommitter } from "./admission.ts";
 import { loadServiceConfig, type ReviewerProfile } from "./config.ts";
 import {
   defaultReviewWorkerId,
-  FileReviewBudgetAccount,
   ReviewDaemon,
   type ReviewDaemonEvent,
   type ReviewDrainResult,
 } from "./daemon.ts";
+import { ReviewDecisionStore } from "./decisions.ts";
 import { PiModelRunner } from "./model-runner.ts";
 import { ReviewWorkerStatusReporter } from "./monitor.ts";
 import { ReviewEngine } from "./review-engine.ts";
@@ -123,15 +125,75 @@ async function createDefaultRuntime(
   const { SQLiteReviewLedger } = await import("./ledger.ts");
   const ledger = new SQLiteReviewLedger(join(serviceRoot, "review-ledger.sqlite"));
   const spool = new ReviewSpool(join(serviceRoot, "review-spool"), { ledger });
-  await spool.initialize();
+  const attemptAccounting = new FileReviewAttemptAccounting(spool.root);
+  const decisionStore = new ReviewDecisionStore(spool.root);
+  await Promise.all([spool.initialize(), attemptAccounting.initialize()]);
   await spool.recover();
+  const importLegacyBudget = async (): Promise<void> => {
+    if (!attemptAccounting.importLegacyDailyBudget) return;
+    try {
+      const encoded = await readFile(join(serviceRoot, "review-budget.json"), "utf8");
+      if (Buffer.byteLength(encoded, "utf8") > 4_096) throw new Error("Legacy review budget record is oversized.");
+      await attemptAccounting.importLegacyDailyBudget(config.reviewer!.provider, JSON.parse(encoded));
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT")) throw error;
+    }
+  };
+  await importLegacyBudget();
+  const reconcileAttempts = async (): Promise<void> => {
+    if (!attemptAccounting.listRecoveryCandidates || !attemptAccounting.reconcileRecovery) return;
+    const liveLeaseTokens = (await spool.activeClaims()).map((claim) => claim.leaseToken);
+    let cursor: string | undefined;
+    do {
+      const page = await attemptAccounting.listRecoveryCandidates({ limit: 1_000, ...(cursor ? { cursor } : {}) });
+      const results = [];
+      for (const candidate of page.candidates) {
+        const jobId = candidate.claim.jobId;
+        if (!jobId) continue;
+        const checkpoint = await decisionStore.loadAttempt(jobId, candidate.reservation.id);
+        const provenance = checkpoint?.outcome.provenance;
+        if (provenance) results.push({
+          reservation: candidate.reservation,
+          provenance,
+          ...(candidate.dispatch ? { dispatch: candidate.dispatch } : {}),
+        });
+      }
+      await attemptAccounting.reconcileRecovery({
+        candidates: page.candidates.map((candidate) => candidate.reservation),
+        liveLeaseTokens,
+        results,
+        expiresBefore: new Date().toISOString(),
+      });
+      cursor = page.nextCursor;
+    } while (cursor);
+  };
+  await reconcileAttempts();
   const retentionMs = config.evidenceTtlHours * 60 * 60_000;
+  const activeJobIds = async (): Promise<Set<string>> => {
+    const names = (await Promise.all([spool.queuedDir, spool.runningDir].map(async (dir) => {
+      try {
+        return await readdir(dir);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+    }))).flat();
+    return new Set(names
+      .filter((name) => /^review_[0-9a-f]{40}\.json$/u.test(name))
+      .map((name) => name.slice(0, -5)));
+  };
   const purgeExpired = async () => {
     // Retention changes take effect without restarting a long-lived worker.
     const currentConfig = await loadServiceConfig(agentDir);
     const currentRetentionMs = currentConfig.evidenceTtlHours * 60 * 60_000;
     const retentionCutoff = new Date(Date.now() - currentRetentionMs);
+    await spool.recover();
+    await importLegacyBudget();
+    await reconcileAttempts();
+    const protectedJobs = await activeJobIds();
+    await decisionStore.purgeTerminalBefore(retentionCutoff, protectedJobs);
     await spool.purgeTerminalBefore(retentionCutoff);
+    await attemptAccounting.purgeClosedDaysBefore(retentionCutoff);
     ledger.purgeTerminalBefore(retentionCutoff);
   };
   await purgeExpired();
@@ -145,7 +207,9 @@ async function createDefaultRuntime(
     spool,
     engine,
     budget: reviewerBudget(config.reviewer),
-    budgetAccount: new FileReviewBudgetAccount(join(serviceRoot, "review-budget.json")),
+    attemptAccounting,
+    decisionStore,
+    ledger,
     workerId,
     ...(args.leaseMs ? { leaseMs: args.leaseMs } : {}),
     ...(args.pollMs ? { pollMs: args.pollMs } : {}),

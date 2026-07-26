@@ -1,9 +1,9 @@
 import { open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { atomicWriteFile } from "../atomic-file.ts";
 import { ProjectMemoryStore } from "../store.ts";
 import { STORE_FILE_BYTE_LIMIT, STORE_VERSION } from "../types.ts";
+import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-transaction.ts";
 import type { ReviewJob, ReviewOutcome } from "./protocol.ts";
 
 export type AdmissionStatus = "applied" | "noop" | "stale" | "rejected";
@@ -19,6 +19,11 @@ export interface AdmissionReceipt {
   committedAt: string;
   resultingBranchDigest: string;
   messages: string[];
+  transactionVersion: 1;
+  transactionId: string;
+  outcomeDigest: string;
+  bindingDigest?: string;
+  revisionId?: string;
 }
 
 export interface ProposalCommitter {
@@ -65,7 +70,20 @@ function receiptPath(agentDir: string, job: ReviewJob): string {
   return join(agentDir, "no-forgetti", job.projectKey, "service", "commit-receipts", `${job.id}.json`);
 }
 
-function parseReceipt(value: unknown, job: ReviewJob): AdmissionReceipt {
+/** Binds every immutable field needed to reconstruct and validate a receipt. */
+export function admissionBindingDigest(job: ReviewJob, outcome: ReviewOutcome): string {
+  return admissionJsonDigest({
+    transactionVersion: 1,
+    transactionId: job.id,
+    jobDigest: job.digest,
+    projectKey: job.projectKey,
+    branchName: job.branch.name,
+    baseBranchDigest: job.baseBranchDigest,
+    outcomeDigest: admissionJsonDigest(outcome as unknown as object),
+  });
+}
+
+function parseReceipt(value: unknown, job: ReviewJob, outcome: ReviewOutcome): AdmissionReceipt {
   if (!isRecord(value)
     || value.version !== 1
     || value.proposalId !== job.id
@@ -77,7 +95,12 @@ function parseReceipt(value: unknown, job: ReviewJob): AdmissionReceipt {
     || typeof value.committedAt !== "string"
     || typeof value.resultingBranchDigest !== "string"
     || !Array.isArray(value.messages)
-    || value.messages.some((message) => typeof message !== "string")) {
+    || value.messages.some((message) => typeof message !== "string")
+    || value.transactionVersion !== 1
+    || value.transactionId !== job.id
+    || value.outcomeDigest !== admissionJsonDigest(outcome as unknown as object)
+    || value.bindingDigest !== admissionBindingDigest(job, outcome)
+    || (value.revisionId !== undefined && (typeof value.revisionId !== "string" || !/^[a-f0-9-]{36}$/u.test(value.revisionId)))) {
     throw new Error("Invalid or conflicting No Forgetti admission receipt.");
   }
   return value as unknown as AdmissionReceipt;
@@ -96,8 +119,11 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
       throw new Error("Only a matching completed review outcome can be admitted.");
     }
     const path = receiptPath(this.agentDir, job);
+    const outcomeDigest = admissionJsonDigest(outcome as unknown as object);
+    const bindingDigest = admissionBindingDigest(job, outcome);
+    let durableReceipt: AdmissionReceipt | undefined;
     try {
-      return parseReceipt(await readBoundedJson(path), job);
+      durableReceipt = parseReceipt(await readBoundedJson(path), job, outcome);
     } catch (error) {
       if (!(error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT")) throw error;
     }
@@ -106,19 +132,18 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
     const metadata = parseMetadata(await readBoundedJson(join(projectDir, "project.json")), job.projectKey);
     const store = new ProjectMemoryStore(metadata.projectRoot, { storageRoot: this.agentDir });
     await store.initialize();
-    const results = await store.applyOperations(
-      job.branch.name,
-      outcome.operations,
-      undefined,
-      "background_review",
-      job.baseBranchDigest,
-    );
-    const branch = results.at(-1)?.branch ?? await store.loadBranch(job.branch.name);
-    const messages = results.map((result) => result.message);
-    const rejected = messages.find((message) => message.startsWith("Review batch rejected;"));
-    const status: AdmissionStatus = rejected
-      ? rejected.includes("Stale memory snapshot") ? "stale" : "rejected"
-      : results.some((result) => result.changed) ? "applied" : "noop";
+    if (durableReceipt) {
+      await store.retireReviewAdmission(job.id, bindingDigest);
+      return durableReceipt;
+    }
+    const recovered = await store.getReviewAdmissionMetadata(job.id, bindingDigest);
+    const result = recovered ?? await store.applyReviewAdmission({
+      transactionId: job.id,
+      branchName: job.branch.name,
+      expectedBranchDigest: job.baseBranchDigest,
+      bindingDigest,
+      operations: outcome.operations,
+    });
     const receipt: AdmissionReceipt = {
       version: 1,
       proposalId: job.id,
@@ -126,13 +151,19 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
       projectKey: job.projectKey,
       branchName: job.branch.name,
       baseBranchDigest: job.baseBranchDigest,
-      status,
-      committedAt: new Date().toISOString(),
-      resultingBranchDigest: store.branchDigest(branch),
-      messages,
+      status: result.status,
+      committedAt: result.committedAt,
+      resultingBranchDigest: result.resultingBranchDigest,
+      messages: result.messages,
+      transactionVersion: 1,
+      transactionId: result.transactionId,
+      outcomeDigest,
+      bindingDigest,
+      ...(result.revisionId ? { revisionId: result.revisionId } : {}),
     };
-    await atomicWriteFile(path, `${JSON.stringify(receipt, null, 2)}\n`);
-    await store.finishReview(job.branch.name, status === "applied" || status === "noop").catch(() => undefined);
-    return receipt;
+    await createOrCompareJsonFile(path, receipt, STORE_FILE_BYTE_LIMIT);
+    const published = parseReceipt(await readBoundedJson(path), job, outcome);
+    await store.retireReviewAdmission(job.id, bindingDigest);
+    return published;
   }
 }

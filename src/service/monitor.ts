@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, open, readdir } from "node:fs/promises";
+import { chmod, open, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { atomicWriteFile } from "../atomic-file.ts";
+import { FileReviewAttemptAccounting, type ReviewBudgetAmount } from "./accounting.ts";
 import { FileReviewBudgetAccount, type ReviewBudgetUsage, type ReviewDaemonEvent } from "./daemon.ts";
 import { loadServiceConfig, type ReviewAuthorityMode, type ReviewerProfile } from "./config.ts";
 
@@ -34,10 +35,16 @@ export interface ReviewSpoolCounts {
   deadLetter: number;
 }
 
+export interface ReviewMonitorBudget extends ReviewBudgetUsage {
+  charged?: ReviewBudgetAmount;
+  held?: ReviewBudgetAmount;
+  unknown?: ReviewBudgetAmount;
+}
+
 export interface ReviewServiceMonitor {
   mode: ReviewAuthorityMode;
   reviewer?: Pick<ReviewerProfile, "provider" | "model" | "reasoningEffort" | "maxCallsPerDay" | "maxTokensPerDay" | "maxCostPerDayUsd">;
-  budget: ReviewBudgetUsage;
+  budget: ReviewMonitorBudget;
   spool: ReviewSpoolCounts;
   worker?: ReviewWorkerStatus;
   workerFresh: boolean;
@@ -145,8 +152,20 @@ export async function readReviewServiceMonitor(
   if (!Number.isFinite(now.getTime())) throw new Error("Invalid review service monitor clock.");
   const root = join(resolve(agentDir), "no-forgetti");
   const config = await loadServiceConfig(agentDir);
-  const budget = await new FileReviewBudgetAccount(join(root, "review-budget.json"), { now: () => now }).snapshot();
   const spoolRoot = join(root, "review-spool");
+  const accountingPath = join(spoolRoot, "accounting");
+  const hasAttemptAccounting = Boolean(config.reviewer && await stat(accountingPath).then((info) => info.isDirectory()).catch(() => false));
+  const budget: ReviewMonitorBudget = hasAttemptAccounting && config.reviewer
+    ? await new FileReviewAttemptAccounting(spoolRoot, { now: () => now }).snapshot(config.reviewer.provider).then((snapshot) => ({
+        day: snapshot.day,
+        calls: snapshot.effective.calls,
+        tokens: snapshot.effective.tokens,
+        costUsd: snapshot.effective.costNanodollars / 1_000_000_000,
+        charged: snapshot.charged,
+        held: snapshot.held,
+        unknown: snapshot.unknown,
+      }))
+    : await new FileReviewBudgetAccount(join(root, "review-budget.json"), { now: () => now }).snapshot();
   const [queued, running, outcomes, deadLetter, workers] = await Promise.all([
     countRecords(join(spoolRoot, "queued")),
     countRecords(join(spoolRoot, "running")),
@@ -201,7 +220,10 @@ export class ReviewWorkerStatusReporter {
   record(event: ReviewDaemonEvent): void {
     if (event.type === "claimed") this.enqueue({ state: "working", jobId: event.jobId, attempt: event.attempt });
     else if (event.type === "retry") this.enqueue({ state: "waiting-retry", jobId: event.jobId, attempt: event.attempt });
-    else if (event.type === "budget_exhausted") this.enqueue({ state: "budget-exhausted" });
+    else if (event.type === "budget_exhausted" || event.type === "attempt_budget_exhausted") this.enqueue({
+      state: "budget-exhausted",
+      ...(event.type === "attempt_budget_exhausted" ? { jobId: event.jobId, attempt: event.attempt } : {}),
+    });
     else if (event.type === "completed" || event.type === "failed") this.enqueue({ state: "idle" });
     else if (event.type === "idle" && this.current.state !== "waiting-retry") this.enqueue({ state: "idle" });
   }

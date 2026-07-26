@@ -98,6 +98,7 @@ export interface ReviewModelProvenance {
   model: string;
   api: string;
   responseModel?: string;
+  responseId?: string;
   startedAt: string;
   completedAt: string;
   durationMs: number;
@@ -430,7 +431,7 @@ function parseUsage(value: unknown): ReviewModelUsage {
 
 function parseProvenance(value: unknown): ReviewModelProvenance {
   if (!isRecord(value)) throw new Error("Invalid review model provenance.");
-  exactKeys(value, ["provider", "model", "api", "startedAt", "completedAt", "durationMs", "usage"], ["responseModel"]);
+  exactKeys(value, ["provider", "model", "api", "startedAt", "completedAt", "durationMs", "usage"], ["responseModel", "responseId"]);
   const startedAt = checkedIso(value.startedAt, "review model start timestamp");
   const completedAt = checkedIso(value.completedAt, "review model completion timestamp");
   if (completedAt < startedAt) throw new Error("Review model completion precedes its start.");
@@ -444,6 +445,7 @@ function parseProvenance(value: unknown): ReviewModelProvenance {
     usage: parseUsage(value.usage),
   };
   if (value.responseModel !== undefined) provenance.responseModel = checkedString(value.responseModel, "review response model", 256);
+  if (value.responseId !== undefined) provenance.responseId = checkedString(value.responseId, "review response id", 512, SAFE_ID);
   return provenance;
 }
 

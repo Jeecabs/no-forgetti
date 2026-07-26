@@ -63,6 +63,9 @@ export function formatReviewServiceMonitorText(
     `calls: ${snapshot.budget.calls}/${limits?.maxCallsPerDay ?? "n/a"}`,
     `tokens: ${snapshot.budget.tokens}/${limits?.maxTokensPerDay ?? "n/a"}`,
     `cost: ${money(snapshot.budget.costUsd)}/${limits ? money(limits.maxCostPerDayUsd) : "n/a"}`,
+    ...(snapshot.budget.charged && snapshot.budget.held && snapshot.budget.unknown ? [
+      `attempts: ${snapshot.budget.charged.calls} settled · ${snapshot.budget.held.calls} held · ${snapshot.budget.unknown.calls} unknown`,
+    ] : []),
     `budget day: ${snapshot.budget.day} UTC`,
     `active memory: ${memory.branch} · ${memory.entries} entries · ${memory.usedChars}/${memory.maxChars} chars`,
     `project: ${memory.projectRoot}`,
@@ -107,6 +110,9 @@ function dashboard(
       row("CALLS", `${meter(theme, snapshot.budget.calls, reviewer.maxCallsPerDay)}  ${snapshot.budget.calls.toLocaleString()} / ${reviewer.maxCallsPerDay.toLocaleString()}`),
       row("TOKENS", `${meter(theme, snapshot.budget.tokens, reviewer.maxTokensPerDay)}  ${snapshot.budget.tokens.toLocaleString()} / ${reviewer.maxTokensPerDay.toLocaleString()}`),
       row("COST", `${meter(theme, snapshot.budget.costUsd, reviewer.maxCostPerDayUsd)}  ${money(snapshot.budget.costUsd)} / ${money(reviewer.maxCostPerDayUsd)}`),
+      ...(snapshot.budget.charged && snapshot.budget.held && snapshot.budget.unknown ? [
+        row("ATTEMPTS", `${snapshot.budget.charged.calls} settled   ${snapshot.budget.held.calls} held   ${snapshot.budget.unknown.calls} unknown`),
+      ] : []),
     ].join("\n"), 1, 0));
   }
 
