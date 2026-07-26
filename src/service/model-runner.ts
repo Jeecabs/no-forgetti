@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 
-import { complete, type Usage } from "@earendil-works/pi-ai/compat";
-import { AuthStorage, getAgentDir, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
+import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { ReviewerProfile } from "./config.ts";
 import type { ReviewModelProvenance, ReviewModelUsage } from "./protocol.ts";
@@ -97,7 +97,7 @@ function retryableProviderFailure(message: string): boolean {
 }
 
 function authProviderFailure(message: string): boolean {
-  return /(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|invalid token)/iu.test(message);
+  return /(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|invalid token|provider is not configured|credentials? unavailable)/iu.test(message);
 }
 
 /**
@@ -109,8 +109,6 @@ export class PiModelRunner implements ModelRunner {
   readonly agentDir: string;
 
   private readonly profile: ReviewerProfile;
-  private readonly authStorage: AuthStorage;
-  private readonly modelRegistry: ModelRegistry;
   private readonly maxOutputTokens: number;
   private readonly timeoutMs: number;
   private readonly clock: () => Date;
@@ -118,8 +116,6 @@ export class PiModelRunner implements ModelRunner {
   constructor(profile: ReviewerProfile, options: PiModelRunnerOptions = {}) {
     this.profile = { ...profile };
     this.agentDir = resolve(options.agentDir ?? getAgentDir());
-    this.authStorage = AuthStorage.create(join(this.agentDir, "auth.json"));
-    this.modelRegistry = ModelRegistry.create(this.authStorage, join(this.agentDir, "models.json"));
     this.maxOutputTokens = positiveInteger(
       options.maxOutputTokens ?? DEFAULT_REVIEW_MAX_OUTPUT_TOKENS,
       "review output-token limit",
@@ -135,15 +131,25 @@ export class PiModelRunner implements ModelRunner {
       throw new ModelRunError("aborted", "Review model call was aborted.", { retryable: true });
     }
 
-    this.authStorage.reload();
-    this.modelRegistry.refresh();
-    const registryError = this.modelRegistry.getError();
+    let modelRuntime: ModelRuntime;
+    try {
+      modelRuntime = await ModelRuntime.create({
+        authPath: join(this.agentDir, "auth.json"),
+        modelsPath: join(this.agentDir, "models.json"),
+      });
+    } catch (error) {
+      throw new ModelRunError("model_registry_invalid", "Reviewer model runtime could not load persistent configuration.", {
+        retryable: true,
+        cause: error,
+      });
+    }
+    const registryError = modelRuntime.getError();
     if (registryError) {
       throw new ModelRunError("model_registry_invalid", `Reviewer model registry is invalid: ${registryError}`, {
         retryable: true,
       });
     }
-    const model = this.modelRegistry.find(this.profile.provider, this.profile.model);
+    const model = modelRuntime.getModel(this.profile.provider, this.profile.model);
     if (!model) {
       throw new ModelRunError(
         "model_not_found",
@@ -151,12 +157,6 @@ export class PiModelRunner implements ModelRunner {
         { retryable: true },
       );
     }
-    const auth = await this.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok || !auth.apiKey) {
-      const detail = auth.ok ? `No persistent auth is configured for '${model.provider}'.` : auth.error;
-      throw new ModelRunError("auth_unavailable", `Reviewer auth unavailable. ${detail}`, { retryable: true });
-    }
-
     const started = validDate(this.clock);
     const timeoutController = new AbortController();
     const timeout = setTimeout(() => timeoutController.abort(), this.timeoutMs);
@@ -166,21 +166,19 @@ export class PiModelRunner implements ModelRunner {
       : timeoutController.signal;
 
     try {
-      const response = await complete(
+      const response = await modelRuntime.completeSimple(
         model,
         {
           systemPrompt: request.systemPrompt,
           messages: [{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: started.getTime() }],
         },
         {
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          env: auth.env,
           maxTokens: Math.min(this.maxOutputTokens, model.maxTokens),
-          reasoningEffort: this.profile.reasoningEffort,
+          ...(this.profile.reasoningEffort === "off" ? {} : { reasoning: this.profile.reasoningEffort }),
           signal,
           timeoutMs: this.timeoutMs,
-          maxRetries: 1,
+          // The durable daemon owns retries and their budget accounting.
+          maxRetries: 0,
         },
       );
       const completed = validDate(this.clock);

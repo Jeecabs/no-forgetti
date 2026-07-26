@@ -25,7 +25,7 @@ Review service
   ├─ dedicated reviewer profile and budgets
   ├─ tool-less proposal generation
   ├─ deterministic proposal admission
-  ├─ branch-file and entry digest CAS
+  ├─ exact branch-digest CAS
   └─ immutable outcomes and mutation receipts
 ```
 
@@ -37,20 +37,20 @@ The extension remains the Pi lifecycle adapter. The service never edits Pi JSONL
 - `shadow`: embedded reviewer remains authoritative; durable service validates transport, dedupe, plans, and outcomes without a second mutation.
 - `external`: accepted jobs belong only to the service. The embedded reviewer does not process them.
 
-Foreground `project_memory` writes remain extension-local in all initial modes. A delayed service proposal must compare against the exact current branch and entry digests.
+Foreground `project_memory` writes remain extension-local in all initial modes. A delayed service proposal must compare its captured exact branch digest against the current branch.
 
 ## Review job
 
 A job contains versioned, bounded, sanitized evidence; project and branch identity; hashed session identity; exact processed frontier; base branch digest; reason; and deterministic content digest. It never contains provider credentials.
 
-Job effects are idempotent even though provider calls cannot be exactly-once:
+Job ownership is fenced even though provider calls cannot be exactly-once:
 
 ```text
-queued → running → plan-validated → succeeded | noop | rejected
-                    └────────────→ retry | dead-letter
+queued → running → plan-validated → applied | noop | stale | rejected
+                    └────────────→ retry | failed
 ```
 
-A validated plan is persisted before mutation. Mutation receipts recover the crash window after branch write and before job acknowledgement.
+Exact branch CAS prevents a replay from overwriting newer foreground memory. The current release does not provide one cross-file transaction across branch mutation, revision append, receipt, and spool outcome; process death in that narrow interval can leave valid canonical memory with incomplete audit/undo metadata. A recoverable transaction intent is required before claiming crash-atomic mutation history.
 
 ## Privacy
 
@@ -71,15 +71,15 @@ Evidence files use `0600`; containing directories use `0700`. Evidence expires a
 
 External authority requires a dedicated reviewer profile. The service resolves persistent Pi credentials from the normal agent directory; jobs never copy resolved secrets. Missing auth blocks a job until configuration changes.
 
-Per-job and daily call, token, cost, time, and queue limits fail closed. The reviewer profile never silently inherits whichever foreground model happened to be active.
+Per-call time/output bounds fail closed. Persistent daily call, token, and cost thresholds are checked before each call and charged from actual provider usage afterward; one in-flight call can cross a token or cost threshold before subsequent calls stop. `/memory status` shows worker heartbeat, queue depth, budget usage, and exhaustion; the footer warns when the worker is offline or a limit is reached. The reviewer profile never silently inherits whichever foreground model happened to be active.
 
 ## Mutation safety
 
 Reviewers return proposals only. Admission re-runs schema, secret, Unicode, fence, duplicate, capacity, evidence-reference, and target-precondition checks.
 
-During v1 coexistence, CAS uses exact canonical branch-file bytes and expected entry digests stored in sidecars. Unknown revision fields are not added to v1 branch JSON because old clients may reconstruct and drop them.
+During v1 coexistence, admission compares the exact canonical digest captured from the complete pre-sanitization branch object. Unknown revision fields are not added to v1 branch JSON because old clients may reconstruct and drop them.
 
-Undo is an inverse commit guarded by expected head. It also fences older queued jobs so undone evidence cannot immediately reapply the same mutation.
+Undo is an entry-level inverse CAS: unrelated later writes survive, while a reviewed entry changed later refuses reversal. Queue-level undo fencing remains a later hardening step.
 
 ## Append-graph trajectory track
 

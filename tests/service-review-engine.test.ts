@@ -248,6 +248,43 @@ test("daemon checks daily budgets before claiming work", async () => {
   assert.ok(await spool.claim({ workerId: "verification-worker", leaseMs: 1_000 }), "budget stop must not claim a job");
 });
 
+test("configuration blocks remain retryable beyond attempt limit without consuming call budget", async () => {
+  const reviewJob = job();
+  const now = new Date().toISOString();
+  const claim = {
+    job: reviewJob,
+    attempt: 8,
+    workerId: "config-worker",
+    leaseToken: "b".repeat(32),
+    claimedAt: now,
+    leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const budget = new InMemoryReviewBudgetAccount();
+  const daemon = new ReviewDaemon({
+    spool: {
+      async initialize() {},
+      async recover() {},
+      async claim() { return claim; },
+      async renew() { return claim; },
+      async finish() { assert.fail("configuration block must remain unacknowledged"); },
+    },
+    engine: new ReviewEngine({
+      async run() {
+        throw new ModelRunError("auth_unavailable", "Provider is not configured.", { retryable: true });
+      },
+    }),
+    budget: { maxCalls: 100, maxTokens: 1_000, maxCostUsd: 1 },
+    budgetAccount: budget,
+    workerId: "config-worker",
+    maxAttempts: 3,
+  });
+
+  const result = await daemon.processOne();
+  assert.equal(result.status, "retry");
+  assert.equal(result.status === "retry" && result.failure.code, "auth_unavailable");
+  assert.equal((await budget.snapshot()).calls, 0);
+});
+
 test("daemon classifies missing auth as a configuration-blocked retry", () => {
   const failure = classifyReviewFailure(new ModelRunError(
     "auth_unavailable",

@@ -6,12 +6,14 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { FileMemoryProposalCommitter } from "./admission.ts";
 import { loadServiceConfig, type ReviewerProfile } from "./config.ts";
 import {
+  defaultReviewWorkerId,
   FileReviewBudgetAccount,
   ReviewDaemon,
   type ReviewDaemonEvent,
   type ReviewDrainResult,
 } from "./daemon.ts";
 import { PiModelRunner } from "./model-runner.ts";
+import { ReviewWorkerStatusReporter } from "./monitor.ts";
 import { ReviewEngine } from "./review-engine.ts";
 import { ReviewSpool } from "./spool.ts";
 
@@ -123,23 +125,42 @@ async function createDefaultRuntime(
   const spool = new ReviewSpool(join(serviceRoot, "review-spool"), { ledger });
   await spool.initialize();
   await spool.recover();
-  const retentionCutoff = new Date(Date.now() - config.evidenceTtlHours * 60 * 60_000);
-  await spool.purgeTerminalBefore(retentionCutoff);
-  ledger.purgeTerminalBefore(retentionCutoff);
+  const retentionMs = config.evidenceTtlHours * 60 * 60_000;
+  const purgeExpired = async () => {
+    const retentionCutoff = new Date(Date.now() - retentionMs);
+    await spool.purgeTerminalBefore(retentionCutoff);
+    ledger.purgeTerminalBefore(retentionCutoff);
+  };
+  await purgeExpired();
   const engine = new ReviewEngine(new PiModelRunner(config.reviewer, { agentDir }));
+  const workerId = args.workerId ?? defaultReviewWorkerId();
+  const reporter = new ReviewWorkerStatusReporter(agentDir, workerId);
+  reporter.start();
   const daemon = new ReviewDaemon({
     spool,
     engine,
     budget: reviewerBudget(config.reviewer),
     budgetAccount: new FileReviewBudgetAccount(join(serviceRoot, "review-budget.json")),
-    ...(args.workerId ? { workerId: args.workerId } : {}),
+    workerId,
     ...(args.leaseMs ? { leaseMs: args.leaseMs } : {}),
     ...(args.pollMs ? { pollMs: args.pollMs } : {}),
     ...(args.maxAttempts ? { maxAttempts: args.maxAttempts } : {}),
-    onEvent,
+    onEvent: (event) => {
+      reporter.record(event);
+      onEvent(event);
+    },
+    maintenance: purgeExpired,
+    maintenanceIntervalMs: Math.max(60_000, Math.min(60 * 60_000, Math.floor(retentionMs / 4))),
     ...(config.mode === "external" ? { committer: new FileMemoryProposalCommitter(agentDir) } : {}),
   });
-  return { daemon, dispose: () => ledger.close() };
+  return {
+    daemon,
+    async dispose() {
+      reporter.stop();
+      await reporter.flush();
+      ledger.close();
+    },
+  };
 }
 
 export async function runServiceCli(

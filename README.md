@@ -95,7 +95,7 @@ No Forgetti never starts a daemon during package installation. Configure a dedic
     "provider": "anthropic",
     "model": "claude-sonnet-4-5",
     "reasoningEffort": "high",
-    "maxCallsPerDay": 20,
+    "maxCallsPerDay": 100,
     "maxTokensPerDay": 500000,
     "maxCostPerDayUsd": 10
   }
@@ -108,19 +108,23 @@ Modes:
 - `shadow`: Pi remains authoritative and also writes deterministic sanitized jobs for transport/eval inspection.
 - `external`: Pi durably queues the job and the service owns its eventual model call and CAS admission.
 
+Daily calls are reserved atomically. Token and cost thresholds use actual provider usage, so one in-flight call may cross a threshold; subsequent calls stop until the next UTC day. `/memory status` makes this visible inside Pi.
+
 Run queued work once:
 
 ```bash
 no-forgetti review --once
 ```
 
-Run the polling worker under your user service manager (`launchd`, `systemd --user`, or equivalent):
+Run the polling worker under your user service manager (`launchd`, `systemd --user`, or equivalent). Once registered, it starts automatically and `/memory status` shows worker health, queue depth, and daily call/token/cost limits:
 
 ```bash
 no-forgetti review
 ```
 
-The first external release processes memory review only. It does not run project-skill review, scan historical Pi sessions, expose coding tools, or start automatically. Accepted evidence remains bounded to 12 user turns / 32,000 characters and excludes thinking, images, raw tool arguments/results, and user bash.
+See [external review service management](docs/service-management.md) for concrete `launchd` and `systemd --user` registration. After registration, `/memory status` is the in-Pi operational monitor.
+
+The first external release processes memory review only. It does not run project-skill review, scan historical Pi sessions, or expose coding tools. The worker must be registered once with the operating system's user service manager; after that it starts automatically rather than waiting for a Pi command. Accepted evidence remains bounded to 12 user turns / 32,000 characters and excludes thinking, images, raw tool arguments/results, and user bash.
 
 ## Model tool
 
@@ -174,6 +178,8 @@ Data stays outside the repository:
 $PI_CODING_AGENT_DIR/no-forgetti/
 ├── service.json                         # optional reviewer profile; never credentials
 ├── review-budget.json
+├── review-workers/                       # per-worker heartbeats for /memory status
+├── review-ledger.sqlite                  # optional observational WAL shadow
 ├── review-spool/
 │   ├── queued/
 │   ├── running/

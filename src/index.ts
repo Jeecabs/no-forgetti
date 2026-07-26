@@ -12,8 +12,10 @@ import { isNonPrimaryAgent } from "./runtime.ts";
 import { safeContextText } from "./security.ts";
 import { buildReviewEvidenceWindow, requestReviewPlan } from "./review.ts";
 import { DEFAULT_SERVICE_CONFIG, loadServiceConfig, type ServiceConfig } from "./service/config.ts";
+import { readReviewServiceMonitor, type ReviewServiceMonitor } from "./service/monitor.ts";
 import { createReviewJob } from "./service/protocol.ts";
 import { ReviewSpool } from "./service/spool.ts";
+import { formatReviewServiceMonitorText, showReviewServiceMonitor, type MemoryMonitorSummary } from "./service/tui.ts";
 import { requestSkillReviewPlan } from "./skill-review.ts";
 import { buildRetrievedSkillContext, injectRetrievedSkillContext } from "./skill-injection.ts";
 import { ProjectSkillStore } from "./skill-store.ts";
@@ -67,6 +69,7 @@ function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used
 const TOOL_NAME = "project_memory";
 const SKILL_TOOL_NAME = "project_skill";
 const REVIEW_TIMEOUT_MS = 60_000;
+const SERVICE_MONITOR_POLL_MS = 15_000;
 const EXTENSION_VERSION = "0.2.0";
 
 export interface ExtensionDependencies {
@@ -76,6 +79,7 @@ export interface ExtensionDependencies {
   requestReviewPlan: typeof requestReviewPlan;
   requestSkillReviewPlan: typeof requestSkillReviewPlan;
   loadServiceConfig: typeof loadServiceConfig;
+  loadServiceMonitor: typeof readReviewServiceMonitor;
   createReviewSpool: () => ReviewSpool;
   reviewTimeoutMs: number;
   writeCommandOutput: (text: string) => void;
@@ -88,6 +92,7 @@ const DEFAULT_DEPENDENCIES: ExtensionDependencies = {
   requestReviewPlan,
   requestSkillReviewPlan,
   loadServiceConfig,
+  loadServiceMonitor: readReviewServiceMonitor,
   createReviewSpool: () => new ReviewSpool(join(getAgentDir(), "no-forgetti", "review-spool")),
   reviewTimeoutMs: REVIEW_TIMEOUT_MS,
   writeCommandOutput: (text) => process.stdout.write(`${text}\n`),
@@ -250,6 +255,10 @@ export function activateProjectMemoryExtension(
   let retrievedSkill: { block: string; names: string[]; sessionId: string; presented: boolean } | undefined;
   let serviceConfig: ServiceConfig = DEFAULT_SERVICE_CONFIG;
   let reviewSpool: ReviewSpool | undefined;
+  let serviceMonitor: ReviewServiceMonitor | undefined;
+  let serviceMonitorTimer: ReturnType<typeof setInterval> | undefined;
+  let announcedBudgetLimit: string | undefined;
+  let serviceMonitorErrorAnnounced = false;
 
   function presentCommandOutput(
     ctx: ExtensionCommandContext,
@@ -339,6 +348,13 @@ export function activateProjectMemoryExtension(
     const segs: string[] = [];
     if (activeSkillCount > 0) segs.push(`skills:${activeSkillCount}`);
     if (pendingSkillCount > 0) segs.push(`pending:${pendingSkillCount}`);
+    if (serviceConfig.mode !== "embedded") {
+      if (serviceMonitor?.exhausted.length) segs.push(t.fg("error", `review:limit-${serviceMonitor.exhausted.join("+")}`));
+      else if (serviceMonitor && !serviceMonitor.workerFresh) segs.push(t.fg("warning", "review:offline"));
+      else if (!serviceMonitor) segs.push(t.fg("warning", "review:monitor-error"));
+      else if (serviceMonitor.spool.queued) segs.push(t.fg("accent", `review:q${serviceMonitor.spool.queued}`));
+      else segs.push("review:on");
+    }
     if (entries === 0 && segs.length === 0 && !skillReviewRunning) {
       // ponytail: nothing to say — give the footer row back
       ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -350,7 +366,58 @@ export function activateProjectMemoryExtension(
     ctx.ui.setStatus(STATUS_KEY, `${bar} ${t.fg("muted", segs.join(" "))}`.trimEnd());
   }
 
+  async function refreshServiceMonitor(ctx: ExtensionContext, notify = false): Promise<void> {
+    if (serviceConfig.mode === "embedded") {
+      serviceMonitor = undefined;
+      refreshStatus(ctx);
+      return;
+    }
+    try {
+      serviceMonitor = await dependencies.loadServiceMonitor();
+      serviceMonitorErrorAnnounced = false;
+      const limitKey = serviceMonitor.exhausted.length > 0
+        ? `${serviceMonitor.budget.day}:${serviceMonitor.exhausted.join("+")}`
+        : undefined;
+      if (notify && limitKey && limitKey !== announcedBudgetLimit && ctx.hasUI) {
+        announcedBudgetLimit = limitKey;
+        ctx.ui.notify(
+          `No Forgetti review budget exhausted (${serviceMonitor.exhausted.join(", ")}); queued evidence remains durable until the next UTC day.`,
+          "warning",
+        );
+      }
+      if (!limitKey) announcedBudgetLimit = undefined;
+    } catch (error) {
+      serviceMonitor = undefined;
+      if (notify && !serviceMonitorErrorAnnounced && ctx.hasUI) {
+        serviceMonitorErrorAnnounced = true;
+        ctx.ui.notify(`No Forgetti service monitor unavailable: ${errorMessage(error)}`, "warning");
+      }
+    }
+    refreshStatus(ctx);
+  }
+
+  function startServiceMonitorPolling(ctx: ExtensionContext): void {
+    if (serviceMonitorTimer) clearInterval(serviceMonitorTimer);
+    serviceMonitorTimer = undefined;
+    if (serviceConfig.mode === "embedded") return;
+    serviceMonitorTimer = setInterval(() => void refreshServiceMonitor(ctx, true), SERVICE_MONITOR_POLL_MS);
+    serviceMonitorTimer.unref?.();
+  }
+
+  function memoryMonitorSummary(memoryStore: ProjectMemoryStore, branch: MemoryBranch): MemoryMonitorSummary {
+    return {
+      projectRoot: memoryStore.projectRoot,
+      branch: branch.name,
+      entries: branch.entries.length,
+      usedChars: memoryCharCount(branch),
+      maxChars: memoryStore.maxChars,
+    };
+  }
+
   async function loadSessionMemory(ctx: ExtensionContext): Promise<void> {
+    if (serviceMonitorTimer) clearInterval(serviceMonitorTimer);
+    serviceMonitorTimer = undefined;
+    serviceMonitor = undefined;
     retrievedSkill = undefined;
     store = undefined;
     skillStore = undefined;
@@ -451,6 +518,8 @@ export function activateProjectMemoryExtension(
     pendingUserInputs = [];
     lastAgentRunSuccessful = false;
     retrievedSkill = undefined;
+    await refreshServiceMonitor(ctx, true);
+    startServiceMonitorPolling(ctx);
     refreshStatus(ctx);
   }
 
@@ -554,6 +623,7 @@ export function activateProjectMemoryExtension(
       status: enqueue,
       producer: { extensionVersion: EXTENSION_VERSION, piVersion: PI_VERSION },
     });
+    await refreshServiceMonitor(ctx);
   }
 
   async function runReview(ctx: ExtensionContext, force: boolean): Promise<void> {
@@ -1051,16 +1121,27 @@ export function activateProjectMemoryExtension(
 
       if (subcommand === "status") {
         const live = await memoryStore.loadBranch(activeName);
-        presentCommandOutput(ctx, [
-          `project: ${memoryStore.projectRoot}`,
-          `storage: ${memoryStore.projectDir}`,
-          `active memory: ${activeName}`,
-          `review authority: ${serviceConfig.mode}`,
-          `review spool: ${reviewSpool ? "ready" : "inactive"}`,
-          `entries: ${live.entries.length}`,
-          `capacity: ${memoryCharCount(live)}/${memoryStore.maxChars} chars`,
-          "session forks share this memory branch unless you explicitly run /memory fork <name>",
-        ].join("\n"));
+        const memory = memoryMonitorSummary(memoryStore, live);
+        try {
+          const monitor = await dependencies.loadServiceMonitor();
+          serviceMonitor = monitor;
+          if (ctx.mode === "tui") {
+            await showReviewServiceMonitor(ctx, monitor, memory, dependencies.loadServiceMonitor);
+          } else {
+            presentCommandOutput(ctx, `${formatReviewServiceMonitorText(monitor, memory)}\nstorage: ${memoryStore.projectDir}`);
+          }
+        } catch (error) {
+          presentCommandOutput(ctx, [
+            `project: ${memoryStore.projectRoot}`,
+            `storage: ${memoryStore.projectDir}`,
+            `active memory: ${activeName}`,
+            `review authority: ${serviceConfig.mode}`,
+            `review spool: ${reviewSpool ? "ready" : "inactive"}`,
+            `entries: ${live.entries.length}`,
+            `capacity: ${memoryCharCount(live)}/${memoryStore.maxChars} chars`,
+            `service monitor: unavailable (${errorMessage(error)})`,
+          ].join("\n"), "warning");
+        }
         refreshStatus(ctx);
         return;
       }
@@ -1333,6 +1414,8 @@ export function activateProjectMemoryExtension(
   });
 
   pi.on("session_shutdown", async () => {
+    if (serviceMonitorTimer) clearInterval(serviceMonitorTimer);
+    serviceMonitorTimer = undefined;
     retrievedSkill = undefined;
     pendingUserInputs = [];
     reviewController?.abort();

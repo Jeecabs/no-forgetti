@@ -145,7 +145,7 @@ export class SQLiteReviewLedger implements ReviewLedger {
 
     this.db = new DatabaseSync(this.path, { allowExtension: false, timeout: 5_000 });
     try {
-      this.db.exec("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=8388608;");
+      this.db.exec("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=8388608;");
       const page = this.db.prepare("PRAGMA page_size").get() as unknown as { page_size?: unknown };
       const pageSize = Number(page.page_size);
       if (!Number.isSafeInteger(pageSize) || pageSize < 512) throw new Error("Invalid review ledger page size.");
@@ -301,6 +301,7 @@ export class SQLiteReviewLedger implements ReviewLedger {
       DELETE FROM jobs
       WHERE job_id IN (SELECT job_id FROM outcomes WHERE completed_at < ?)
     `).run(cutoff.toISOString());
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     this.secureFiles();
     return Number(result.changes);
   }
