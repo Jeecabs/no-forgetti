@@ -1,6 +1,6 @@
 {
   "name": "no-forgetti",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "author": "Lachlan Jacobs",
@@ -21,6 +21,9 @@
   "bugs": {
     "url": "https://github.com/Jeecabs/no-forgetti/issues"
   },
+  "bin": {
+    "no-forgetti": "./bin/no-forgetti.mjs"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
@@ -29,6 +32,9 @@
   },
   "files": [
     "src",
+    "bin",
+    "docs",
+    "CONTEXT.md",
     "assets",
     "README.md",
     "CHANGELOG.md",
@@ -40,6 +46,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "review:once": "node --experimental-strip-types src/service/cli.ts review --once",
     "prepack": "pnpm check && pnpm test"
   },
   "engines": {

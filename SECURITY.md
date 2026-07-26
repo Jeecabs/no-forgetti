@@ -10,6 +10,8 @@ Include the affected version, impact, reproduction steps, and any suggested miti
 
 No Forgetti is a Pi extension and therefore runs with the same filesystem, process, and network permissions as Pi. Review the source before installation.
 
-Project memory and generated skill state stay under `$PI_CODING_AGENT_DIR/no-forgetti/` by default. Background reviews call the currently configured model provider. Validated memory refinements and new skills apply automatically; skill patches and archives still require explicit approval. Memory keeps one bounded pre-review snapshot for `/memory undo`.
+Project memory and generated skill state stay under `$PI_CODING_AGENT_DIR/no-forgetti/` by default. Embedded background reviews call the active model provider. Opt-in external review uses a dedicated persistent reviewer profile and a local durable spool; jobs never contain resolved credentials, thinking, images, raw tool arguments/results, user bash, provider headers, or diagnostics. Evidence is bounded to 32,000 sanitized characters and stored with restrictive permissions. Configure retention and delete `$PI_CODING_AGENT_DIR/no-forgetti/review-spool/` to forget queued/outcome evidence.
+
+The external worker is separately managed and does not start during installation. Its first release is tool-less: no shell, project filesystem, generic read/write, or network tools are exposed to conversation evidence. Existing project JSON remains canonical; proposals pass the same validators and compare-and-swap checks before mutation. Validated live memory refinements may apply automatically; skill review remains in Pi, with patches and archives requiring explicit approval. Memory keeps an append-only review/undo journal, and undo refuses to overwrite conflicting later writes.
 
 Only the latest release and current `main` branch receive security fixes.

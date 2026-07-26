@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { activateProjectMemoryExtension, type ExtensionDependencies } from "../src/index.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
+import { ReviewSpool } from "../src/service/spool.ts";
 import { ProjectMemoryStore } from "../src/store.ts";
 
 type Handler = (event: Record<string, unknown>, context: ExtensionContext) => unknown | Promise<unknown>;
@@ -80,17 +81,20 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
   } as unknown as ExtensionContext;
 
   const extension = new FakeExtension();
+  const reviewSpool = new ReviewSpool(join(base, "review-spool"));
   activateProjectMemoryExtension(extension.api, {
     isNonPrimaryAgent: () => false,
     createMemoryStore: () => memoryStore,
     createSkillStore: () => skillStore,
+    loadServiceConfig: async () => ({ version: 1, mode: "embedded", evidenceTtlHours: 24 }),
+    createReviewSpool: () => reviewSpool,
     ...overrides,
   });
   t.after(async () => {
     await extension.emit("session_shutdown", {}, context);
     await rm(base, { recursive: true, force: true });
   });
-  return { branch, context, extension, memoryStore, skillStore };
+  return { branch, context, extension, memoryStore, skillStore, reviewSpool };
 }
 
 function userEntry(id: string, text: string): Record<string, unknown> {
@@ -244,6 +248,41 @@ test("memory review applies immediately and next turn injects live state", async
   }, context) as Array<{ systemPrompt: string }>;
   assert.match(before.systemPrompt, /Tests run with pnpm test\./u);
   assert.match(before.systemPrompt, /Type checks run with pnpm check\./u);
+});
+
+test("external review authority durably queues bounded evidence without an in-process model call", async (t) => {
+  let modelCalls = 0;
+  const { branch, context, extension, memoryStore, reviewSpool } = await fixture(t, {
+    loadServiceConfig: async () => ({
+      version: 1,
+      mode: "external",
+      evidenceTtlHours: 24,
+      reviewer: {
+        provider: "fake",
+        model: "reviewer",
+        reasoningEffort: "high",
+        maxCallsPerDay: 10,
+        maxTokensPerDay: 10_000,
+        maxCostPerDayUsd: 1,
+      },
+    }),
+    requestReviewPlan: async () => {
+      modelCalls += 1;
+      return { operations: [] };
+    },
+  });
+  branch.push(userEntry("external-user", "Remember that verification uses pnpm check."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  assert.equal(modelCalls, 0);
+  assert.equal((await memoryStore.loadBranch("main")).entries.length, 0);
+  const claim = await reviewSpool.claim({ workerId: "test-worker", leaseMs: 1_000 });
+  assert.ok(claim);
+  assert.equal(claim.job.throughEntryId, "external-user");
+  assert.match(claim.job.transcript, /verification uses pnpm check/u);
+  assert.equal(claim.job.baseBranchDigest, memoryStore.branchDigest(await memoryStore.loadBranch("main")));
+  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-memory-review-job"), true);
 });
 
 test("memory review appends a change entry with resolved entry IDs", async (t) => {

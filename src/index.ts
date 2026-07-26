@@ -1,5 +1,7 @@
+import { join } from "node:path";
+
 import { StringEnum } from "@earendil-works/pi-ai";
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme, VERSION as PI_VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -8,7 +10,10 @@ import { scoreMemorySignal, scoreSkillSignal } from "./heuristics.ts";
 import { resolveProjectRoot } from "./project.ts";
 import { isNonPrimaryAgent } from "./runtime.ts";
 import { safeContextText } from "./security.ts";
-import { requestReviewPlan } from "./review.ts";
+import { buildReviewEvidenceWindow, requestReviewPlan } from "./review.ts";
+import { DEFAULT_SERVICE_CONFIG, loadServiceConfig, type ServiceConfig } from "./service/config.ts";
+import { createReviewJob } from "./service/protocol.ts";
+import { ReviewSpool } from "./service/spool.ts";
 import { requestSkillReviewPlan } from "./skill-review.ts";
 import { buildRetrievedSkillContext, injectRetrievedSkillContext } from "./skill-injection.ts";
 import { ProjectSkillStore } from "./skill-store.ts";
@@ -39,6 +44,7 @@ const STATUS_KEY = "no-forgetti";
 const WIDGET_KEY = "no-forgetti";
 const SKILL_RECALL_ENTRY = "no-forgetti-skill-recall";
 const MEMORY_REVIEW_ENTRY = "no-forgetti-memory-review";
+const MEMORY_REVIEW_JOB_ENTRY = "no-forgetti-memory-review-job";
 const REVIEW_GLYPHS = { add: "+", replace: "~", remove: "−", merge: "⇄", assess: "◆" } as const;
 const REVIEW_LINE_CHARS = 76;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -61,6 +67,7 @@ function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used
 const TOOL_NAME = "project_memory";
 const SKILL_TOOL_NAME = "project_skill";
 const REVIEW_TIMEOUT_MS = 60_000;
+const EXTENSION_VERSION = "0.2.0";
 
 export interface ExtensionDependencies {
   isNonPrimaryAgent: typeof isNonPrimaryAgent;
@@ -68,6 +75,8 @@ export interface ExtensionDependencies {
   createSkillStore: (projectRoot: string, projectDir: string) => ProjectSkillStore;
   requestReviewPlan: typeof requestReviewPlan;
   requestSkillReviewPlan: typeof requestSkillReviewPlan;
+  loadServiceConfig: typeof loadServiceConfig;
+  createReviewSpool: () => ReviewSpool;
   reviewTimeoutMs: number;
   writeCommandOutput: (text: string) => void;
 }
@@ -78,6 +87,8 @@ const DEFAULT_DEPENDENCIES: ExtensionDependencies = {
   createSkillStore: (projectRoot, projectDir) => new ProjectSkillStore(projectRoot, { projectDir }),
   requestReviewPlan,
   requestSkillReviewPlan,
+  loadServiceConfig,
+  createReviewSpool: () => new ReviewSpool(join(getAgentDir(), "no-forgetti", "review-spool")),
   reviewTimeoutMs: REVIEW_TIMEOUT_MS,
   writeCommandOutput: (text) => process.stdout.write(`${text}\n`),
 };
@@ -237,6 +248,8 @@ export function activateProjectMemoryExtension(
   let knownUserEntryIds = new Set<string>();
   let lastAgentRunSuccessful = false;
   let retrievedSkill: { block: string; names: string[]; sessionId: string; presented: boolean } | undefined;
+  let serviceConfig: ServiceConfig = DEFAULT_SERVICE_CONFIG;
+  let reviewSpool: ReviewSpool | undefined;
 
   function presentCommandOutput(
     ctx: ExtensionCommandContext,
@@ -256,7 +269,7 @@ export function activateProjectMemoryExtension(
     return skillStore;
   }
 
-  function appendReviewCursor(name: string, throughEntryId: string, outcome: "reviewed" | "branch-boundary"): void {
+  function appendReviewCursor(name: string, throughEntryId: string, outcome: "reviewed" | "queued" | "branch-boundary"): void {
     const memoryStore = requireStore();
     pi.appendEntry(REVIEW_CURSOR_ENTRY, {
       projectKey: memoryStore.projectKey,
@@ -347,6 +360,26 @@ export function activateProjectMemoryExtension(
     pendingUserInputs = [];
     knownUserEntryIds = new Set();
     lastAgentRunSuccessful = false;
+    serviceConfig = DEFAULT_SERVICE_CONFIG;
+    reviewSpool = undefined;
+    try {
+      serviceConfig = await dependencies.loadServiceConfig();
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.notify(`No Forgetti service config rejected: ${errorMessage(error)}`, "warning");
+    }
+    if (serviceConfig.mode !== "embedded") {
+      try {
+        reviewSpool = dependencies.createReviewSpool();
+        await reviewSpool.initialize();
+        await reviewSpool.recover();
+      } catch (error) {
+        reviewSpool = undefined;
+        if (ctx.hasUI) ctx.ui.notify(
+          `No Forgetti ${serviceConfig.mode} review degraded; durable spool unavailable: ${errorMessage(error)}`,
+          "warning",
+        );
+      }
+    }
     const projectRoot = resolveProjectRoot(ctx.cwd);
     const nextStore = dependencies.createMemoryStore(projectRoot);
     try {
@@ -492,6 +525,37 @@ export function activateProjectMemoryExtension(
     return skillReviewPromise;
   }
 
+  async function enqueueReviewJob(
+    ctx: ExtensionContext,
+    branch: MemoryBranch,
+    transcript: string,
+    throughEntryId: string,
+  ): Promise<void> {
+    const spool = reviewSpool;
+    if (!spool) throw new Error("External review spool is unavailable.");
+    const memoryStore = requireStore();
+    const job = createReviewJob({
+      projectKey: memoryStore.projectKey,
+      sessionId: ctx.sessionManager.getSessionId(),
+      throughEntryId,
+      transcript,
+      branch,
+      baseBranchDigest: memoryStore.branchDigest(branch),
+      maxChars: memoryStore.maxChars,
+    });
+    const enqueue = await spool.enqueue(job);
+    if (enqueue === "quarantined") throw new Error(`Review job '${job.id}' conflicted with an existing durable job.`);
+    pi.appendEntry(MEMORY_REVIEW_JOB_ENTRY, {
+      version: 1,
+      jobId: job.id,
+      jobDigest: job.digest,
+      mode: serviceConfig.mode,
+      throughEntryId,
+      status: enqueue,
+      producer: { extensionVersion: EXTENSION_VERSION, piVersion: PI_VERSION },
+    });
+  }
+
   async function runReview(ctx: ExtensionContext, force: boolean): Promise<void> {
     if (reviewPromise) {
       if (force && ctx.hasUI) ctx.ui.notify("Project memory review already running.", "info");
@@ -500,7 +564,8 @@ export function activateProjectMemoryExtension(
     const memoryStore = requireStore();
     const reviewBranchName = activeName;
     const reviewAfterEntryId = reviewCursorId;
-    const throughEntryId = ctx.sessionManager.getLeafId();
+    const reviewEvidence = buildReviewEvidenceWindow(ctx.sessionManager.getBranch(), reviewAfterEntryId);
+    const throughEntryId = reviewEvidence.throughEntryId;
     const controller = new AbortController();
     reviewController = controller;
     reviewPromise = (async () => {
@@ -515,12 +580,30 @@ export function activateProjectMemoryExtension(
           force,
         );
         if (!claimed || controller.signal.aborted) return;
-        reviewTimeout = setTimeout(() => controller.abort(), dependencies.reviewTimeoutMs);
         const branch = await memoryStore.loadBranch(reviewBranchName);
+        if (serviceConfig.mode !== "embedded") {
+          if (!throughEntryId || !reviewEvidence.transcript) {
+            throw new Error("No bounded completed evidence is available to enqueue.");
+          }
+          try {
+            await enqueueReviewJob(ctx, branch, reviewEvidence.transcript, throughEntryId);
+          } catch (error) {
+            if (serviceConfig.mode === "external") throw error;
+            if (ctx.hasUI) ctx.ui.notify(`Project memory shadow enqueue failed: ${errorMessage(error)}`, "warning");
+          }
+          if (serviceConfig.mode === "external") {
+            appendReviewCursor(reviewBranchName, throughEntryId, "queued");
+            success = true;
+            if (ctx.hasUI) ctx.ui.notify("Project memory review queued for the No Forgetti service.", "info");
+            return;
+          }
+        }
+        reviewTimeout = setTimeout(() => controller.abort(), dependencies.reviewTimeoutMs);
         const plan = await dependencies.requestReviewPlan(ctx, {
           branch,
           signal: controller.signal,
           afterEntryId: reviewAfterEntryId,
+          transcript: reviewEvidence.transcript,
           maxChars: memoryStore.maxChars,
         });
         const results = await memoryStore.applyOperations(
@@ -528,6 +611,7 @@ export function activateProjectMemoryExtension(
           plan.operations,
           ctx.sessionManager.getSessionId(),
           "background_review",
+          memoryStore.branchDigest(branch),
         );
         const rejected = results.find((result) => result.message.startsWith("Review batch rejected;"));
         if (rejected) throw new Error(rejected.message);
@@ -651,6 +735,16 @@ export function activateProjectMemoryExtension(
       oldText: Type.Optional(Type.String({ description: "Unique substring for replace/remove" })),
       importance: Type.Optional(StringEnum(["high", "normal", "low"] as const, { description: "Cost of forgetting this memory" })),
     }),
+    prepareArguments(args) {
+      type Prepared = { action: MemoryAction; content?: string; oldText?: string; importance?: MemoryImportance };
+      if (!args || typeof args !== "object" || Array.isArray(args)) return args as Prepared;
+      const legacy = args as Record<string, unknown>;
+      return {
+        ...legacy,
+        ...(legacy.content === undefined && typeof legacy.text === "string" ? { content: legacy.text } : {}),
+        ...(legacy.oldText === undefined && typeof legacy.match === "string" ? { oldText: legacy.match } : {}),
+      } as Prepared;
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const memoryStore = requireStore();
       if (params.action === "list") {
@@ -725,6 +819,15 @@ export function activateProjectMemoryExtension(
       action: StringEnum(["list", "stats", "pending", "read", "view"] as const),
       name: Type.Optional(Type.String({ description: "Skill name for view" })),
     }),
+    prepareArguments(args) {
+      type Prepared = { action: "list" | "stats" | "pending" | "read" | "view"; name?: string };
+      if (!args || typeof args !== "object" || Array.isArray(args)) return args as Prepared;
+      const legacy = args as Record<string, unknown>;
+      return {
+        ...legacy,
+        ...(legacy.name === undefined && typeof legacy.skill === "string" ? { name: legacy.skill } : {}),
+      } as Prepared;
+    },
     renderCall(args, theme) {
       const suffix = args.name ? ` ${args.name}` : "";
       return new Text(
@@ -952,6 +1055,8 @@ export function activateProjectMemoryExtension(
           `project: ${memoryStore.projectRoot}`,
           `storage: ${memoryStore.projectDir}`,
           `active memory: ${activeName}`,
+          `review authority: ${serviceConfig.mode}`,
+          `review spool: ${reviewSpool ? "ready" : "inactive"}`,
           `entries: ${live.entries.length}`,
           `capacity: ${memoryCharCount(live)}/${memoryStore.maxChars} chars`,
           "session forks share this memory branch unless you explicitly run /memory fork <name>",
@@ -1083,6 +1188,17 @@ export function activateProjectMemoryExtension(
       if (skillStore) await skillStore.recordUserTurn(scoreSkillSignal(text) + complexitySignal);
     }
   }
+
+  pi.registerEntryRenderer<{ jobId?: string; mode?: string; status?: string }>(MEMORY_REVIEW_JOB_ENTRY, (entry, _options, theme) => {
+    const jobId = typeof entry.data?.jobId === "string" ? entry.data.jobId : "unknown";
+    const mode = entry.data?.mode === "external" ? "external" : "shadow";
+    const status = typeof entry.data?.status === "string" ? entry.data.status : "queued";
+    return new Text(
+      theme.fg("dim", `No Forgetti review ${status} · ${mode} · ${jobId.slice(0, 18)}…`),
+      1,
+      0,
+    );
+  });
 
   pi.registerEntryRenderer<{ branch: string; changes: MemoryReviewChange[] }>(MEMORY_REVIEW_ENTRY, (entry, { expanded }, theme) => {
     const changes = Array.isArray(entry.data?.changes)

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { formatMemoryContext } from "../src/context.ts";
 import { scoreMemorySignal } from "../src/heuristics.ts";
-import { buildReviewPrompt, buildReviewTranscript, parseReviewPlan } from "../src/review.ts";
+import { buildReviewEvidenceWindow, buildReviewPrompt, buildReviewTranscript, parseReviewPlan } from "../src/review.ts";
 import { validateMemoryText } from "../src/security.ts";
 import type { MemoryBranch } from "../src/types.ts";
 
@@ -52,19 +52,21 @@ test("review prompt exposes hard capacity and an earlier refinement target", () 
   assert.match(prompt, /Current usage: 26 characters/u);
   assert.match(prompt, /id one; importance unassessed \(effective normal\)/u);
   assert.match(prompt, /created 2026-01-01T00:00:00.000Z; updated 2026-01-01T00:00:00.000Z/u);
-  assert.match(prompt, /If current usage is below the working target, the final state must not exceed 3000 characters/u);
+  assert.match(prompt, /working target is advisory/u);
+  assert.match(prompt, /must never exceed the hard limit/u);
   assert.match(prompt, /Target existing entries by entryId, never by text/u);
   assert.match(prompt, /high: forgetting likely causes user correction or expensive rediscovery/u);
 });
 
-test("review prompt requires refinement once the working target is reached", () => {
+test("review prompt recommends only lossless refinement once the working target is reached", () => {
   const fullBranch: MemoryBranch = {
     ...branch,
     entries: [{ ...branch.entries[0]!, text: "x".repeat(3_000) }],
   };
   const prompt = buildReviewPrompt(fullBranch, "", 4_000);
-  assert.match(prompt, /REFINEMENT REQUIRED/u);
-  assert.match(prompt, /final state must be smaller than the current 3000 characters/u);
+  assert.match(prompt, /REFINEMENT RECOMMENDED/u);
+  assert.match(prompt, /never discard valid semantics merely to shrink/u);
+  assert.match(prompt, /safe no-op is allowed/u);
 });
 
 test("review transcript strips tool arguments and results", () => {
@@ -112,6 +114,29 @@ test("review transcript strips tool arguments and results", () => {
   const afterUser = buildReviewTranscript(entries, "user-1");
   assert.doesNotMatch(afterUser, /Review this change/u);
   assert.match(afterUser, /TOOL read: completed/u);
+});
+
+test("review window processes oldest turns first and advances only through included evidence", () => {
+  const entries = Array.from({ length: 14 }, (_, index) => ({
+    type: "message",
+    id: `user-${index + 1}`,
+    parentId: index === 0 ? null : `user-${index}`,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    message: { role: "user", content: `turn ${index + 1}`, timestamp: index },
+  })) as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+
+  const first = buildReviewEvidenceWindow(entries);
+  assert.equal(first.userTurns, 12);
+  assert.equal(first.throughEntryId, "user-12");
+  assert.match(first.transcript, /turn 1/u);
+  assert.doesNotMatch(first.transcript, /turn 13/u);
+  assert.equal(first.truncated, true);
+
+  const second = buildReviewEvidenceWindow(entries, first.throughEntryId);
+  assert.equal(second.userTurns, 2);
+  assert.equal(second.throughEntryId, "user-14");
+  assert.match(second.transcript, /turn 13/u);
+  assert.equal(second.truncated, false);
 });
 
 test("rejects malformed review output", () => {

@@ -14,14 +14,14 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 - Pi `/fork` and `/clone` keep using the same memory branch. They **do not** clone memory automatically.
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
 - Writes persist immediately. Every turn reloads and injects the active memory branch, so foreground tools, background review, and other sessions become visible without `/memory refresh`.
-- Review runs only after Pi is fully settled at the end of a completed turn, in a background request after the response. Validated memory changes apply automatically as one atomic refinement batch; `/memory undo` restores the pre-review snapshot. Explicit memory signals and durable corrections can trigger review early; otherwise 10 completed prompts provide a periodic fallback. Resuming a session with unreviewed history triggers one pass on its next completed turn, matching Hermes Agent's existing-session behavior. Branch-aware custom cursors ensure extraction sees only unreviewed turns; successful empty reviews advance the cursor. Failed reviews back off instead of retrying every turn. `/memory review` and `/project-skills review` run them on demand.
+- Review starts only after Pi is fully settled at the end of a completed turn. The default `embedded` mode preserves in-process review; `shadow` durably mirrors bounded sanitized jobs; opt-in `external` authority hands accepted jobs to the separately runnable No Forgetti worker so Pi shutdown does not abort them. Review processes the oldest bounded unreviewed window and advances only through included evidence, preventing truncation from skipping history. Validated changes use branch compare-and-swap, append-only history, and inverse-CAS `/memory undo` that refuses to erase later conflicting writes. Explicit signals trigger early review; 10 completed prompts remain the periodic fallback. `/memory review` and `/project-skills review` run on demand.
 - Successful complex workflows can form an external project skill. Validated new skills are added automatically; patches and archives remain pending until you inspect and approve them. Skills stay in No Forgetti storage and are fetched through one `project_skill` tool. They are never registered as Pi slash commands and never written into the repository.
 
 ## Design boundary
 
 - **Learning** happens only after a successfully completed turn: apply compact additions, replacements, or removals from recent conversation evidence.
-- **Maintenance** happens inside that same atomic mutation. Below the 3,000-character working target, reviews cannot cross it; at or above it, every review must make net size progress toward it. The 4,000-character hard limit always applies.
-- No separate scheduled curator is needed. Every review receives exact usage, target, limit, and per-entry importance metadata, then removes contradicted/documented facts before merging overlaps and considering lower-value memories. Project skills have approval, revisions, usage tracking, and reviewable retention archives after 20 inactive sessions.
+- **Maintenance** happens inside that same atomic mutation. The 3,000-character working target is advisory: prefer lossless merges and removal of contradicted, documented, or low-value facts, but never discard valid semantics merely to shrink. The 4,000-character hard limit always applies.
+- A separately managed curator is optional. When enabled, it owns accepted background review jobs, model calls, retries, budgets, outcomes, and CAS admission; foreground `project_memory` writes remain immediate through the canonical JSON store. Project skills retain their separate approval, revision, usage, and retention semantics and are not processed by the first external memory-review release.
 - Project skills are deliberately not Pi resources: generated names do not enter the slash-command namespace. The `project_skill` tool fetches one relevant skill on demand.
 - Durable state intentionally lives outside the repository, so memory creates no project-file churn. Session custom entries store only the selected memory branch.
 - The complete bounded memory snapshot is injected as stable context. Project skills use bounded per-turn lexical retrieval from the user prompt, with at most two matched playbooks and 12,000 injected skill characters.
@@ -82,6 +82,46 @@ A local `pi install .` references the checkout in place, so do not move or delet
 pi install .
 ```
 
+## External review service (opt-in)
+
+No Forgetti never starts a daemon during package installation. Configure a dedicated reviewer profile in `$PI_CODING_AGENT_DIR/no-forgetti/service.json`; credentials remain in Pi's normal `auth.json` or environment and are never copied into jobs:
+
+```json
+{
+  "version": 1,
+  "mode": "external",
+  "evidenceTtlHours": 24,
+  "reviewer": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5",
+    "reasoningEffort": "high",
+    "maxCallsPerDay": 20,
+    "maxTokensPerDay": 500000,
+    "maxCostPerDayUsd": 10
+  }
+}
+```
+
+Modes:
+
+- `embedded` (default): Pi performs review in process.
+- `shadow`: Pi remains authoritative and also writes deterministic sanitized jobs for transport/eval inspection.
+- `external`: Pi durably queues the job and the service owns its eventual model call and CAS admission.
+
+Run queued work once:
+
+```bash
+no-forgetti review --once
+```
+
+Run the polling worker under your user service manager (`launchd`, `systemd --user`, or equivalent):
+
+```bash
+no-forgetti review
+```
+
+The first external release processes memory review only. It does not run project-skill review, scan historical Pi sessions, expose coding tools, or start automatically. Accepted evidence remains bounded to 12 user turns / 32,000 characters and excludes thinking, images, raw tool arguments/results, and user bash.
+
 ## Model tool
 
 `project_memory` supports:
@@ -91,9 +131,9 @@ pi install .
 - `replace(oldText, content, importance?)`
 - `remove(oldText)`
 
-`oldText` is a unique substring used by the foreground model tool. Background reviews target existing entries by stable ID and can explicitly add, replace, remove, merge, or assess them. Memory is a bounded evolving state with a 3,000-character working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Below the working target, a review's final state cannot cross it; at or above it, the final state must be smaller than the starting state, allowing repeated bounded reviews to converge instead of demanding impossible one-pass cleanup. Review changes apply automatically as one atomic batch against final size.
+`oldText` is a unique substring used by the foreground model tool. Background reviews target existing entries by stable ID and can explicitly add, replace, remove, merge, or assess them. Memory is a bounded evolving state with a 3,000-character advisory working target, a 4,000-character hard limit, and an 800-character per-entry limit. Exact duplicates are ignored. Reviews may safely no-op above the target when no lossless refinement exists. Accepted changes apply as one atomic batch against final hard capacity and an exact base-branch digest.
 
-Importance is `high`, `normal`, or `low` and measures cost of forgetting—not truth or recency. Existing entries roll forward as effective `normal` but remain visibly unassessed. New additions can be assessed immediately; background reviews reassess replacements and merges and can gradually assess untouched legacy entries when evidence supports it. Semantic invalidity wins over importance: contradicted or documented facts can always be removed. One bounded pre-review snapshot supports `/memory undo`; it is replaced by the next automatic review that changes memory. Each entry also stores creation/update timestamps, source session, and whether its first/latest write came from the foreground assistant tool or background review. Because the complete branch is injected every turn, per-entry recall tracking would add no signal: every active entry is recalled. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
+Importance is `high`, `normal`, or `low` and measures cost of forgetting—not truth or recency. Existing entries roll forward as effective `normal` but remain visibly unassessed. New additions can be assessed immediately; background reviews reassess replacements and merges and can gradually assess untouched legacy entries when evidence supports it. Semantic invalidity wins over importance: contradicted or documented facts can always be removed. Changed automatic reviews and undo operations append immutable revision records. `/memory undo` creates an inverse-CAS revision and refuses to overwrite a reviewed entry changed later; unrelated later additions survive. Each entry also stores creation/update timestamps, source session, and whether its first/latest write came from the foreground assistant tool or background review. Because the complete branch is injected every turn, per-entry exposure tracking adds no use signal: every active entry is exposed. Obvious secrets, fence injection, invisible Unicode controls, and prompt-manipulation entries are rejected. Automatic review sees tool names and success/failure state, not raw untrusted tool arguments/results. Expanded Pi skill bodies are removed from review evidence while the user’s trailing skill task remains.
 
 ## Commands
 
@@ -131,25 +171,37 @@ A Pi session fork inherits the current memory selection because that selection i
 Data stays outside the repository:
 
 ```text
-$PI_CODING_AGENT_DIR/no-forgetti/<sha256(project-root)>/
-├── project.json
-├── reviews/
-│   ├── main.json
-│   └── experiment.json
-├── revisions/
-│   └── main.json
-├── skills/
-│   ├── <skill-name>/SKILL.md
-│   └── .archive/
-├── skill-activity/
-│   ├── state.json
-│   ├── sessions/<hashed-session-id>.json
-│   └── generations/<generation-id>.json
-├── skill-pending/
-├── skill-revisions/
-└── branches/
-    ├── main.json
-    └── experiment.json
+$PI_CODING_AGENT_DIR/no-forgetti/
+├── service.json                         # optional reviewer profile; never credentials
+├── review-budget.json
+├── review-spool/
+│   ├── queued/
+│   ├── running/
+│   ├── outcomes/
+│   └── dead-letter/
+└── <sha256(project-root)>/
+    ├── project.json
+    ├── reviews/
+    │   ├── main.json
+    │   └── experiment.json
+    ├── revisions/
+    │   └── main/
+    │       ├── 000000000001-<revision-id>.json
+    │       └── 000000000002-<undo-id>.json
+    ├── skills/
+    │   ├── <skill-name>/SKILL.md
+    │   └── .archive/
+    ├── skill-activity-index/
+    │   ├── state.json
+    │   ├── sessions/<hashed-session-id>.json
+    │   └── generations/<generation-id>.json
+    ├── skill-pending/
+    ├── skill-revisions/
+    ├── service/
+    │   └── commit-receipts/
+    └── branches/
+        ├── main.json
+        └── experiment.json
 ```
 
 `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent` and supports `~/...` values. Legacy `skill-activity.json` data migrates once into bounded per-session/per-generation records and is retained as `skill-activity.json.legacy`. Project skills use standard `SKILL.md` packages in the same external project directory, but Pi is never given their path through `resources_discover`; generated skills stay out of slash commands and the normal skill namespace.
