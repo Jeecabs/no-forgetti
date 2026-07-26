@@ -87,6 +87,14 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
     createMemoryStore: () => memoryStore,
     createSkillStore: () => skillStore,
     loadServiceConfig: async () => ({ version: 1, mode: "embedded", evidenceTtlHours: 24 }),
+    loadServiceMonitor: async () => ({
+      mode: "embedded",
+      budget: { day: "2026-01-01", calls: 0, tokens: 0, costUsd: 0 },
+      spool: { queued: 0, running: 0, outcomes: 0, deadLetter: 0 },
+      workerFresh: false,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:00.000Z",
+    }),
     createReviewSpool: () => reviewSpool,
     ...overrides,
   });

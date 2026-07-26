@@ -73,7 +73,7 @@ function parseReviewer(value: unknown): ReviewerProfile | undefined {
     provider: value.provider,
     model: value.model,
     reasoningEffort,
-    maxCallsPerDay: positiveInteger(value.maxCallsPerDay ?? 20, "reviewer call budget", 10_000),
+    maxCallsPerDay: positiveInteger(value.maxCallsPerDay ?? 100, "reviewer call budget", 10_000),
     maxTokensPerDay: positiveInteger(value.maxTokensPerDay ?? 500_000, "reviewer token budget", 1_000_000_000),
     maxCostPerDayUsd: positiveNumber(value.maxCostPerDayUsd ?? 10, "reviewer cost budget", 1_000_000),
   };

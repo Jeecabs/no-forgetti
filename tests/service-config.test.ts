@@ -20,7 +20,7 @@ test("external authority requires an explicit reviewer without secrets", () => {
     reviewer: { provider: "anthropic", model: "review-model", reasoningEffort: "high" },
   });
   assert.equal(config.reviewer?.provider, "anthropic");
-  assert.equal(config.reviewer?.maxCallsPerDay, 20);
+  assert.equal(config.reviewer?.maxCallsPerDay, 100);
   assert.equal(JSON.stringify(config).includes("apiKey"), false);
   assert.throws(() => parseServiceConfig({
     version: 1,

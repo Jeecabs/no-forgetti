@@ -6,6 +6,7 @@
 
 - **Breaking:** add embedded, shadow, and opt-in external memory-review authority modes.
 - Add a separately runnable `no-forgetti review --once` worker and durable local review spool with deterministic jobs, fenced leases, crash recovery, strict schemas, redaction, usage/cost provenance, and daily budgets.
+- Add an in-Pi `/memory status` monitor for worker heartbeat, queue depth, daily call/token/cost usage, and visible exhaustion warnings; default reviewer call budget is 100/day.
 - Add an optional SQLite WAL shadow ledger for jobs, attempts, and outcomes; existing project JSON remains canonical.
 - Add dedicated persistent reviewer profiles without placing credentials in jobs, logs, or outcomes.
 - Add proposal-only tool-less external review plus CAS-guarded JSON admission, immutable receipts, stale rejection, and next-session review-job provenance.

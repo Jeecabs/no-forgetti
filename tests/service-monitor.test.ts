@@ -1,0 +1,78 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { readReviewServiceMonitor, ReviewWorkerStatusReporter } from "../src/service/monitor.ts";
+import { formatReviewServiceMonitorText } from "../src/service/tui.ts";
+
+async function fixture() {
+  const agentDir = await mkdtemp(join(tmpdir(), "no-forgetti-monitor-"));
+  const root = join(agentDir, "no-forgetti");
+  await mkdir(join(root, "review-spool", "queued"), { recursive: true });
+  await mkdir(join(root, "review-spool", "running"), { recursive: true });
+  await mkdir(join(root, "review-spool", "outcomes"), { recursive: true });
+  await mkdir(join(root, "review-spool", "dead-letter"), { recursive: true });
+  await writeFile(join(root, "service.json"), JSON.stringify({
+    version: 1,
+    mode: "external",
+    evidenceTtlHours: 24,
+    reviewer: {
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      maxCallsPerDay: 100,
+      maxTokensPerDay: 500_000,
+      maxCostPerDayUsd: 10,
+    },
+  }));
+  return { agentDir, root };
+}
+
+test("service monitor exposes queue, worker heartbeat, and exhausted dimensions", async () => {
+  const { agentDir, root } = await fixture();
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  await writeFile(join(root, "review-budget.json"), JSON.stringify({
+    version: 1,
+    day,
+    calls: 100,
+    tokens: 1234,
+    costUsd: 0.25,
+  }));
+  await writeFile(join(root, "review-spool", "queued", "one.json"), "{}");
+  await writeFile(join(root, "review-spool", "outcomes", "done.json"), "{}");
+
+  const reporter = new ReviewWorkerStatusReporter(agentDir, "monitor-worker", now);
+  reporter.start();
+  reporter.record({ type: "claimed", jobId: `review_${"a".repeat(40)}`, attempt: 2 });
+  await reporter.flush();
+
+  const monitor = await readReviewServiceMonitor(agentDir, new Date(now.getTime() + 1_000));
+  assert.equal(monitor.workerFresh, true);
+  assert.equal(monitor.worker?.state, "working");
+  assert.equal(monitor.worker?.attempt, 2);
+  assert.deepEqual(monitor.spool, { queued: 1, running: 0, outcomes: 1, deadLetter: 0 });
+  assert.deepEqual(monitor.exhausted, ["calls"]);
+  assert.match(formatReviewServiceMonitorText(monitor, {
+    projectRoot: "/project",
+    branch: "main",
+    entries: 2,
+    usedChars: 120,
+    maxChars: 4_000,
+  }), /calls: 100\/100/u);
+});
+
+test("service monitor marks stale and stopped workers offline", async () => {
+  const { agentDir } = await fixture();
+  const now = new Date();
+  const reporter = new ReviewWorkerStatusReporter(agentDir, "monitor-worker", now);
+  reporter.start();
+  reporter.stop();
+  await reporter.flush();
+
+  const monitor = await readReviewServiceMonitor(agentDir, new Date(now.getTime() + 31_000));
+  assert.equal(monitor.worker?.state, "stopped");
+  assert.equal(monitor.workerFresh, false);
+});

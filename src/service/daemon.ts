@@ -29,6 +29,7 @@ export interface ReviewBudgetUsage {
 export interface ReviewBudgetAccount {
   snapshot(): Promise<ReviewBudgetUsage>;
   reserveCall(limits: ReviewDailyBudgetLimits): Promise<ReviewBudgetUsage | undefined>;
+  releaseCall(): Promise<ReviewBudgetUsage>;
   charge(provenance: ReviewModelProvenance): Promise<ReviewBudgetUsage>;
 }
 
@@ -112,6 +113,12 @@ export class InMemoryReviewBudgetAccount implements ReviewBudgetAccount {
     return publicBudget(this.usage);
   }
 
+  async releaseCall(): Promise<ReviewBudgetUsage> {
+    this.rollover();
+    this.usage.calls = Math.max(0, this.usage.calls - 1);
+    return publicBudget(this.usage);
+  }
+
   async charge(provenance: ReviewModelProvenance): Promise<ReviewBudgetUsage> {
     this.rollover();
     this.usage.tokens += Math.max(0, Math.floor(provenance.usage.totalTokens));
@@ -148,6 +155,15 @@ export class FileReviewBudgetAccount implements ReviewBudgetAccount {
       const checked = checkedLimits(limits);
       if (!mayStart(usage, checked)) return undefined;
       usage.calls += 1;
+      await this.write(usage);
+      return publicBudget(usage);
+    });
+  }
+
+  releaseCall(): Promise<ReviewBudgetUsage> {
+    return this.lock(async () => {
+      const usage = await this.readCurrent();
+      usage.calls = Math.max(0, usage.calls - 1);
       await this.write(usage);
       return publicBudget(usage);
     });
@@ -213,6 +229,8 @@ export interface ReviewDaemonOptions {
   maxAttempts?: number;
   onEvent?: (event: ReviewDaemonEvent) => void;
   committer?: ProposalCommitter;
+  maintenance?: () => Promise<void>;
+  maintenanceIntervalMs?: number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
@@ -284,7 +302,7 @@ function provenanceFrom(error: unknown): ReviewModelProvenance | undefined {
   return undefined;
 }
 
-function defaultWorkerId(): string {
+export function defaultReviewWorkerId(): string {
   const host = hostname().replace(/[^A-Za-z0-9._:-]/gu, "_").slice(0, 80) || "localhost";
   return `${host}:${process.pid}`;
 }
@@ -319,6 +337,8 @@ export class ReviewDaemon {
   private readonly maxAttempts: number;
   private readonly emit: (event: ReviewDaemonEvent) => void;
   private readonly committer?: ProposalCommitter;
+  private readonly maintenance?: () => Promise<void>;
+  private readonly maintenanceIntervalMs: number;
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly shutdownController = new AbortController();
   private running = false;
@@ -328,12 +348,14 @@ export class ReviewDaemon {
     this.engine = options.engine;
     this.budget = checkedLimits(options.budget);
     this.budgetAccount = options.budgetAccount ?? new InMemoryReviewBudgetAccount();
-    this.workerId = options.workerId ?? defaultWorkerId();
+    this.workerId = options.workerId ?? defaultReviewWorkerId();
     this.leaseMs = positiveMs(options.leaseMs ?? DEFAULT_REVIEW_LEASE_MS, "review lease duration");
     this.pollMs = positiveMs(options.pollMs ?? DEFAULT_REVIEW_POLL_MS, "review poll interval");
     this.maxAttempts = positiveMs(options.maxAttempts ?? DEFAULT_REVIEW_MAX_ATTEMPTS, "review attempt limit");
     this.emit = options.onEvent ?? (() => undefined);
     this.committer = options.committer;
+    this.maintenance = options.maintenance;
+    this.maintenanceIntervalMs = positiveMs(options.maintenanceIntervalMs ?? 60 * 60_000, "review maintenance interval");
     this.sleep = options.sleep ?? defaultSleep;
   }
 
@@ -353,28 +375,22 @@ export class ReviewDaemon {
       return { status: "budget_exhausted", usage };
     }
 
-    const claim = await this.spool.claim({ workerId: this.workerId, leaseMs: this.leaseMs });
-    if (!claim) return { status: "empty" };
-    this.emit({ type: "claimed", jobId: claim.job.id, attempt: claim.attempt });
-
-    if (claim.attempt > this.maxAttempts) {
-      const failure: ReviewFailure = {
-        code: "attempt_limit",
-        message: `Review exceeded ${this.maxAttempts} attempts.`,
-        retryable: false,
-      };
-      await this.spool.finish(claim, createReviewOutcome(claim.job, { status: "failed", error: failure }));
-      this.emit({ type: "failed", jobId: claim.job.id, attempt: claim.attempt, failure });
-      return { status: "failed", failure };
-    }
-
     const reserved = await this.budgetAccount.reserveCall(this.budget);
     if (!reserved) {
       const current = await this.budgetAccount.snapshot();
       this.emit({ type: "budget_exhausted", usage: current });
       return { status: "budget_exhausted", usage: current };
     }
+    const claim = await this.spool.claim({ workerId: this.workerId, leaseMs: this.leaseMs });
+    if (!claim) {
+      await this.budgetAccount.releaseCall();
+      return { status: "empty" };
+    }
+    this.emit({ type: "claimed", jobId: claim.job.id, attempt: claim.attempt });
 
+    // Configuration failures may outlive the normal attempt ceiling without
+    // consuming a provider call. The catch path applies maxAttempts only after
+    // classifying the current failure.
     const leaseController = new AbortController();
     const reviewSignal = AbortSignal.any([workSignal, leaseController.signal]);
     let renewing = false;
@@ -423,6 +439,7 @@ export class ReviewDaemon {
       if (interrupted) return { status: "interrupted" };
       const actualError = renewalError ?? error;
       const classified = classifyReviewFailure(actualError, false);
+      if (classified.configurationBlock && !provenance) await this.budgetAccount.releaseCall();
       const shouldRetry = classified.retryable && (classified.configurationBlock || claim.attempt < this.maxAttempts);
       const failure: ReviewFailure = {
         code: classified.code,
@@ -473,7 +490,12 @@ export class ReviewDaemon {
     try {
       await this.spool.initialize();
       await this.spool.recover();
+      let nextMaintenanceAt = 0;
       while (!runSignal.aborted) {
+        if (this.maintenance && Date.now() >= nextMaintenanceAt) {
+          await this.maintenance();
+          nextMaintenanceAt = Date.now() + this.maintenanceIntervalMs;
+        }
         const drained = await this.drain(runSignal);
         if (drained.interrupted) break;
         this.emit({ type: "idle" });
