@@ -6,6 +6,7 @@ export const MAX_SKILL_DESCRIPTION_CHARS = 60;
 export const MAX_SKILL_CONTENT_CHARS = 32_000;
 
 export type SkillWriteOrigin = "foreground" | "background_review";
+export type SkillReviewOutcome = "success" | "failure" | "cancelled";
 export type SkillState = "active" | "archived";
 export type SkillOperationAction = "create" | "patch" | "archive";
 
@@ -64,11 +65,20 @@ export interface SkillUseResult {
   withdrawnRetentionProposals: number;
 }
 
+export interface SkillReviewClaim {
+  generation: number;
+  token: string;
+  capturedTurns: number;
+  capturedSignalScore: number;
+}
+
 export interface SkillReviewState {
   version: number;
   turnsSinceReview: number;
   signalScore: number;
   consecutiveFailures: number;
+  generation?: number;
+  activeClaim?: SkillReviewClaim;
   lastReviewedAt?: string;
   lastAttemptAt?: string;
   nextAttemptAt?: string;

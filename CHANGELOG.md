@@ -5,9 +5,11 @@
 - Add filesystem-authoritative per-provider attempt accounting with conservative holds, exact settlement, unknown exposure, global attempt identities, legacy-budget migration, orphan recovery, and durable retry backoff.
 - Checkpoint and elect normalized provider results before memory admission so restarts reuse the same proposal without another provider call.
 - Add recoverable project admission intents spanning branch mutation and revision publication, outcome-bound immutable receipts, intent compaction, and real-process crash tests.
-- Fence review cadence settlement so activity recorded after a review snapshot is preserved.
+- Fence memory and project-skill review cadence settlement so concurrent activity recorded after a review snapshot is preserved.
 - Expand the SQLite observational ledger and `/memory status` with settled, held, and unknown attempt visibility.
 - Redraw the `/memory status` monitor as a closed card: four-sided frame so it no longer dissolves into the editor behind it, sentence-case labels, aligned budget columns with full-width bars, and inline notices instead of a highlighted banner.
+- Give embedded reviews two minutes to finish; harden project-skill reviews with enforced aborts, an explicit atomic admission commit point, truthful retry messaging, and silent lifecycle cancellation.
+- Migrate project-skill cadence state to fenced claims so forced reviews cannot bypass live leases and stale workers cannot settle newer work.
 
 ## 0.2.0 — 2026-07-26
 

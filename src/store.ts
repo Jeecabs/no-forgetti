@@ -9,6 +9,7 @@ import { memoryCharCount } from "./context.ts";
 import { withFileLock } from "./file-lock.ts";
 import { projectKey } from "./project.ts";
 import { validateMemoryText } from "./security.ts";
+import { beginReviewClaim, settleReviewClaim } from "./review-cadence.ts";
 import { isErrno, isRecord, optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
 import {
   DEFAULT_MAX_CHARS,
@@ -35,9 +36,6 @@ import {
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 5_000;
-const REVIEW_LEASE_MS = 5 * 60_000;
-const REVIEW_RETRY_BASE_MS = 5 * 60_000;
-const REVIEW_RETRY_MAX_MS = 60 * 60_000;
 const BRANCH_NAME = /^[a-z][a-z0-9_-]{0,63}$/u;
 const ENTRY_ID = /^[a-zA-Z0-9_-]{1,128}$/u;
 const MEMORY_IMPORTANCES: readonly unknown[] = ["high", "normal", "low"];
@@ -1043,19 +1041,12 @@ export class ProjectMemoryStore {
       const nextAttempt = state.nextAttemptAt ? new Date(state.nextAttemptAt) : undefined;
       if (!force && nextAttempt && Number.isFinite(nextAttempt.getTime()) && nextAttempt > now) return undefined;
       if (!force && state.turnsSinceReview < interval && state.signalScore < signalThreshold) return undefined;
-      const generation = (state.generation ?? 0) + 1;
-      if (!Number.isSafeInteger(generation)) throw new Error("Memory review generation exhausted.");
-      const claim: ReviewClaim = {
-        branchName,
-        generation,
-        token: randomUUID(),
-        capturedTurns: state.turnsSinceReview,
-        capturedSignalScore: state.signalScore,
-      };
-      state.generation = generation;
-      state.activeClaim = claim;
-      state.lastAttemptAt = now.toISOString();
-      state.inFlightUntil = new Date(now.getTime() + REVIEW_LEASE_MS).toISOString();
+      const claim = beginReviewClaim({
+        state,
+        now,
+        generationExhaustedMessage: "Memory review generation exhausted.",
+        createClaim: (snapshot): ReviewClaim => ({ branchName, ...snapshot }),
+      });
       await this.atomicWrite(path, state);
       return claim;
     });
@@ -1067,31 +1058,13 @@ export class ProjectMemoryStore {
     return this.withLock(async () => {
       const path = this.reviewPath(branchName);
       const state = parseReviewState(await this.readJson(path), branchName);
-      const active = state.activeClaim;
-      if (
-        !active
-        || active.generation !== expected.generation
-        || active.token !== expected.token
-        || active.capturedTurns !== expected.capturedTurns
-        || active.capturedSignalScore !== expected.capturedSignalScore
-      ) {
-        return false;
-      }
-
-      delete state.activeClaim;
-      delete state.inFlightUntil;
-      const now = this.now();
-      if (success) {
-        state.turnsSinceReview = Math.max(0, state.turnsSinceReview - active.capturedTurns);
-        state.signalScore = Math.max(0, state.signalScore - active.capturedSignalScore);
-        state.consecutiveFailures = 0;
-        delete state.nextAttemptAt;
-        state.lastReviewedAt = now.toISOString();
-      } else {
-        state.consecutiveFailures += 1;
-        const delay = Math.min(REVIEW_RETRY_MAX_MS, REVIEW_RETRY_BASE_MS * (2 ** (state.consecutiveFailures - 1)));
-        state.nextAttemptAt = new Date(now.getTime() + delay).toISOString();
-      }
+      const settled = settleReviewClaim({
+        state,
+        expected,
+        outcome: success ? "success" : "failure",
+        now: this.now(),
+      });
+      if (!settled) return false;
       await this.atomicWrite(path, state);
       return true;
     });

@@ -6,13 +6,14 @@ import test from "node:test";
 
 import { ProjectSkillStore } from "../src/skill-store.ts";
 
-async function fixture() {
+async function fixture(options: { now?: () => Date } = {}) {
   const base = await mkdtemp(join(tmpdir(), "pi-project-skills-"));
   const project = join(base, "repo");
+  const storage = join(base, "state");
   await mkdir(project, { recursive: true });
-  const store = new ProjectSkillStore(project, { storageRoot: join(base, "state") });
+  const store = new ProjectSkillStore(project, { storageRoot: storage, now: options.now });
   await store.initialize();
-  return { base, project, store };
+  return { base, project, storage, store };
 }
 
 const skillBody = "# Verification\n\n## Procedure\n\n1. Run the canonical check. Completion criterion: the command exits successfully.";
@@ -305,6 +306,32 @@ test("rejects malformed activity state instead of resetting it", async (t) => {
   await assert.rejects(store.maintainSession("two"), /activity completion count/u);
 });
 
+test("migrates legacy skill review cadence before publishing fenced claims", async (t) => {
+  const { base, project, storage, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await writeFile(store.reviewPath, JSON.stringify({
+    version: 1,
+    turnsSinceReview: 7,
+    signalScore: 3,
+    consecutiveFailures: 1,
+    lastAttemptAt: "2026-01-01T00:00:00.000Z",
+    nextAttemptAt: "2026-01-01T00:05:00.000Z",
+  }));
+
+  const reloaded = new ProjectSkillStore(project, { storageRoot: storage });
+  await reloaded.initialize();
+  const migrated = JSON.parse(await readFile(store.reviewPath, "utf8")) as Record<string, unknown>;
+  assert.deepEqual(migrated, {
+    version: 2,
+    turnsSinceReview: 7,
+    signalScore: 3,
+    consecutiveFailures: 1,
+    generation: 0,
+    lastAttemptAt: "2026-01-01T00:00:00.000Z",
+    nextAttemptAt: "2026-01-01T00:05:00.000Z",
+  });
+});
+
 test("rejects malformed skill review state instead of resetting cadence", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
@@ -314,10 +341,8 @@ test("rejects malformed skill review state instead of resetting cadence", async 
 
 test("skill usage survives reload and review state backs off", async (t) => {
   let now = new Date("2026-01-01T00:00:00.000Z");
-  const { base, project } = await fixture();
+  const { base, store } = await fixture({ now: () => now });
   t.after(() => rm(base, { recursive: true, force: true }));
-  const store = new ProjectSkillStore(project, { storageRoot: join(base, "state"), now: () => now });
-  await store.initialize();
   await store.maintainSession("session-1");
   const proposal = await store.stageProposal([{
     action: "create",
@@ -334,11 +359,121 @@ test("skill usage survives reload and review state backs off", async (t) => {
   assert.equal(reloaded.useSessionCount, 1);
 
   for (let i = 0; i < 3; i++) await store.recordUserTurn();
-  assert.equal(await store.claimReviewIfDue(3, 99), true);
-  await store.finishReview(false);
-  assert.equal(await store.claimReviewIfDue(3, 99), false);
+  const failed = await store.claimReviewIfDue({ interval: 3, signalThreshold: 99 });
+  assert.ok(failed);
+  assert.equal(await store.finishReview({ claim: failed, outcome: "failure" }), true);
+  assert.equal(await store.claimReviewIfDue({ interval: 3, signalThreshold: 99 }), undefined);
   now = new Date(now.getTime() + 5 * 60_000 + 1);
-  assert.equal(await store.claimReviewIfDue(3, 99), true);
+  assert.ok(await store.claimReviewIfDue({ interval: 3, signalThreshold: 99 }));
+});
+
+test("fenced skill review success preserves activity recorded after its snapshot", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  for (let turn = 0; turn < 3; turn += 1) await store.recordUserTurn(1);
+  const claim = await store.claimReviewIfDue({ interval: 3, signalThreshold: 99 });
+  assert.ok(claim);
+  assert.equal(claim.capturedTurns, 3);
+  assert.equal(claim.capturedSignalScore, 3);
+
+  await store.recordUserTurn(2);
+  assert.equal(await store.finishReview({ claim, outcome: "success" }), true);
+  assert.ok(await store.claimReviewIfDue({ interval: 99, signalThreshold: 2 }), "post-snapshot signal remains due");
+});
+
+test("only the current skill review claim can settle and force respects a live lease", async (t) => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { base, project, storage, store } = await fixture({ now: () => now });
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.recordUserTurn(4);
+  const stale = await store.claimReviewIfDue({ interval: 1, signalThreshold: 99 });
+  assert.ok(stale);
+
+  const second = new ProjectSkillStore(project, { storageRoot: storage, now: () => now });
+  await second.initialize();
+  assert.equal(
+    await second.claimReviewIfDue({ interval: 1, signalThreshold: 99, force: true }),
+    undefined,
+    "force cannot bypass a live lease",
+  );
+
+  now = new Date(now.getTime() + 5 * 60_000 + 1);
+  const current = await second.claimReviewIfDue({ interval: 1, signalThreshold: 99 });
+  assert.ok(current);
+  assert.equal(current.generation, stale.generation + 1);
+  assert.notEqual(current.token, stale.token);
+  assert.equal(await store.finishReview({ claim: stale, outcome: "cancelled" }), false);
+
+  const third = new ProjectSkillStore(project, { storageRoot: storage, now: () => now });
+  await third.initialize();
+  assert.equal(
+    await third.claimReviewIfDue({ interval: 1, signalThreshold: 99 }),
+    undefined,
+    "stale settlement leaves current lease fenced",
+  );
+  assert.equal(await second.finishReview({ claim: current, outcome: "cancelled" }), true);
+});
+
+test("skill review cancellation preserves an existing failure backoff", async (t) => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { base, store } = await fixture({ now: () => now });
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.recordUserTurn();
+  const failed = await store.claimReviewIfDue({ interval: 1, signalThreshold: 99 });
+  assert.ok(failed);
+  assert.equal(await store.finishReview({ claim: failed, outcome: "failure" }), true);
+  const cadenceSnapshot = async () => {
+    const state = JSON.parse(await readFile(store.reviewPath, "utf8")) as {
+      turnsSinceReview: number;
+      signalScore: number;
+      consecutiveFailures: number;
+      nextAttemptAt?: string;
+    };
+    return {
+      turnsSinceReview: state.turnsSinceReview,
+      signalScore: state.signalScore,
+      consecutiveFailures: state.consecutiveFailures,
+      nextAttemptAt: state.nextAttemptAt,
+    };
+  };
+  const before = await cadenceSnapshot();
+
+  const forced = await store.claimReviewIfDue({ interval: 1, signalThreshold: 99, force: true });
+  assert.ok(forced);
+  now = new Date(now.getTime() + 1_000);
+  assert.equal(await store.finishReview({ claim: forced, outcome: "cancelled" }), true);
+  assert.deepEqual(await cadenceSnapshot(), before);
+});
+
+test("invalid skill review settlements fail closed without releasing the claim", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.recordUserTurn();
+  const claim = await store.claimReviewIfDue({ interval: 1, signalThreshold: 99 });
+  assert.ok(claim);
+
+  await assert.rejects(
+    (store.finishReview as unknown as (request: unknown) => Promise<boolean>)(false),
+    /Invalid project skill review settlement/u,
+  );
+  await assert.rejects(
+    (store.finishReview as unknown as (request: unknown) => Promise<boolean>)({ claim, outcome: "typo" }),
+    /Invalid project skill review settlement/u,
+  );
+  await assert.rejects(
+    (store.finishReview as unknown as (request: unknown) => Promise<boolean>)({ claim, outcome: "cancelled", extra: true }),
+    /Invalid object shape/u,
+  );
+  await assert.rejects(
+    (store.finishReview as unknown as (request: unknown) => Promise<boolean>)({
+      claim: { ...claim, extra: true },
+      outcome: "cancelled",
+    }),
+    /Invalid object shape/u,
+  );
+  assert.equal(await store.claimReviewIfDue({ interval: 1, signalThreshold: 99, force: true }), undefined);
+  assert.equal(await store.finishReview({ claim, outcome: "cancelled" }), true);
 });
 
 test("rejects unsafe skill content and invalid descriptions", async (t) => {

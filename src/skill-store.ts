@@ -4,8 +4,9 @@ import { join } from "node:path";
 
 import { atomicWriteFile } from "./atomic-file.ts";
 import { withFileLock } from "./file-lock.ts";
+import { beginReviewClaim, settleReviewClaim } from "./review-cadence.ts";
 import { SkillActivityIndex } from "./skill-activity.ts";
-import { isErrno, isRecord, optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
+import { exactKeys, isErrno, isRecord, optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
 import { projectStorageDir } from "./store.ts";
 import {
   DEFAULT_SKILL_RETENTION_SESSIONS,
@@ -16,6 +17,8 @@ import {
   type SkillMutationResult,
   type SkillOperation,
   type SkillProposal,
+  type SkillReviewClaim,
+  type SkillReviewOutcome,
   type SkillReviewState,
   type SkillSessionMaintenance,
   type SkillUseResult,
@@ -30,9 +33,6 @@ import {
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 5_000;
-const REVIEW_LEASE_MS = 5 * 60_000;
-const REVIEW_RETRY_BASE_MS = 5 * 60_000;
-const REVIEW_RETRY_MAX_MS = 60 * 60_000;
 const SKILL_FILE = "SKILL.md";
 const RETRIEVAL_STOP_WORDS = new Set([
   "a", "an", "and", "are", "do", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "project", "the", "to", "use", "what", "when", "with",
@@ -41,6 +41,9 @@ const MAX_RETRIEVAL_QUERY_CHARS = 256;
 const MAX_RETRIEVAL_TERMS = 32;
 const MAX_SKILL_INDEX_CHARS = 6_000;
 const MAX_SKILL_JSON_BYTES = 5 * 1024 * 1024;
+const LEGACY_SKILL_REVIEW_STATE_VERSION = 1;
+const SKILL_REVIEW_STATE_VERSION = 2;
+const UUID = /^[a-f0-9-]{36}$/u;
 
 function retrievalVariants(term: string): string[] {
   const variants = [term];
@@ -85,22 +88,109 @@ function validateProposalId(id: string): string {
 }
 
 function emptyReviewState(): SkillReviewState {
-  return { version: SKILL_STORE_VERSION, turnsSinceReview: 0, signalScore: 0, consecutiveFailures: 0 };
+  return { version: SKILL_REVIEW_STATE_VERSION, turnsSinceReview: 0, signalScore: 0, consecutiveFailures: 0, generation: 0 };
 }
 
-function parseReviewState(value: unknown): SkillReviewState {
-  if (!isRecord(value)) throw new Error("Invalid project skill review state.");
-  if (value.version !== SKILL_STORE_VERSION) throw new Error("Unsupported project skill review state.");
+function requireReviewClaimRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("Invalid project skill review claim.");
+  return value;
+}
+
+function requireReviewClaimToken(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Invalid project skill review claim.");
+  if (!UUID.test(value)) throw new Error("Invalid project skill review claim.");
+  return value;
+}
+
+function requireReviewClaimGeneration(value: unknown): number {
+  const generation = requireNonnegativeInteger(value, "project skill review claim generation");
+  if (generation === 0) throw new Error("Invalid project skill review claim generation.");
+  return generation;
+}
+
+function parseReviewClaim(value: unknown): SkillReviewClaim {
+  const claim = requireReviewClaimRecord(value);
+  exactKeys(claim, ["generation", "token", "capturedTurns", "capturedSignalScore"]);
   return {
-    version: SKILL_STORE_VERSION,
+    generation: requireReviewClaimGeneration(claim.generation),
+    token: requireReviewClaimToken(claim.token),
+    capturedTurns: requireNonnegativeInteger(claim.capturedTurns, "project skill review claimed turn count"),
+    capturedSignalScore: requireNonnegativeInteger(claim.capturedSignalScore, "project skill review claimed signal score"),
+  };
+}
+
+function parseLegacyReviewState(value: unknown): SkillReviewState {
+  if (!isRecord(value) || value.version !== LEGACY_SKILL_REVIEW_STATE_VERSION) {
+    throw new Error("Invalid legacy project skill review state.");
+  }
+  return {
+    version: SKILL_REVIEW_STATE_VERSION,
     turnsSinceReview: requireNonnegativeInteger(value.turnsSinceReview, "project skill review turn count"),
     signalScore: requireNonnegativeInteger(value.signalScore, "project skill review signal score"),
     consecutiveFailures: requireNonnegativeInteger(value.consecutiveFailures, "project skill review failure count"),
+    generation: 0,
     lastReviewedAt: optionalIsoTimestamp(value.lastReviewedAt, "project skill review timestamp"),
     lastAttemptAt: optionalIsoTimestamp(value.lastAttemptAt, "project skill review attempt timestamp"),
     nextAttemptAt: optionalIsoTimestamp(value.nextAttemptAt, "project skill review retry timestamp"),
     inFlightUntil: optionalIsoTimestamp(value.inFlightUntil, "project skill review lease timestamp"),
   };
+}
+
+function requireReviewStateRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("Invalid project skill review state.");
+  if (value.version !== SKILL_REVIEW_STATE_VERSION) throw new Error("Unsupported project skill review state.");
+  exactKeys(
+    value,
+    ["version", "turnsSinceReview", "signalScore", "consecutiveFailures"],
+    ["generation", "activeClaim", "lastReviewedAt", "lastAttemptAt", "nextAttemptAt", "inFlightUntil"],
+  );
+  return value;
+}
+
+function parseReviewGeneration(value: unknown): number {
+  return value === undefined ? 0 : requireNonnegativeInteger(value, "project skill review generation");
+}
+
+function parseActiveReviewClaim(value: unknown): SkillReviewClaim | undefined {
+  return value === undefined ? undefined : parseReviewClaim(value);
+}
+
+function assertReviewClaimGeneration(claim: SkillReviewClaim | undefined, generation: number): void {
+  if (claim?.generation !== undefined && claim.generation !== generation) {
+    throw new Error("Project skill review claim generation mismatch.");
+  }
+}
+
+function parseReviewState(value: unknown): SkillReviewState {
+  const state = requireReviewStateRecord(value);
+  const generation = parseReviewGeneration(state.generation);
+  const activeClaim = parseActiveReviewClaim(state.activeClaim);
+  assertReviewClaimGeneration(activeClaim, generation);
+  return {
+    version: SKILL_REVIEW_STATE_VERSION,
+    turnsSinceReview: requireNonnegativeInteger(state.turnsSinceReview, "project skill review turn count"),
+    signalScore: requireNonnegativeInteger(state.signalScore, "project skill review signal score"),
+    consecutiveFailures: requireNonnegativeInteger(state.consecutiveFailures, "project skill review failure count"),
+    generation,
+    activeClaim,
+    lastReviewedAt: optionalIsoTimestamp(state.lastReviewedAt, "project skill review timestamp"),
+    lastAttemptAt: optionalIsoTimestamp(state.lastAttemptAt, "project skill review attempt timestamp"),
+    nextAttemptAt: optionalIsoTimestamp(state.nextAttemptAt, "project skill review retry timestamp"),
+    inFlightUntil: optionalIsoTimestamp(state.inFlightUntil, "project skill review lease timestamp"),
+  };
+}
+
+const SKILL_REVIEW_OUTCOMES = new Set<unknown>(["success", "failure", "cancelled"]);
+
+function parseReviewOutcome(value: unknown): SkillReviewOutcome {
+  if (!SKILL_REVIEW_OUTCOMES.has(value)) throw new Error("Invalid project skill review settlement.");
+  return value as SkillReviewOutcome;
+}
+
+function parseReviewSettlement(value: unknown): { claim: SkillReviewClaim; outcome: SkillReviewOutcome } {
+  if (!isRecord(value)) throw new Error("Invalid project skill review settlement.");
+  exactKeys(value, ["claim", "outcome"]);
+  return { claim: parseReviewClaim(value.claim), outcome: parseReviewOutcome(value.outcome) };
 }
 
 function parseYamlScalar(value: string): string {
@@ -225,8 +315,16 @@ export class ProjectSkillStore {
     await mkdir(this.pendingDir, { recursive: true, mode: 0o700 });
     await mkdir(this.revisionsDir, { recursive: true, mode: 0o700 });
     await this.withLock(async () => {
-      if (!await this.exists(this.reviewPath)) await this.atomicWrite(this.reviewPath, emptyReviewState());
-      else parseReviewState(await this.readJson(this.reviewPath));
+      if (!await this.exists(this.reviewPath)) {
+        await this.atomicWrite(this.reviewPath, emptyReviewState());
+      } else {
+        const persistedReviewState = await this.readJson(this.reviewPath);
+        if (isRecord(persistedReviewState) && persistedReviewState.version === LEGACY_SKILL_REVIEW_STATE_VERSION) {
+          await this.atomicWrite(this.reviewPath, parseLegacyReviewState(persistedReviewState));
+        } else {
+          parseReviewState(persistedReviewState);
+        }
+      }
       const storedSkills = await this.listStoredSkills();
       const aliases = Object.fromEntries(storedSkills.flatMap((skill) => [[skill.name, skill.generationId], [skill.generationId, skill.generationId]]));
       const seeds = Object.fromEntries(storedSkills.map((skill) => [skill.generationId, {
@@ -513,42 +611,48 @@ export class ProjectSkillStore {
     });
   }
 
-  async claimReviewIfDue(
-    interval = DEFAULT_SKILL_REVIEW_INTERVAL,
-    signalThreshold = DEFAULT_SKILL_REVIEW_SIGNAL_THRESHOLD,
-    force = false,
-  ): Promise<boolean> {
+  async claimReviewIfDue(request: {
+    interval?: number;
+    signalThreshold?: number;
+    force?: boolean;
+  } = {}): Promise<SkillReviewClaim | undefined> {
+    const {
+      interval = DEFAULT_SKILL_REVIEW_INTERVAL,
+      signalThreshold = DEFAULT_SKILL_REVIEW_SIGNAL_THRESHOLD,
+      force = false,
+    } = request;
     return this.withLock(async () => {
       const state = parseReviewState(await this.readJson(this.reviewPath));
       const now = this.now();
       const lease = state.inFlightUntil ? new Date(state.inFlightUntil) : undefined;
       const next = state.nextAttemptAt ? new Date(state.nextAttemptAt) : undefined;
-      if (!force && lease && Number.isFinite(lease.getTime()) && lease > now) return false;
-      if (!force && next && Number.isFinite(next.getTime()) && next > now) return false;
-      if (!force && state.turnsSinceReview < interval && state.signalScore < signalThreshold) return false;
-      state.lastAttemptAt = now.toISOString();
-      state.inFlightUntil = new Date(now.getTime() + REVIEW_LEASE_MS).toISOString();
+      if (lease && Number.isFinite(lease.getTime()) && lease > now) return undefined;
+      if (!force && next && Number.isFinite(next.getTime()) && next > now) return undefined;
+      if (!force && state.turnsSinceReview < interval && state.signalScore < signalThreshold) return undefined;
+      const claim = beginReviewClaim({
+        state,
+        now,
+        generationExhaustedMessage: "Project skill review generation exhausted.",
+        createClaim: (snapshot): SkillReviewClaim => snapshot,
+      });
       await this.atomicWrite(this.reviewPath, state);
-      return true;
+      return claim;
     });
   }
 
-  async finishReview(success: boolean): Promise<void> {
-    await this.withLock(async () => {
+  async finishReview(request: { claim: SkillReviewClaim; outcome: SkillReviewOutcome }): Promise<boolean> {
+    const settlement = parseReviewSettlement(request);
+    return this.withLock(async () => {
       const state = parseReviewState(await this.readJson(this.reviewPath));
-      delete state.inFlightUntil;
-      if (success) {
-        state.turnsSinceReview = 0;
-        state.signalScore = 0;
-        state.consecutiveFailures = 0;
-        delete state.nextAttemptAt;
-        state.lastReviewedAt = this.timestamp();
-      } else {
-        state.consecutiveFailures += 1;
-        const delay = Math.min(REVIEW_RETRY_MAX_MS, REVIEW_RETRY_BASE_MS * (2 ** (state.consecutiveFailures - 1)));
-        state.nextAttemptAt = new Date(this.now().getTime() + delay).toISOString();
-      }
+      const settled = settleReviewClaim({
+        state,
+        expected: settlement.claim,
+        outcome: settlement.outcome,
+        now: this.now(),
+      });
+      if (!settled) return false;
       await this.atomicWrite(this.reviewPath, state);
+      return true;
     });
   }
 
