@@ -64,6 +64,25 @@ test("service monitor exposes queue, worker heartbeat, and exhausted dimensions"
   }), /calls: 100\/100/u);
 });
 
+test("worker heartbeat preserves retry state", async () => {
+  const { agentDir } = await fixture();
+  const now = new Date();
+  const reporter = new ReviewWorkerStatusReporter(agentDir, "retry-worker", now);
+  reporter.start();
+  reporter.record({
+    type: "retry",
+    jobId: `review_${"b".repeat(40)}`,
+    attempt: 3,
+    failure: { code: "auth_unavailable", message: "auth unavailable", retryable: true },
+  });
+  reporter.heartbeat();
+  await reporter.flush();
+
+  const monitor = await readReviewServiceMonitor(agentDir, new Date(now.getTime() + 1_000));
+  assert.equal(monitor.worker?.state, "waiting-retry");
+  assert.equal(monitor.workerFresh, true);
+});
+
 test("service monitor marks stale and stopped workers offline", async () => {
   const { agentDir } = await fixture();
   const now = new Date();

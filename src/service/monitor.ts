@@ -206,6 +206,14 @@ export class ReviewWorkerStatusReporter {
     else if (event.type === "idle" && this.current.state !== "waiting-retry") this.enqueue({ state: "idle" });
   }
 
+  heartbeat(): void {
+    this.enqueue({
+      state: this.current.state,
+      ...(this.current.jobId ? { jobId: this.current.jobId } : {}),
+      ...(this.current.attempt ? { attempt: this.current.attempt } : {}),
+    });
+  }
+
   stop(): void {
     this.enqueue({ state: "stopped" });
   }

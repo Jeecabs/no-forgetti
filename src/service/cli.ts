@@ -127,7 +127,10 @@ async function createDefaultRuntime(
   await spool.recover();
   const retentionMs = config.evidenceTtlHours * 60 * 60_000;
   const purgeExpired = async () => {
-    const retentionCutoff = new Date(Date.now() - retentionMs);
+    // Retention changes take effect without restarting a long-lived worker.
+    const currentConfig = await loadServiceConfig(agentDir);
+    const currentRetentionMs = currentConfig.evidenceTtlHours * 60 * 60_000;
+    const retentionCutoff = new Date(Date.now() - currentRetentionMs);
     await spool.purgeTerminalBefore(retentionCutoff);
     ledger.purgeTerminalBefore(retentionCutoff);
   };
@@ -136,6 +139,8 @@ async function createDefaultRuntime(
   const workerId = args.workerId ?? defaultReviewWorkerId();
   const reporter = new ReviewWorkerStatusReporter(agentDir, workerId);
   reporter.start();
+  const heartbeat = setInterval(() => reporter.heartbeat(), 10_000);
+  heartbeat.unref?.();
   const daemon = new ReviewDaemon({
     spool,
     engine,
@@ -156,6 +161,7 @@ async function createDefaultRuntime(
   return {
     daemon,
     async dispose() {
+      clearInterval(heartbeat);
       reporter.stop();
       await reporter.flush();
       ledger.close();
