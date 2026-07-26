@@ -5,13 +5,12 @@ import { join } from "node:path";
 import { atomicWriteFile } from "./atomic-file.ts";
 import { withFileLock } from "./file-lock.ts";
 import { SkillActivityIndex } from "./skill-activity.ts";
-import { optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
+import { isErrno, isRecord, optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
 import { projectStorageDir } from "./store.ts";
 import {
   DEFAULT_SKILL_RETENTION_SESSIONS,
   DEFAULT_SKILL_REVIEW_INTERVAL,
   DEFAULT_SKILL_REVIEW_SIGNAL_THRESHOLD,
-  MAX_SKILL_CONTENT_CHARS,
   SKILL_STORE_VERSION,
   type ProjectSkill,
   type SkillMutationResult,
@@ -79,18 +78,10 @@ interface SkillStoreOptions {
   now?: () => Date;
 }
 
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
-
 function validateProposalId(id: string): string {
   const normalized = id.trim();
   if (!/^\d{14}-[0-9a-f]{8}$/u.test(normalized)) throw new Error("Invalid skill proposal id.");
   return normalized;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function emptyReviewState(): SkillReviewState {

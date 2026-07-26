@@ -444,20 +444,23 @@ test("review cadence uses signals, backoff, and branch-local state", async (t) =
   t.after(() => rm(base, { recursive: true, force: true }));
 
   for (let i = 0; i < 3; i++) await store.recordUserTurn("main");
-  assert.equal(await store.claimReviewIfDue("main", 3, 99), true);
-  assert.equal(await store.claimReviewIfDue("main", 3, 99), false);
-  await store.finishReview("main", false);
-  assert.equal(await store.claimReviewIfDue("main", 3, 99), false);
+  const failed = await store.claimReview("main", 3, 99);
+  assert.ok(failed);
+  assert.equal(await store.claimReview("main", 3, 99), undefined);
+  await store.finishReviewClaim("main", failed, false);
+  assert.equal(await store.claimReview("main", 3, 99), undefined);
   now = new Date(now.getTime() + 5 * 60_000 + 1);
-  assert.equal(await store.claimReviewIfDue("main", 3, 99), true);
-  await store.finishReview("main", true);
-  assert.equal(await store.claimReviewIfDue("main", 3, 99), false);
+  const retried = await store.claimReview("main", 3, 99);
+  assert.ok(retried);
+  await store.finishReviewClaim("main", retried, true);
+  assert.equal(await store.claimReview("main", 3, 99), undefined);
 
   await store.forkBranch("main", "experiment");
   await store.recordUserTurn("experiment", 4);
-  assert.equal(await store.claimReviewIfDue("experiment", 10, 4), true);
-  assert.equal(await store.claimReviewIfDue("main", 10, 4), false);
-  await store.finishReview("experiment", true);
+  const forked = await store.claimReview("experiment", 10, 4);
+  assert.ok(forked);
+  assert.equal(await store.claimReview("main", 10, 4), undefined);
+  await store.finishReviewClaim("experiment", forked, true);
 });
 
 test("fenced review success preserves activity recorded after its snapshot", async (t) => {

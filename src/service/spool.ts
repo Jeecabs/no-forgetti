@@ -1,10 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rename, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { atomicWriteFile } from "../atomic-file.ts";
+import { atomicWriteFile, durableUnlink, syncDirectoryStrict } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
+import { exactKeys, isErrno, isRecord } from "../state-validation.ts";
 import type { LedgerAttempt, ReviewLedger } from "./ledger.ts";
 import {
   decodeReviewJob,
@@ -93,17 +94,6 @@ export class ReviewSpoolConflictError extends Error {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
-  const actual = Object.keys(value);
-  if (actual.length !== keys.length || keys.some((key) => !Object.hasOwn(value, key)) || actual.some((key) => !keys.includes(key))) {
-    throw new Error("Invalid review spool record shape.");
-  }
-}
-
 function positiveInteger(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`Invalid ${label}.`);
   return value as number;
@@ -187,10 +177,6 @@ function checkedDeferDelayMs(value: number | undefined): number {
   if (value === undefined) return 0;
   if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid review defer delay.");
   return value;
-}
-
-function errno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function emptyRecovery(): RecoveryResult {
@@ -586,10 +572,10 @@ export class ReviewSpool {
     try {
       await rename(path, target);
       await chmod(target, 0o600);
-      await this.syncDirectory(dirname(path));
-      if (dirname(target) !== dirname(path)) await this.syncDirectory(dirname(target));
+      await syncDirectoryStrict(dirname(path));
+      if (dirname(target) !== dirname(path)) await syncDirectoryStrict(dirname(target));
     } catch (error) {
-      if (!errno(error, "ENOENT")) throw error;
+      if (!isErrno(error, "ENOENT")) throw error;
     }
   }
 
@@ -597,7 +583,7 @@ export class ReviewSpool {
     try {
       return await this.readQueue(this.queuePath(jobId));
     } catch (error) {
-      if (errno(error, "ENOENT")) return undefined;
+      if (isErrno(error, "ENOENT")) return undefined;
       await this.quarantineFile(this.queuePath(jobId));
       return undefined;
     }
@@ -607,7 +593,7 @@ export class ReviewSpool {
     try {
       return await this.readRunning(this.runningPath(jobId));
     } catch (error) {
-      if (errno(error, "ENOENT")) return undefined;
+      if (isErrno(error, "ENOENT")) return undefined;
       await this.quarantineFile(this.runningPath(jobId));
       return undefined;
     }
@@ -617,7 +603,7 @@ export class ReviewSpool {
     try {
       return await this.readOutcome(this.outcomePath(jobId));
     } catch (error) {
-      if (errno(error, "ENOENT")) return undefined;
+      if (isErrno(error, "ENOENT")) return undefined;
       await this.quarantineFile(this.outcomePath(jobId));
       return undefined;
     }
@@ -712,22 +698,6 @@ export class ReviewSpool {
   }
 
   private async remove(path: string): Promise<void> {
-    let removed = true;
-    await unlink(path).catch((error) => {
-      if (errno(error, "ENOENT")) removed = false;
-      else throw error;
-    });
-    if (!removed) return;
-    await this.syncDirectory(dirname(path));
-  }
-
-  private async syncDirectory(path: string): Promise<void> {
-    const directory = await open(path, "r").catch(() => undefined);
-    if (!directory) return;
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
+    await durableUnlink(path);
   }
 }

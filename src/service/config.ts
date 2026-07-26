@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+import { isRecord } from "../state-validation.ts";
+
 export const SERVICE_CONFIG_VERSION = 1;
 export const MAX_SERVICE_CONFIG_BYTES = 64 * 1024;
 
@@ -30,10 +32,6 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   mode: "embedded",
   evidenceTtlHours: 24,
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const extras = Object.keys(value).filter((key) => !allowed.includes(key));
@@ -116,7 +114,9 @@ export async function loadServiceConfig(agentDir = getAgentDir()): Promise<Servi
     return parseServiceConfig(JSON.parse(bytes.toString("utf8")) as unknown);
   } catch (error) {
     if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-      return DEFAULT_SERVICE_CONFIG;
+      // Never hand callers the shared module-level default; a single mutation
+      // would otherwise redefine the default for the rest of the process.
+      return { ...DEFAULT_SERVICE_CONFIG };
     }
     throw error;
   } finally {

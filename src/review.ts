@@ -3,6 +3,7 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 
 import { memoryCharCount } from "./context.ts";
 import { safeContextText } from "./security.ts";
+import { isRecord } from "./state-validation.ts";
 import {
   DEFAULT_MAX_CHARS,
   MEMORY_REFINEMENT_TARGET_RATIO,
@@ -14,10 +15,6 @@ import {
 
 export const MAX_TRANSCRIPT_CHARS = 32_000;
 export const MAX_TRANSCRIPT_USER_TURNS = 12;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function stripSkillScaffolding(text: string): string {
   return text.replace(/<skill\b[^>]*>[\s\S]*?<\/skill>\s*/giu, "").trim();
@@ -93,13 +90,28 @@ function reviewTurnChunks(entries: readonly SessionEntry[]): ReviewTurnChunk[] {
   return chunks;
 }
 
+/** Most recent bounded window, used when a review cursor no longer resolves. */
+function recentEntryWindow(entries: readonly SessionEntry[]): readonly SessionEntry[] {
+  const userIndexes = entries.flatMap((entry, index) =>
+    entry.type === "message" && entry.message.role === "user" ? [index] : []);
+  if (userIndexes.length <= MAX_TRANSCRIPT_USER_TURNS) return entries;
+  return entries.slice(userIndexes[userIndexes.length - MAX_TRANSCRIPT_USER_TURNS]!);
+}
+
 /**
  * Build the oldest bounded unreviewed window. Coverage advances only through
  * entries represented by this window, so later history is never skipped.
  */
 export function buildReviewEvidenceWindow(entries: readonly SessionEntry[], afterEntryId?: string): ReviewEvidenceWindow {
   const cursorIndex = afterEntryId ? entries.findIndex((entry) => entry.id === afterEntryId) : -1;
-  const scopedEntries = cursorIndex >= 0 ? entries.slice(cursorIndex + 1) : entries;
+  // A cursor that no longer resolves (compaction or fork dropped its entry) must
+  // not rewind coverage to the oldest turn, or the cursor would move backwards
+  // and every already-reviewed turn would be re-derived window by window.
+  const scopedEntries = cursorIndex >= 0
+    ? entries.slice(cursorIndex + 1)
+    : afterEntryId
+      ? recentEntryWindow(entries)
+      : entries;
   const selected: ReviewTurnChunk[] = [];
   let chars = 0;
   let userTurns = 0;

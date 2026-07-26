@@ -1,9 +1,10 @@
 import { open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { isRecord } from "../state-validation.ts";
 import { ProjectMemoryStore } from "../store.ts";
 import { STORE_FILE_BYTE_LIMIT, STORE_VERSION } from "../types.ts";
-import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-transaction.ts";
+import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-artifacts.ts";
 import type { ReviewJob, ReviewOutcome } from "./protocol.ts";
 
 export type AdmissionStatus = "applied" | "noop" | "stale" | "rejected";
@@ -34,10 +35,6 @@ interface ProjectMetadataRecord {
   version: number;
   projectRoot: string;
   projectKey: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 async function readBoundedJson(path: string): Promise<unknown> {

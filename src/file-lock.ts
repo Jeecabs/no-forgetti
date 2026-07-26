@@ -1,10 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
+import { isErrno } from "./state-validation.ts";
 
 function processIsAlive(owner: string): boolean {
   const pid = Number(owner.split(":", 1)[0]);

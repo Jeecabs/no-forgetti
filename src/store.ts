@@ -9,7 +9,7 @@ import { memoryCharCount } from "./context.ts";
 import { withFileLock } from "./file-lock.ts";
 import { projectKey } from "./project.ts";
 import { validateMemoryText } from "./security.ts";
-import { optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
+import { isErrno, isRecord, optionalIsoTimestamp, requireNonnegativeInteger } from "./state-validation.ts";
 import {
   DEFAULT_MAX_CHARS,
   DEFAULT_MAX_ENTRY_CHARS,
@@ -161,14 +161,6 @@ interface ReviewAdmissionTombstone extends ReviewAdmissionMetadata {
   originalIntentDigest: MemoryDigest;
   retiredAt: string;
   tombstoneDigest: MemoryDigest;
-}
-
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function canonicalJson(value: unknown): string {
@@ -599,7 +591,6 @@ export class ProjectMemoryStore {
   private readonly now: () => Date;
   private readonly admissionFailpoint?: StoreOptions["admissionFailpoint"];
   private readonly admissionScanLimit: number;
-  private readonly legacyReviewClaims = new Map<string, ReviewClaim>();
 
   constructor(projectRoot: string, options: StoreOptions = {}) {
     this.projectRoot = projectRoot;
@@ -1104,22 +1095,6 @@ export class ProjectMemoryStore {
       await this.atomicWrite(path, state);
       return true;
     });
-  }
-
-  async claimReviewIfDue(name: string, interval: number, signalThreshold: number, force = false): Promise<boolean> {
-    const branchName = this.validateBranchName(name);
-    const claim = await this.claimReview(branchName, interval, signalThreshold, force);
-    if (!claim) return false;
-    this.legacyReviewClaims.set(branchName, claim);
-    return true;
-  }
-
-  async finishReview(name: string, success: boolean): Promise<void> {
-    const branchName = this.validateBranchName(name);
-    const claim = this.legacyReviewClaims.get(branchName);
-    if (!claim) return;
-    this.legacyReviewClaims.delete(branchName);
-    await this.finishReviewClaim(branchName, claim, success);
   }
 
   private normalizeReviewOperation(operation: ReviewOperation): ReviewOperation {

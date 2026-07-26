@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 
 import { atomicWriteFile } from "./atomic-file.ts";
+import { isErrno, isRecord } from "./state-validation.ts";
 
 const VERSION = 1;
 const MAX_JSON_BYTES = 256 * 1024;
@@ -71,14 +72,6 @@ export interface ActivityInitialization {
 interface ActivityOptions {
   writeFile?: AtomicWriter;
   now?: () => Date;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function nonnegativeInteger(value: unknown, label: string): number {

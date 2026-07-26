@@ -734,7 +734,9 @@ export class ReviewDaemon {
       if (interrupted) return { status: "interrupted" };
       const actualError = renewalError ?? error;
       const classified = classifyReviewFailure(actualError, false);
-      if (classified.configurationBlock && !provenance) await this.budgetAccount.releaseCall();
+      // Absent provenance the provider never reported usage for this attempt, so
+      // the reserved call must return to the daily budget instead of leaking.
+      if (!provenance) await this.budgetAccount.releaseCall();
       const shouldRetry = classified.retryable && (classified.configurationBlock || claim.attempt < this.maxAttempts);
       const failure: ReviewFailure = {
         code: classified.code,
@@ -882,16 +884,29 @@ export class ReviewDaemon {
     } catch (error) {
       if (workSignal.aborted) return { status: "interrupted" };
       const classified = classifyReviewFailure(renewalError() ?? error);
-      // Elected result remains authoritative. Admission/spool publication must
-      // retry that result rather than electing or dispatching another provider attempt.
+      // Elected result remains authoritative: publication retries that result
+      // rather than electing or dispatching another provider attempt. The
+      // attempt ceiling still applies, so a deterministically failing committer
+      // dead-letters instead of re-deferring forever.
+      const shouldRetry = claim.attempt < this.maxAttempts;
       const failure: ReviewFailure = {
         code: classified.code,
         message: classified.message,
-        retryable: true,
+        retryable: shouldRetry,
       };
-      this.emit({ type: "retry", jobId: claim.job.id, attempt: claim.attempt, failure });
-      await this.deferClaim(claim, DEFAULT_REVIEW_RETRY_BASE_MS);
-      return { status: "retry", failure };
+      if (shouldRetry) {
+        this.emit({ type: "retry", jobId: claim.job.id, attempt: claim.attempt, failure });
+        await this.deferClaim(claim, DEFAULT_REVIEW_RETRY_BASE_MS);
+        return { status: "retry", failure };
+      }
+      const terminal = { ...failure, retryable: false };
+      await this.spool.finish(claim, createReviewOutcome(claim.job, {
+        status: "failed",
+        error: terminal,
+        provenance: decision.outcome.provenance,
+      }));
+      this.emit({ type: "failed", jobId: claim.job.id, attempt: claim.attempt, failure: terminal });
+      return { status: "failed", failure: terminal };
     }
   }
 

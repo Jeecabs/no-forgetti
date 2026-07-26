@@ -71,7 +71,8 @@ const TOOL_NAME = "project_memory";
 const SKILL_TOOL_NAME = "project_skill";
 const REVIEW_TIMEOUT_MS = 60_000;
 const SERVICE_MONITOR_POLL_MS = 15_000;
-const EXTENSION_VERSION = "0.2.0";
+/** Stamped into durable provenance; tests/manifest.test.ts pins it to package.json. */
+export const EXTENSION_VERSION = "0.2.0";
 
 export interface ExtensionDependencies {
   isNonPrimaryAgent: typeof isNonPrimaryAgent;
@@ -635,8 +636,6 @@ export function activateProjectMemoryExtension(
     const memoryStore = requireStore();
     const reviewBranchName = activeName;
     const reviewAfterEntryId = reviewCursorId;
-    const reviewEvidence = buildReviewEvidenceWindow(ctx.sessionManager.getBranch(), reviewAfterEntryId);
-    const throughEntryId = reviewEvidence.throughEntryId;
     const controller = new AbortController();
     reviewController = controller;
     reviewPromise = (async () => {
@@ -651,19 +650,26 @@ export function activateProjectMemoryExtension(
           force,
         );
         if (!claimed || controller.signal.aborted) return;
+        // Building the window walks the whole session branch, so only pay for it
+        // once the cadence claim proves a review is actually due.
+        const reviewEvidence = buildReviewEvidenceWindow(ctx.sessionManager.getBranch(), reviewAfterEntryId);
+        const throughEntryId = reviewEvidence.throughEntryId;
         const branch = await memoryStore.loadBranch(reviewBranchName);
         if (serviceConfig.mode !== "embedded") {
-          if (!throughEntryId || !reviewEvidence.transcript) {
-            throw new Error("No bounded completed evidence is available to enqueue.");
-          }
+          const evidence = throughEntryId && reviewEvidence.transcript
+            ? { throughEntryId, transcript: reviewEvidence.transcript }
+            : undefined;
           try {
-            await enqueueReviewJob(ctx, branch, reviewEvidence.transcript, throughEntryId);
+            // Shadow mode must degrade to the embedded review rather than fail
+            // the whole review when no bounded evidence can be enqueued.
+            if (!evidence) throw new Error("No bounded completed evidence is available to enqueue.");
+            await enqueueReviewJob(ctx, branch, evidence.transcript, evidence.throughEntryId);
           } catch (error) {
             if (serviceConfig.mode === "external") throw error;
             if (ctx.hasUI) ctx.ui.notify(`Project memory shadow enqueue failed: ${errorMessage(error)}`, "warning");
           }
-          if (serviceConfig.mode === "external") {
-            appendReviewCursor(reviewBranchName, throughEntryId, "queued");
+          if (serviceConfig.mode === "external" && evidence) {
+            appendReviewCursor(reviewBranchName, evidence.throughEntryId, "queued");
             success = true;
             if (ctx.hasUI) ctx.ui.notify("Project memory review queued for the No Forgetti service.", "info");
             return;
