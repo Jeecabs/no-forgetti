@@ -2,13 +2,22 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-07-26
+
+- **Breaking:** add embedded, shadow, and opt-in external memory-review authority modes.
+- Add a separately runnable `no-forgetti review --once` worker and durable local review spool with deterministic jobs, fenced leases, crash recovery, strict schemas, redaction, usage/cost provenance, and daily budgets.
+- Add an optional SQLite WAL shadow ledger for jobs, attempts, and outcomes; existing project JSON remains canonical.
+- Add dedicated persistent reviewer profiles without placing credentials in jobs, logs, or outcomes.
+- Add proposal-only tool-less external review plus CAS-guarded JSON admission, immutable receipts, stale rejection, and next-session review-job provenance.
+- Fix bounded review coverage to process oldest unreviewed turns and advance only through included evidence.
+- Add exact memory branch/entry digests, stale-plan CAS, bounded pre-parse reads, append-only review history, and inverse-CAS undo that preserves unrelated later writes.
+- Keep 4,000 characters as the hard limit while making the 3,000-character working target advisory; safe no-op reviews no longer fail or force semantic loss.
+- Add sanitized append-graph capture primitives and typed evidence/claim/projection policy foundations for future trajectory intelligence.
+- Add compatibility shims for persisted legacy tool arguments and document the external curator, backfill, privacy, and memory-science architecture.
 - Expand project memory's hard limit from 2,200 to 4,000 characters.
-- Start review-driven refinement at a 3,000-character working target and give the reviewer exact capacity guidance.
-- Apply validated memory review batches automatically; remove memory pending/approval commands and discard obsolete staged proposals.
-- Reload active project memory at every turn boundary so writes and refinements require no manual refresh.
-- Add roll-forward high/normal/low memory importance with explicit assessment provenance.
-- Target background refinements by stable entry ID, including explicit merge and assessment operations.
-- Enforce working-target convergence: reviews cannot cross it from below and must shrink memory at or above it.
+- Apply validated embedded memory review batches automatically; remove obsolete memory pending/approval commands.
+- Reload active project memory at every turn boundary so foreground writes and accepted refinements require no manual refresh.
+- Add roll-forward high/normal/low memory importance with explicit assessment provenance and ID-targeted merge/assessment operations.
 
 ## 0.1.0 — 2026-07-15
 

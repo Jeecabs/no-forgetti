@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 interface Manifest {
+  name?: string;
+  version?: string;
+  bin?: Record<string, string>;
   keywords?: string[];
   files?: string[];
   dependencies?: Record<string, string>;
@@ -14,8 +17,11 @@ interface Manifest {
   pi?: { extensions?: string[] };
 }
 
-test("package manifest exposes only the extension runtime surface", async () => {
+test("package manifest preserves No Forgetti identity and exposes extension plus service CLI", async () => {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as Manifest;
+  assert.equal(manifest.name, "no-forgetti");
+  assert.equal(manifest.version, "0.2.0");
+  assert.deepEqual(manifest.bin, { "no-forgetti": "./bin/no-forgetti.mjs" });
   assert.ok(manifest.keywords?.includes("pi-package"));
   assert.deepEqual(manifest.pi?.extensions, ["./src/index.ts"]);
   assert.equal(manifest.dependencies, undefined);
@@ -27,6 +33,9 @@ test("package manifest exposes only the extension runtime surface", async () => 
     "typebox",
   ]);
   assert.ok(manifest.files?.includes("src"));
+  assert.ok(manifest.files?.includes("bin"));
+  assert.ok(manifest.files?.includes("docs"));
+  assert.ok(manifest.files?.includes("CONTEXT.md"));
   assert.ok(manifest.files?.includes("assets"));
   assert.ok(manifest.files?.includes("LICENSE"));
   assert.ok(!manifest.files?.some((path) => path.includes("test")));

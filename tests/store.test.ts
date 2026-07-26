@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { canonicalPath, resolveProjectRoot } from "../src/project.ts";
-import { ProjectMemoryStore } from "../src/store.ts";
-import type { ReviewOperation } from "../src/types.ts";
+import { memoryBranchDigest, memoryEntryDigest, ProjectMemoryStore } from "../src/store.ts";
+import { STORE_FILE_BYTE_LIMIT, type ReviewOperation } from "../src/types.ts";
 
 async function fixture(options: { maxChars?: number; now?: () => Date } = {}) {
   const base = await mkdtemp(join(tmpdir(), "pi-project-memory-"));
@@ -180,44 +180,169 @@ test("review batch consolidates atomically against final capacity", async (t) =>
   assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), ["Project commands use pnpm."]);
 });
 
-test("review batches cannot cross the working target from below", async (t) => {
-  const { base, store } = await fixture({ maxChars: 100 });
+test("computes exact stable SHA-256 digests for branches and entries", async (t) => {
+  const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
-  await store.applyOperation("main", { action: "add", content: "a".repeat(20) });
+  await store.applyOperation("main", { action: "add", content: "First exact fact.", importance: "high" }, "session-1");
+  await store.applyOperation("main", { action: "add", content: "Second exact fact." });
+  const branch = await store.loadBranch("main");
+  const entry = branch.entries.at(0)!;
 
-  const results = await store.applyOperations("main", [{
-    action: "add",
-    content: "b".repeat(60),
+  assert.match(memoryEntryDigest(entry), /^[a-f0-9]{64}$/u);
+  assert.equal(store.entryDigest({ ...entry }), memoryEntryDigest(entry));
+  assert.equal(store.branchDigest({ ...branch, entries: branch.entries.map((item) => ({ ...item })) }), memoryBranchDigest(branch));
+  assert.notEqual(memoryEntryDigest({ ...entry, sourceSessionId: "session-2" }), memoryEntryDigest(entry));
+  assert.notEqual(memoryEntryDigest({ ...entry, importance: "normal" }), memoryEntryDigest(entry));
+  assert.notEqual(memoryBranchDigest({ ...branch, updatedAt: new Date(0).toISOString() }), memoryBranchDigest(branch));
+  assert.notEqual(memoryBranchDigest({ ...branch, entries: [...branch.entries].reverse() }), memoryBranchDigest(branch));
+});
+
+test("CAS review apply rejects a stale exact branch digest", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const added = await store.applyOperation("main", { action: "add", content: "Stable fact." });
+  const entryId = added.branch.entries.at(0)!.id;
+  const expectedDigest = memoryBranchDigest(added.branch);
+  await store.applyOperation("main", { action: "add", content: "Later foreground fact." });
+
+  const stale = await store.applyOperations(
+    "main",
+    [{ action: "assess", entryId, importance: "high" }],
+    undefined,
+    "background_review",
+    expectedDigest,
+  );
+  assert.equal(stale.length, 1);
+  assert.equal(stale.at(0)?.changed, false);
+  assert.match(stale.at(0)?.message ?? "", /Stale memory snapshot/u);
+  assert.equal((await store.loadBranch("main")).entries.at(0)?.importance, "normal");
+
+  const current = await store.loadBranch("main");
+  const applied = await store.applyOperations(
+    "main",
+    [{ action: "assess", entryId, importance: "high" }],
+    undefined,
+    "background_review",
+    memoryBranchDigest(current),
+  );
+  assert.equal(applied.at(0)?.changed, true);
+});
+
+test("keeps an append-only multi-revision review and undo journal", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const first = await store.applyOperation("main", { action: "add", content: "First original." });
+  const second = await store.applyOperation("main", { action: "add", content: "Second original." });
+  const firstId = first.branch.entries.at(0)!.id;
+  const secondId = second.branch.entries.at(1)!.id;
+
+  await store.applyOperations("main", [{
+    action: "replace",
+    entryId: firstId,
+    content: "First reviewed.",
+    importance: "high",
+  }]);
+  await store.applyOperations("main", [{
+    action: "replace",
+    entryId: secondId,
+    content: "Second reviewed.",
     importance: "normal",
   }]);
 
-  assert.match(results.at(0)?.message ?? "", /working target of 75 characters/u);
-  assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), ["a".repeat(20)]);
+  const journalDir = join(store.projectDir, "revisions", "main");
+  assert.equal((await readdir(journalDir)).length, 2);
+  assert.deepEqual((await store.undoReview("main")).branch.entries.map((entry) => entry.text), [
+    "First reviewed.",
+    "Second original.",
+  ]);
+  assert.equal((await readdir(journalDir)).length, 3, "undo appends rather than deleting review commit");
+  assert.deepEqual((await store.undoReview("main")).branch.entries.map((entry) => entry.text), [
+    "First original.",
+    "Second original.",
+  ]);
+  await assert.rejects(store.undoReview("main"), /No automatic memory review/u);
+
+  const files = (await readdir(journalDir)).sort();
+  assert.equal(files.length, 4);
+  const kinds = await Promise.all(files.map(async (file) => {
+    const record = JSON.parse(await readFile(join(journalDir, file), "utf8")) as { kind?: unknown };
+    return record.kind;
+  }));
+  assert.deepEqual(kinds, ["review", "review", "undo", "undo"]);
 });
 
-test("review batches above the working target must make net progress", async (t) => {
-  const { base, store } = await fixture({ maxChars: 100 });
+test("inverse-CAS undo preserves later foreground writes and rejects overwritten review entries", async (t) => {
+  const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
-  const added = await store.applyOperation("main", { action: "add", content: "a".repeat(80) });
+  const added = await store.applyOperation("main", { action: "add", content: "Original durable fact." });
   const entryId = added.branch.entries.at(0)!.id;
-
-  const rejected = await store.applyOperations("main", [{ action: "assess", entryId, importance: "high" }]);
-  const rejection = rejected.at(0);
-  assert.ok(rejection);
-  assert.match(rejection.message, /must shrink memory/u);
-
-  const accepted = await store.applyOperations("main", [{
+  await store.applyOperations("main", [{
     action: "replace",
     entryId,
-    content: "a".repeat(79),
+    content: "Reviewed durable fact.",
     importance: "high",
   }]);
-  const acceptedResult = accepted.at(0);
-  assert.ok(acceptedResult);
-  assert.equal(acceptedResult.changed, true);
-  const refinedEntry = (await store.loadBranch("main")).entries.at(0);
-  assert.ok(refinedEntry);
-  assert.equal(refinedEntry.text.length, 79);
+  await store.applyOperation("main", { action: "add", content: "Later foreground addition." });
+
+  const undone = await store.undoReview("main");
+  assert.deepEqual(undone.branch.entries.map((entry) => entry.text), [
+    "Original durable fact.",
+    "Later foreground addition.",
+  ]);
+
+  await store.applyOperations("main", [{
+    action: "replace",
+    entryId,
+    content: "Second reviewed fact.",
+    importance: "normal",
+  }]);
+  await store.applyOperation("main", {
+    action: "replace",
+    oldText: "Second reviewed",
+    content: "Later foreground correction.",
+  });
+  await assert.rejects(store.undoReview("main"), /changed after the review/u);
+  assert.deepEqual((await store.loadBranch("main")).entries.map((entry) => entry.text), [
+    "Later foreground correction.",
+    "Later foreground addition.",
+  ]);
+});
+
+test("treats 3,000 characters as advisory while enforcing the 4,000 hard cap", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  for (const content of ["a", "b", "c", "d"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+  const entryId = (await store.loadBranch("main")).entries.at(0)!.id;
+
+  const assessment = await store.applyOperations("main", [{ action: "assess", entryId, importance: "high" }]);
+  assert.equal(assessment.at(0)?.changed, true, "review need not shrink memory above advisory target");
+
+  const filled = await store.applyOperations("main", [{
+    action: "add",
+    content: "e".repeat(800),
+    importance: "normal",
+  }]);
+  assert.equal(filled.at(0)?.changed, true);
+  assert.equal((await store.loadBranch("main")).entries.reduce((total, entry) => total + entry.text.length, 0), 4_000);
+
+  const rejected = await store.applyOperations("main", [{ action: "add", content: "f", importance: "normal" }]);
+  assert.match(rejected.at(0)?.message ?? "", /exceed 4000 characters/u);
+  assert.equal((await store.loadBranch("main")).entries.length, 5);
+});
+
+test("does not allow configuration to raise the 4,000-character hard cap", async (t) => {
+  const { base, store } = await fixture({ maxChars: 10_000 });
+  t.after(() => rm(base, { recursive: true, force: true }));
+  assert.equal(store.maxChars, 4_000);
+  for (const content of ["a", "b", "c", "d", "e"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+  await assert.rejects(
+    store.applyOperation("main", { action: "add", content: "f" }),
+    /exceed 4000 characters/u,
+  );
 });
 
 test("background review merges explicitly targeted entries", async (t) => {
@@ -333,6 +458,18 @@ test("review cadence uses signals, backoff, and branch-local state", async (t) =
   assert.equal(await store.claimReviewIfDue("experiment", 10, 4), true);
   assert.equal(await store.claimReviewIfDue("main", 10, 4), false);
   await store.finishReview("experiment", true);
+});
+
+test("rejects over-limit state bytes before JSON parsing", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const path = join(store.projectDir, "branches", "main.json");
+  await writeFile(path, Buffer.alloc(STORE_FILE_BYTE_LIMIT + 1, 0x20));
+
+  await assert.rejects(
+    store.loadBranch("main"),
+    new RegExp(`exceeds ${STORE_FILE_BYTE_LIMIT} byte limit before parsing`, "u"),
+  );
 });
 
 test("rejects oversized and future-version on-disk branches", async (t) => {

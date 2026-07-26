@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -14,9 +14,10 @@ import {
   DEFAULT_MAX_CHARS,
   DEFAULT_MAX_ENTRY_CHARS,
   MAIN_MEMORY,
-  MEMORY_REFINEMENT_TARGET_RATIO,
+  STORE_FILE_BYTE_LIMIT,
   STORE_VERSION,
   type MemoryBranch,
+  type MemoryDigest,
   type MemoryEntry,
   type MemoryImportance,
   type MemoryOperation,
@@ -36,6 +37,9 @@ const BRANCH_NAME = /^[a-z][a-z0-9_-]{0,63}$/u;
 const ENTRY_ID = /^[a-zA-Z0-9_-]{1,128}$/u;
 const MEMORY_IMPORTANCES: readonly unknown[] = ["high", "normal", "low"];
 const EXISTING_REVIEW_ACTIONS = new Set(["remove", "replace", "merge", "assess"]);
+const DIGEST = /^[a-f0-9]{64}$/u;
+const REVISION_ID = /^[a-f0-9-]{36}$/u;
+const REVISION_FILE = /^(\d{12})-([a-f0-9-]{36})\.json$/u;
 
 interface StoreOptions {
   storageRoot?: string;
@@ -59,12 +63,96 @@ interface ReviewMutationRequest {
   writeOrigin: MemoryWriteOrigin;
 }
 
+interface AddedRevisionChange {
+  kind: "add";
+  entryId: string;
+  afterDigest: MemoryDigest;
+}
+
+interface RemovedRevisionChange {
+  kind: "remove";
+  entryId: string;
+  before: MemoryEntry;
+  beforeIndex: number;
+}
+
+interface UpdatedRevisionChange {
+  kind: "update";
+  entryId: string;
+  before: MemoryEntry;
+  afterDigest: MemoryDigest;
+}
+
+type RevisionChange = AddedRevisionChange | RemovedRevisionChange | UpdatedRevisionChange;
+
+interface ReviewRevision {
+  version: number;
+  kind: "review";
+  sequence: number;
+  id: string;
+  branchName: string;
+  committedAt: string;
+  beforeDigest: MemoryDigest;
+  afterDigest: MemoryDigest;
+  changes: RevisionChange[];
+}
+
+interface UndoRevision {
+  version: number;
+  kind: "undo";
+  sequence: number;
+  id: string;
+  branchName: string;
+  committedAt: string;
+  reviewRevisionId: string;
+  beforeDigest: MemoryDigest;
+  afterDigest: MemoryDigest;
+}
+
+type RevisionRecord = ReviewRevision | UndoRevision;
+
 function isErrno(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Cannot digest a non-finite number.");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (isRecord(value)) {
+    const fields = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`);
+    return `{${fields.join(",")}}`;
+  }
+  throw new Error(`Cannot digest unsupported value type '${typeof value}'.`);
+}
+
+function exactDigest(value: unknown): MemoryDigest {
+  return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
+/** SHA-256 over every persisted memory-entry field using canonical key ordering. */
+export function memoryEntryDigest(entry: MemoryEntry): MemoryDigest {
+  return exactDigest(entry);
+}
+
+/** SHA-256 over every persisted branch field and ordered entry. */
+export function memoryBranchDigest(branch: MemoryBranch): MemoryDigest {
+  return exactDigest(branch);
+}
+
+function requireDigest(value: unknown, label: string): MemoryDigest {
+  if (typeof value !== "string" || !DIGEST.test(value)) throw new Error(`Invalid ${label} digest.`);
+  return value;
 }
 
 function parseImportance(value: unknown, fallback?: MemoryImportance): MemoryImportance | undefined {
@@ -158,6 +246,104 @@ function parseReviewState(value: unknown): ReviewState {
   };
 }
 
+function parseRevisionChange(value: unknown): RevisionChange {
+  if (!isRecord(value) || typeof value.entryId !== "string" || !ENTRY_ID.test(value.entryId)) {
+    throw new Error("Invalid memory revision change.");
+  }
+  if (value.kind === "add") {
+    return { kind: "add", entryId: value.entryId, afterDigest: requireDigest(value.afterDigest, "memory revision entry") };
+  }
+  if (value.kind === "remove") {
+    const before = parseMemoryEntry(value.before);
+    if (before.id !== value.entryId) throw new Error("Memory revision entry ID mismatch.");
+    return {
+      kind: "remove",
+      entryId: value.entryId,
+      before,
+      beforeIndex: requireNonnegativeInteger(value.beforeIndex, "memory revision entry index"),
+    };
+  }
+  if (value.kind === "update") {
+    const before = parseMemoryEntry(value.before);
+    if (before.id !== value.entryId) throw new Error("Memory revision entry ID mismatch.");
+    return {
+      kind: "update",
+      entryId: value.entryId,
+      before,
+      afterDigest: requireDigest(value.afterDigest, "memory revision entry"),
+    };
+  }
+  throw new Error("Invalid memory revision change kind.");
+}
+
+function parseRevisionRecord(
+  value: unknown,
+  expectedBranchName: string,
+  expectedSequence: number,
+  expectedId: string,
+): RevisionRecord {
+  if (!isRecord(value) || value.version !== STORE_VERSION) throw new Error("Invalid or unsupported memory revision.");
+  if (
+    value.sequence !== expectedSequence
+    || value.id !== expectedId
+    || value.branchName !== expectedBranchName
+    || !REVISION_ID.test(expectedId)
+  ) {
+    throw new Error("Memory revision file mismatch.");
+  }
+  const committedAt = optionalIsoTimestamp(value.committedAt, "memory revision timestamp");
+  if (!committedAt) throw new Error("Memory revision requires a commit timestamp.");
+  const common = {
+    version: STORE_VERSION,
+    sequence: expectedSequence,
+    id: expectedId,
+    branchName: expectedBranchName,
+    committedAt,
+    beforeDigest: requireDigest(value.beforeDigest, "memory revision before-branch"),
+    afterDigest: requireDigest(value.afterDigest, "memory revision after-branch"),
+  };
+  if (value.kind === "review") {
+    if (!Array.isArray(value.changes) || value.changes.length === 0 || value.changes.length > 32) {
+      throw new Error("Invalid memory review revision changes.");
+    }
+    const changes = value.changes.map(parseRevisionChange);
+    if (new Set(changes.map((change) => change.entryId)).size !== changes.length) {
+      throw new Error("Memory review revision contains duplicate entry changes.");
+    }
+    return { ...common, kind: "review", changes };
+  }
+  if (value.kind === "undo") {
+    if (typeof value.reviewRevisionId !== "string" || !REVISION_ID.test(value.reviewRevisionId)) {
+      throw new Error("Invalid memory undo revision target.");
+    }
+    return { ...common, kind: "undo", reviewRevisionId: value.reviewRevisionId };
+  }
+  throw new Error("Invalid memory revision kind.");
+}
+
+function revisionChanges(before: MemoryBranch, after: MemoryBranch): RevisionChange[] {
+  const beforeById = new Map(before.entries.map((entry, index) => [entry.id, { entry, index }]));
+  const afterById = new Map(after.entries.map((entry) => [entry.id, entry]));
+  const changes: RevisionChange[] = [];
+  for (const [entryId, previous] of beforeById) {
+    const current = afterById.get(entryId);
+    if (!current) {
+      changes.push({ kind: "remove", entryId, before: { ...previous.entry }, beforeIndex: previous.index });
+    } else if (memoryEntryDigest(previous.entry) !== memoryEntryDigest(current)) {
+      changes.push({ kind: "update", entryId, before: { ...previous.entry }, afterDigest: memoryEntryDigest(current) });
+    }
+  }
+  for (const entry of after.entries) {
+    if (!beforeById.has(entry.id)) changes.push({ kind: "add", entryId: entry.id, afterDigest: memoryEntryDigest(entry) });
+  }
+  return changes;
+}
+
+function positiveIntegerLimit(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer.`);
+  return value;
+}
+
 function defaultStorageRoot(): string {
   return getAgentDir();
 }
@@ -189,8 +375,8 @@ export class ProjectMemoryStore {
     this.revisionsDir = join(this.projectDir, "revisions");
     this.metadataPath = join(this.projectDir, "project.json");
     this.lockPath = join(this.projectDir, ".lock");
-    this.maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
-    this.maxEntryChars = options.maxEntryChars ?? DEFAULT_MAX_ENTRY_CHARS;
+    this.maxChars = Math.min(DEFAULT_MAX_CHARS, positiveIntegerLimit(options.maxChars ?? DEFAULT_MAX_CHARS, "Memory character limit"));
+    this.maxEntryChars = positiveIntegerLimit(options.maxEntryChars ?? DEFAULT_MAX_ENTRY_CHARS, "Memory entry character limit");
     this.now = options.now ?? (() => new Date());
   }
 
@@ -245,6 +431,14 @@ export class ProjectMemoryStore {
       throw new Error("Memory branch names must match [a-z][a-z0-9_-]{0,63}.");
     }
     return normalized;
+  }
+
+  branchDigest(branch: MemoryBranch): MemoryDigest {
+    return memoryBranchDigest(branch);
+  }
+
+  entryDigest(entry: MemoryEntry): MemoryDigest {
+    return memoryEntryDigest(entry);
   }
 
   async loadBranch(name: string): Promise<MemoryBranch> {
@@ -316,11 +510,24 @@ export class ProjectMemoryStore {
     operations: ReviewOperation[],
     sourceSessionId?: string,
     writeOrigin: MemoryWriteOrigin = "background_review",
+    expectedBranchDigest?: MemoryDigest,
   ): Promise<MutationResult[]> {
     const branchName = this.validateBranchName(name);
     return this.withLock(async () => {
       const original = parseMemoryBranch(await this.readJson(this.branchPath(branchName)), branchName);
       this.assertLoadedBranch(original);
+      if (expectedBranchDigest !== undefined) {
+        const expected = requireDigest(expectedBranchDigest, "expected memory branch");
+        const actual = memoryBranchDigest(original);
+        if (expected !== actual) {
+          return [{
+            changed: false,
+            message: `Review batch rejected; memory unchanged. Stale memory snapshot (${expected} != ${actual}).`,
+            branch: original,
+          }];
+        }
+      }
+
       let branch = original;
       const results: MutationResult[] = [];
       let changed = false;
@@ -331,7 +538,7 @@ export class ProjectMemoryStore {
           changed ||= result.changed;
           results.push(result);
         }
-        this.assertReviewCapacity(original, branch);
+        this.assertReviewCapacity(branch);
       } catch (error) {
         return [{
           changed: false,
@@ -340,8 +547,11 @@ export class ProjectMemoryStore {
         }];
       }
       if (changed) {
-        await this.atomicWrite(this.revisionPath(branchName), original);
+        const changes = revisionChanges(original, branch);
+        if (changes.length === 0) throw new Error("Changed memory review produced no journal changes.");
+        await this.readRevisionRecords(branchName);
         await this.atomicWrite(this.branchPath(branchName), branch);
+        await this.appendReviewRevision(branchName, original, branch, changes);
       }
       return results;
     });
@@ -350,12 +560,20 @@ export class ProjectMemoryStore {
   async undoReview(name: string): Promise<MutationResult> {
     const branchName = this.validateBranchName(name);
     return this.withLock(async () => {
-      const path = this.revisionPath(branchName);
-      if (!await this.exists(path)) throw new Error(`No automatic memory review is available to undo for '${branchName}'.`);
-      const previous = parseMemoryBranch(await this.readJson(path), branchName);
+      const records = await this.readRevisionRecords(branchName);
+      const undone = new Set(records.filter((record): record is UndoRevision => record.kind === "undo")
+        .map((record) => record.reviewRevisionId));
+      const revision = records
+        .filter((record): record is ReviewRevision => record.kind === "review" && !undone.has(record.id))
+        .at(-1);
+      if (!revision) throw new Error(`No automatic memory review is available to undo for '${branchName}'.`);
+
+      const current = parseMemoryBranch(await this.readJson(this.branchPath(branchName)), branchName);
+      this.assertLoadedBranch(current);
+      const previous = this.inverseReviewRevision(current, revision);
       this.assertLoadedBranch(previous);
       await this.atomicWrite(this.branchPath(branchName), previous);
-      await unlink(path).catch(() => undefined);
+      await this.appendUndoRevision(branchName, revision.id, current, previous);
       return { changed: true, message: "Last automatic memory review undone.", branch: previous };
     });
   }
@@ -624,20 +842,46 @@ export class ProjectMemoryStore {
     return { changed: true, message: "Memory replaced.", branch: next };
   }
 
-  private assertReviewCapacity(before: MemoryBranch, after: MemoryBranch): void {
-    this.assertCapacity(after);
-    const target = Math.max(1, Math.floor(this.maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
-    const beforeChars = memoryCharCount(before);
-    const afterChars = memoryCharCount(after);
-    if (beforeChars < target) {
-      if (afterChars > target) {
-        throw new Error(`Project memory review would exceed the working target of ${target} characters (${afterChars}/${target}).`);
+  private inverseReviewRevision(current: MemoryBranch, revision: ReviewRevision): MemoryBranch {
+    const entries = current.entries.map((entry) => ({ ...entry }));
+    const stale = (entryId: string): never => {
+      throw new Error(`Cannot undo automatic memory review: entry '${entryId}' changed after the review.`);
+    };
+
+    for (const change of revision.changes) {
+      const match = entries.find((entry) => entry.id === change.entryId);
+      if (change.kind === "remove") {
+        if (match) stale(change.entryId);
+      } else if (!match || memoryEntryDigest(match) !== change.afterDigest) {
+        stale(change.entryId);
       }
-      return;
     }
-    if (afterChars >= beforeChars) {
-      throw new Error(`Project memory review must shrink memory above the ${target}-character working target (${beforeChars}→${afterChars}).`);
+
+    const addedIds = new Set(revision.changes
+      .filter((change): change is AddedRevisionChange => change.kind === "add")
+      .map((change) => change.entryId));
+    let restored = entries.filter((entry) => !addedIds.has(entry.id));
+    for (const change of revision.changes) {
+      if (change.kind !== "update") continue;
+      const index = restored.findIndex((entry) => entry.id === change.entryId);
+      if (index < 0) stale(change.entryId);
+      restored[index] = { ...change.before };
     }
+    const removals = revision.changes
+      .filter((change): change is RemovedRevisionChange => change.kind === "remove")
+      .sort((a, b) => a.beforeIndex - b.beforeIndex);
+    for (const change of removals) {
+      restored.splice(Math.min(change.beforeIndex, restored.length), 0, { ...change.before });
+    }
+
+    const previous: MemoryBranch = { ...current, updatedAt: this.timestamp(), entries: restored };
+    this.assertCapacity(previous);
+    return previous;
+  }
+
+  private assertReviewCapacity(after: MemoryBranch): void {
+    // 3,000 characters is a reviewer prompt target, not a storage invariant.
+    this.assertCapacity(after);
   }
 
   private assertCapacity(branch: MemoryBranch): void {
@@ -682,8 +926,102 @@ export class ProjectMemoryStore {
     return join(this.reviewsDir, `${name}.json`);
   }
 
-  private revisionPath(name: string): string {
-    return join(this.revisionsDir, `${name}.json`);
+  private revisionDir(name: string): string {
+    return join(this.revisionsDir, name);
+  }
+
+  private async readRevisionRecords(name: string): Promise<RevisionRecord[]> {
+    const directory = this.revisionDir(name);
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return [];
+      throw error;
+    }
+    const files = entries
+      .filter((entry) => entry.isFile() && REVISION_FILE.test(entry.name))
+      .map((entry) => {
+        const match = REVISION_FILE.exec(entry.name)!;
+        return { name: entry.name, sequence: Number(match[1]), id: match[2]! };
+      })
+      .sort((a, b) => a.sequence - b.sequence);
+    const records: RevisionRecord[] = [];
+    const seenSequences = new Set<number>();
+    const reviewIds = new Set<string>();
+    const undoneReviewIds = new Set<string>();
+    for (const file of files) {
+      if (
+        !Number.isSafeInteger(file.sequence)
+        || file.sequence !== records.length + 1
+        || seenSequences.has(file.sequence)
+      ) {
+        throw new Error("Invalid, missing, or duplicate memory revision sequence.");
+      }
+      seenSequences.add(file.sequence);
+      const record = parseRevisionRecord(await this.readJson(join(directory, file.name)), name, file.sequence, file.id);
+      if (record.kind === "review") {
+        reviewIds.add(record.id);
+      } else {
+        if (!reviewIds.has(record.reviewRevisionId) || undoneReviewIds.has(record.reviewRevisionId)) {
+          throw new Error("Memory undo revision targets an unavailable review revision.");
+        }
+        undoneReviewIds.add(record.reviewRevisionId);
+      }
+      records.push(record);
+    }
+    return records;
+  }
+
+  private async appendReviewRevision(
+    name: string,
+    before: MemoryBranch,
+    after: MemoryBranch,
+    changes: RevisionChange[],
+  ): Promise<void> {
+    const { id, sequence, path } = await this.nextRevision(name);
+    const revision: ReviewRevision = {
+      version: STORE_VERSION,
+      kind: "review",
+      sequence,
+      id,
+      branchName: name,
+      committedAt: this.timestamp(),
+      beforeDigest: memoryBranchDigest(before),
+      afterDigest: memoryBranchDigest(after),
+      changes,
+    };
+    await this.writeNewJson(path, revision);
+  }
+
+  private async appendUndoRevision(
+    name: string,
+    reviewRevisionId: string,
+    before: MemoryBranch,
+    after: MemoryBranch,
+  ): Promise<void> {
+    const { id, sequence, path } = await this.nextRevision(name);
+    const revision: UndoRevision = {
+      version: STORE_VERSION,
+      kind: "undo",
+      sequence,
+      id,
+      branchName: name,
+      committedAt: this.timestamp(),
+      reviewRevisionId,
+      beforeDigest: memoryBranchDigest(before),
+      afterDigest: memoryBranchDigest(after),
+    };
+    await this.writeNewJson(path, revision);
+  }
+
+  private async nextRevision(name: string): Promise<{ id: string; sequence: number; path: string }> {
+    const records = await this.readRevisionRecords(name);
+    const sequence = (records.at(-1)?.sequence ?? 0) + 1;
+    if (!Number.isSafeInteger(sequence) || sequence > 999_999_999_999) throw new Error("Memory revision sequence exhausted.");
+    const id = randomUUID();
+    const filename = `${String(sequence).padStart(12, "0")}-${id}.json`;
+    return { id, sequence, path: join(this.revisionDir(name), filename) };
   }
 
   private timestamp(): string {
@@ -691,7 +1029,33 @@ export class ProjectMemoryStore {
   }
 
   private async readJson(path: string): Promise<unknown> {
-    return JSON.parse(await readFile(path, "utf8")) as unknown;
+    const file = await open(path, "r");
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) throw new Error(`Memory state path is not a regular file: ${path}`);
+      if (info.size > STORE_FILE_BYTE_LIMIT) {
+        throw new Error(`Memory state file exceeds ${STORE_FILE_BYTE_LIMIT} byte limit before parsing: ${path}`);
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      while (true) {
+        const remaining = STORE_FILE_BYTE_LIMIT + 1 - total;
+        if (remaining <= 0) {
+          throw new Error(`Memory state file exceeds ${STORE_FILE_BYTE_LIMIT} byte limit before parsing: ${path}`);
+        }
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+        const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        total += bytesRead;
+        if (total > STORE_FILE_BYTE_LIMIT) {
+          throw new Error(`Memory state file exceeds ${STORE_FILE_BYTE_LIMIT} byte limit before parsing: ${path}`);
+        }
+        chunks.push(chunk.subarray(0, bytesRead));
+      }
+      return JSON.parse(Buffer.concat(chunks, total).toString("utf8")) as unknown;
+    } finally {
+      await file.close();
+    }
   }
 
   private async readJsonIfExists(path: string): Promise<unknown | undefined> {
@@ -704,7 +1068,34 @@ export class ProjectMemoryStore {
   }
 
   private async atomicWrite(path: string, value: unknown): Promise<void> {
-    await atomicWriteFile(path, `${JSON.stringify(value, null, 2)}\n`);
+    const content = `${JSON.stringify(value, null, 2)}\n`;
+    if (Buffer.byteLength(content, "utf8") > STORE_FILE_BYTE_LIMIT) {
+      throw new Error(`Memory state file would exceed ${STORE_FILE_BYTE_LIMIT} byte limit: ${path}`);
+    }
+    await atomicWriteFile(path, content);
+  }
+
+  private async writeNewJson(path: string, value: unknown): Promise<void> {
+    const content = `${JSON.stringify(value, null, 2)}\n`;
+    if (Buffer.byteLength(content, "utf8") > STORE_FILE_BYTE_LIMIT) {
+      throw new Error(`Memory revision would exceed ${STORE_FILE_BYTE_LIMIT} byte limit.`);
+    }
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const file = await open(path, "wx", 0o600);
+    let complete = false;
+    try {
+      await file.writeFile(content, "utf8");
+      await file.sync();
+      complete = true;
+    } finally {
+      await file.close().catch(() => undefined);
+      if (!complete) await unlink(path).catch(() => undefined);
+    }
+    const directory = await open(dirname(path), "r").catch(() => undefined);
+    if (directory) {
+      await directory.sync().catch(() => undefined);
+      await directory.close().catch(() => undefined);
+    }
   }
 
   private async exists(path: string): Promise<boolean> {

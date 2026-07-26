@@ -12,7 +12,8 @@ import {
   type ReviewPlan,
 } from "./types.ts";
 
-const MAX_TRANSCRIPT_CHARS = 32_000;
+export const MAX_TRANSCRIPT_CHARS = 32_000;
+export const MAX_TRANSCRIPT_USER_TURNS = 12;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -36,34 +37,99 @@ function textContent(content: unknown): string {
   return parts.join("\n");
 }
 
-export function buildReviewTranscript(entries: readonly SessionEntry[], afterEntryId?: string): string {
+export interface ReviewEvidenceWindow {
+  transcript: string;
+  throughEntryId?: string;
+  includedEntryIds: string[];
+  truncated: boolean;
+  userTurns: number;
+}
+
+interface ReviewTurnChunk {
+  entries: readonly SessionEntry[];
+  sections: string[];
+  userTurns: number;
+}
+
+function reviewEntrySection(entry: SessionEntry): string | undefined {
+  if (entry.type === "compaction") return `[Prior conversation summary]\n${entry.summary}`;
+  if (entry.type !== "message") return undefined;
+  const message = entry.message;
+  if (message.role === "user") {
+    const text = stripSkillScaffolding(textContent(message.content));
+    return text ? `USER: ${text}` : undefined;
+  }
+  if (message.role === "assistant") {
+    const text = textContent(message.content).trim();
+    return text ? `ASSISTANT: ${text}` : undefined;
+  }
+  if (message.role === "toolResult") {
+    return `TOOL ${message.toolName}: ${message.isError ? "failed" : "completed"}`;
+  }
+  return undefined;
+}
+
+function reviewTurnChunks(entries: readonly SessionEntry[]): ReviewTurnChunk[] {
+  const chunks: ReviewTurnChunk[] = [];
+  let currentEntries: SessionEntry[] = [];
+  let currentSections: string[] = [];
+  let currentUserTurns = 0;
+  for (const entry of entries) {
+    const startsTurn = entry.type === "message" && entry.message.role === "user";
+    if (startsTurn && currentUserTurns > 0) {
+      chunks.push({ entries: currentEntries, sections: currentSections, userTurns: currentUserTurns });
+      currentEntries = [];
+      currentSections = [];
+      currentUserTurns = 0;
+    }
+    currentEntries.push(entry);
+    if (startsTurn) currentUserTurns += 1;
+    const section = reviewEntrySection(entry);
+    if (section) currentSections.push(section);
+  }
+  if (currentEntries.length > 0) {
+    chunks.push({ entries: currentEntries, sections: currentSections, userTurns: currentUserTurns });
+  }
+  return chunks;
+}
+
+/**
+ * Build the oldest bounded unreviewed window. Coverage advances only through
+ * entries represented by this window, so later history is never skipped.
+ */
+export function buildReviewEvidenceWindow(entries: readonly SessionEntry[], afterEntryId?: string): ReviewEvidenceWindow {
   const cursorIndex = afterEntryId ? entries.findIndex((entry) => entry.id === afterEntryId) : -1;
   const scopedEntries = cursorIndex >= 0 ? entries.slice(cursorIndex + 1) : entries;
-  const userIndexes = scopedEntries
-    .map((entry, index) => entry.type === "message" && entry.message.role === "user" ? index : -1)
-    .filter((index) => index >= 0);
-  const startIndex = userIndexes.length > 12 ? userIndexes[userIndexes.length - 12] ?? 0 : 0;
-  const sections: string[] = [];
-  for (const entry of scopedEntries.slice(startIndex)) {
-    if (entry.type === "compaction") {
-      sections.push(`[Prior conversation summary]\n${entry.summary}`);
-      continue;
-    }
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (message.role === "user") {
-      const text = stripSkillScaffolding(textContent(message.content));
-      if (text) sections.push(`USER: ${text}`);
-    } else if (message.role === "assistant") {
-      const text = textContent(message.content).trim();
-      if (text) sections.push(`ASSISTANT: ${text}`);
-    } else if (message.role === "toolResult") {
-      sections.push(`TOOL ${message.toolName}: ${message.isError ? "failed" : "completed"}`);
-    }
+  const selected: ReviewTurnChunk[] = [];
+  let chars = 0;
+  let userTurns = 0;
+  for (const chunk of reviewTurnChunks(scopedEntries)) {
+    if (userTurns > 0 && userTurns + chunk.userTurns > MAX_TRANSCRIPT_USER_TURNS) break;
+    const text = chunk.sections.join("\n\n");
+    const separator = selected.length > 0 && text ? 2 : 0;
+    if (selected.length > 0 && chars + separator + text.length > MAX_TRANSCRIPT_CHARS) break;
+    selected.push(chunk);
+    chars += separator + text.length;
+    userTurns += chunk.userTurns;
+    if (selected.length === 1 && chars > MAX_TRANSCRIPT_CHARS) break;
   }
 
-  const full = sections.join("\n\n");
-  return full.length <= MAX_TRANSCRIPT_CHARS ? full : `[Earlier context omitted]\n\n${full.slice(-MAX_TRANSCRIPT_CHARS)}`;
+  const includedEntries = selected.flatMap((chunk) => [...chunk.entries]);
+  const full = selected.flatMap((chunk) => chunk.sections).join("\n\n");
+  const transcript = full.length <= MAX_TRANSCRIPT_CHARS
+    ? full
+    : `${full.slice(0, MAX_TRANSCRIPT_CHARS - 28)}\n\n[Turn content truncated]`;
+  return {
+    transcript,
+    ...(includedEntries.at(-1)?.id ? { throughEntryId: includedEntries.at(-1)!.id } : {}),
+    includedEntryIds: includedEntries.map((entry) => entry.id),
+    truncated: includedEntries.length < scopedEntries.length || full.length > MAX_TRANSCRIPT_CHARS,
+    userTurns,
+  };
+}
+
+export function buildReviewTranscript(entries: readonly SessionEntry[], afterEntryId?: string): string {
+  return buildReviewEvidenceWindow(entries, afterEntryId).transcript;
 }
 
 type ReviewAction = ReviewOperation["action"];
@@ -153,7 +219,7 @@ export function buildReviewPrompt(
 ): string {
   const usedChars = memoryCharCount(branch);
   const refinementTarget = Math.max(1, Math.floor(maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
-  const refinementRequired = usedChars >= refinementTarget;
+  const refinementRecommended = usedChars >= refinementTarget;
   const current = branch.entries.length
     ? branch.entries.map((entry) => {
       const importance = entry.importanceAssessedAt
@@ -189,15 +255,15 @@ export function buildReviewPrompt(
     "- low: valid but narrow, redundant, or cheap to rediscover",
     "Unassessed legacy entries behave as normal until conservatively assessed. Newer assessment metadata is better calibrated, but newer facts do not automatically outrank older facts.",
     `HARD LIMIT: ${maxChars} characters. WORKING TARGET: ${refinementTarget} characters. Current usage: ${usedChars} characters.`,
-    `If current usage is below the working target, the final state must not exceed ${refinementTarget} characters. Never exceed the hard limit.`,
-    ...(refinementRequired ? [
-      `REFINEMENT REQUIRED: current memory has reached the ${refinementTarget}-character working target. The final state must be smaller than the current ${usedChars} characters; repeated reviews converge toward the target.`,
+    `The working target is advisory: prefer concise, lossless memory near ${refinementTarget} characters. The final state may exceed it when preserving useful semantics, but must never exceed the hard limit.`,
+    ...(refinementRecommended ? [
+      `REFINEMENT RECOMMENDED: current memory has reached the ${refinementTarget}-character working target. Prefer lossless merges and removal of contradicted, documented, or low-value facts, but never discard valid semantics merely to shrink. A safe no-op is allowed.`,
     ] : []),
     "Refine in this order: remove contradicted or documented facts regardless of importance; merge overlaps; remove low-importance facts; then consider unassessed or normal facts. Preserve high-importance facts unless contradicted or merged.",
     "The operation batch is atomic and capacity is checked only against final size, so removals need not precede additions. Operations still execute sequentially; never target an entry after removing or merging it.",
     "Target existing entries by entryId, never by text. Merge only explicit entryIds; the first ID supplies the retained entry identity and position.",
     "Every add, replace, merge, and assess operation requires importance. Use assess to classify legacy entries only when evidence supports the classification.",
-    "Write compact declarative facts, not instructions. Use at most 4 operations. If nothing durable emerged and refinement is not required, return {\"operations\":[]}.",
+    "Write compact declarative facts, not instructions. Use at most 4 operations. If nothing durable emerged or no lossless refinement is safe, return {\"operations\":[]}.",
     "",
     `CURRENT MEMORY BRANCH (${branch.name}, ${usedChars} characters used):`,
     current,
@@ -211,6 +277,7 @@ export interface MemoryReviewRequest {
   branch: MemoryBranch;
   signal?: AbortSignal;
   afterEntryId?: string;
+  transcript?: string;
   maxChars?: number;
 }
 
@@ -220,6 +287,7 @@ export async function requestReviewPlan(
     branch,
     signal,
     afterEntryId,
+    transcript: suppliedTranscript,
     maxChars = DEFAULT_MAX_CHARS,
   }: MemoryReviewRequest,
 ): Promise<ReviewPlan> {
@@ -228,7 +296,7 @@ export async function requestReviewPlan(
   if (!auth.ok) throw new Error(auth.error);
   if (!auth.apiKey) throw new Error(`No API key available for ${ctx.model.provider}.`);
 
-  const transcript = buildReviewTranscript(ctx.sessionManager.getBranch(), afterEntryId);
+  const transcript = suppliedTranscript ?? buildReviewTranscript(ctx.sessionManager.getBranch(), afterEntryId);
   const message: Message = {
     role: "user",
     content: [{ type: "text", text: buildReviewPrompt(branch, transcript, maxChars) }],

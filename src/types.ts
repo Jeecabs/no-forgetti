@@ -3,11 +3,13 @@ export const MAIN_MEMORY = "main";
 export const DEFAULT_MAX_CHARS = 4_000;
 export const MEMORY_REFINEMENT_TARGET_RATIO = 0.75;
 export const DEFAULT_MAX_ENTRY_CHARS = 800;
+export const STORE_FILE_BYTE_LIMIT = 256 * 1024;
 export const DEFAULT_REVIEW_INTERVAL = 10;
 export const DEFAULT_REVIEW_SIGNAL_THRESHOLD = 4;
 
 export type MemoryWriteOrigin = "assistant_tool" | "background_review";
 export type MemoryImportance = "high" | "normal" | "low";
+export type MemoryDigest = string;
 
 export interface MemoryEntry {
   id: string;
