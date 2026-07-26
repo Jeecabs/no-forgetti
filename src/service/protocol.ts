@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { exactKeys, isRecord } from "../state-validation.ts";
 import { memoryBranchDigest } from "../store.ts";
 import type { MemoryBranch, MemoryImportance, MemoryWriteOrigin, ReviewOperation } from "../types.ts";
 
@@ -128,18 +129,6 @@ export type ReviewOutcome =
 export type ReviewOutcomeResult =
   | { status: "completed"; completedAt?: string; operations: ReviewOperation[]; provenance: ReviewModelProvenance }
   | { status: "failed"; completedAt?: string; error: ReviewFailure; provenance?: ReviewModelProvenance };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function exactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): void {
-  const allowed = new Set([...required, ...optional]);
-  const keys = Object.keys(value);
-  if (required.some((key) => !Object.hasOwn(value, key)) || keys.some((key) => !allowed.has(key))) {
-    throw new Error("Invalid review protocol object shape.");
-  }
-}
 
 function checkedString(value: unknown, label: string, maxChars: number, pattern?: RegExp): string {
   if (typeof value !== "string" || value.length === 0 || value.length > maxChars || (pattern && !pattern.test(value))) {

@@ -439,6 +439,38 @@ test("durable response checkpoint survives restart without provider rerun or dup
   });
 });
 
+test("a permanently failing committer dead-letters the elected decision instead of retrying forever", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-commit-ceiling-"));
+  let spoolNow = new Date("2026-01-03T12:00:00.000Z");
+  const spool = new ReviewSpool(join(root, "spool"), { now: () => spoolNow });
+  const accounting = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const runner = new CheckpointModelRunner();
+  await spool.enqueue(reviewJob);
+
+  const broken = (workerId: string) => new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 4, maxTokens: 4_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId,
+    maxAttempts: 2,
+    committer: { async commit() { throw new Error("committer is permanently broken"); } },
+  });
+
+  assert.equal((await broken("ceiling-worker-1").processOne()).status, "retry");
+  spoolNow = new Date(spoolNow.getTime() + 10_000);
+  const terminal = await broken("ceiling-worker-2").processOne();
+  assert.equal(terminal.status, "failed");
+  if (terminal.status === "failed") assert.equal(terminal.failure.retryable, false);
+  assert.equal((await spool.getOutcome(reviewJob.id))?.status, "failed");
+  assert.equal(runner.dispatches, 1, "the elected decision must never redispatch the provider");
+});
+
 test("decision-before-settlement crash reconciles accounting on restart without provider rerun", async () => {
   const reviewJob = job();
   const root = await mkdtemp(join(tmpdir(), "no-forgetti-decision-settle-failpoint-"));

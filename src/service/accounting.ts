@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { chmod, lstat, mkdir, open, readdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
-import { atomicCreateFile, atomicWriteFile } from "../atomic-file.ts";
+import { atomicCreateFile, atomicWriteFile, durableUnlink } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
+import { exactKeys, isErrno, isRecord } from "../state-validation.ts";
 import type { ReviewModelProvenance } from "./protocol.ts";
 
 export const REVIEW_ACCOUNTING_VERSION = 1 as const;
@@ -191,41 +192,6 @@ export interface FileReviewAttemptAccountingOptions {
   now?: () => Date;
   lockTimeoutMs?: number;
   staleLockMs?: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
-
-async function durableUnlink(path: string): Promise<boolean> {
-  try {
-    await unlink(path);
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return false;
-    throw error;
-  }
-  const parent = dirname(path);
-  const directory = await open(
-    parent,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_DIRECTORY ?? 0),
-  );
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
-  return true;
-}
-
-function exactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): void {
-  const allowed = new Set([...required, ...optional]);
-  if (required.some((key) => !Object.hasOwn(value, key)) || Object.keys(value).some((key) => !allowed.has(key))) {
-    throw new Error("Invalid review accounting record shape.");
-  }
 }
 
 function nonnegativeInteger(value: unknown, label: string): number {

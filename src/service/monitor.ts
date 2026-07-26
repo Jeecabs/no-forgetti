@@ -14,6 +14,8 @@ const WORKER_STATUS_VERSION = 1;
 const MAX_WORKER_STATUS_BYTES = 16 * 1024;
 const WORKER_IDLE_FRESH_MS = 30_000;
 const WORKER_ACTIVE_FRESH_MS = 6 * 60_000;
+const MAX_WORKER_STATUS_FILES = 4_096;
+const MAX_WORKER_STATUS_READS = 32;
 
 export type ReviewWorkerState = "starting" | "idle" | "working" | "waiting-retry" | "budget-exhausted" | "stopped";
 
@@ -135,12 +137,20 @@ async function readWorkerStatuses(agentDir: string): Promise<ReviewWorkerStatus[
   const dir = join(resolve(agentDir), "no-forgetti", "review-workers");
   let names: string[];
   try {
-    names = (await readdir(dir)).filter((name) => /^[0-9a-f]{24}\.json$/u.test(name)).slice(0, 256);
+    names = (await readdir(dir)).filter((name) => /^[0-9a-f]{24}\.json$/u.test(name)).slice(0, MAX_WORKER_STATUS_FILES);
   } catch (error) {
     if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  const statuses = await Promise.all(names.map((name) => readWorkerStatus(join(dir, name)).catch(() => undefined)));
+  // One status file accumulates per worker identity and a dead worker never
+  // rewrites its own, so bound the reads by recency instead of directory order.
+  const dated = await Promise.all(names.map(async (name) => {
+    const path = join(dir, name);
+    const info = await stat(path).catch(() => undefined);
+    return { path, mtimeMs: info?.mtimeMs ?? 0 };
+  }));
+  const recent = dated.sort((left, right) => right.mtimeMs - left.mtimeMs).slice(0, MAX_WORKER_STATUS_READS);
+  const statuses = await Promise.all(recent.map(({ path }) => readWorkerStatus(path).catch(() => undefined)));
   return statuses.filter((status): status is ReviewWorkerStatus => Boolean(status))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }

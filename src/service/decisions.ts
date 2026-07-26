@@ -1,10 +1,12 @@
 import { constants, type Dirent } from "node:fs";
-import { lstat, mkdir, open, readdir, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, rmdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import { durableUnlink, syncDirectoryStrict } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
+import { exactKeys, isErrno, isRecord } from "../state-validation.ts";
 import type { ReviewOperation } from "../types.ts";
-import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-transaction.ts";
+import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-artifacts.ts";
 import {
   createReviewOutcome,
   parseReviewJob,
@@ -75,24 +77,6 @@ export class ReviewDecisionConflictError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options?.cause === undefined ? undefined : { cause: options.cause });
     this.name = "ReviewDecisionConflictError";
-  }
-}
-
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
-  const keys = Object.keys(value);
-  const allowed = new Set(expected);
-  if (keys.length !== expected.length || expected.some((key) => !Object.hasOwn(value, key)) || keys.some((key) => !allowed.has(key))) {
-    throw new Error("Invalid review decision object shape.");
   }
 }
 
@@ -184,29 +168,6 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   }
 }
 
-async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(
-    path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_DIRECTORY ?? 0),
-  );
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function durableUnlink(path: string): Promise<boolean> {
-  try {
-    await unlink(path);
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return false;
-    throw error;
-  }
-  await syncDirectory(dirname(path));
-  return true;
-}
-
 async function durableRmdir(path: string): Promise<void> {
   try {
     await rmdir(path);
@@ -214,7 +175,7 @@ async function durableRmdir(path: string): Promise<void> {
     if (isErrno(error, "ENOENT") || isErrno(error, "ENOTEMPTY")) return;
     throw error;
   }
-  await syncDirectory(dirname(path));
+  await syncDirectoryStrict(dirname(path));
 }
 
 async function boundedEntries(path: string): Promise<Dirent[]> {

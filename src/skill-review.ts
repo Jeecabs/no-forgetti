@@ -10,12 +10,9 @@ import {
   type SkillOperation,
   type SkillReviewPlan,
 } from "./skill-types.ts";
+import { isRecord } from "./state-validation.ts";
 
 const MAX_REVIEW_TRANSCRIPT_CHARS = 32_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function parseOperation(value: unknown): SkillOperation {
   if (!isRecord(value)) throw new Error("Skill review operation must be an object.");
