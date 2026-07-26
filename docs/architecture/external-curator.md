@@ -71,7 +71,7 @@ Evidence files use `0600`; containing directories use `0700`. Evidence expires a
 
 External authority requires a dedicated reviewer profile. The service resolves persistent Pi credentials from the normal agent directory; jobs never copy resolved secrets. Missing auth blocks a job until configuration changes.
 
-Per-call time/output bounds fail closed. Persistent daily call, token, and cost thresholds are checked before each call and charged from actual provider usage afterward; one in-flight call can cross a token or cost threshold before subsequent calls stop. `/memory status` shows worker heartbeat, queue depth, budget usage, and exhaustion; the footer warns when the worker is offline or a limit is reached. The reviewer profile never silently inherits whichever foreground model happened to be active.
+Per-call time/output bounds fail closed. Persistent daily call, token, and cost thresholds are checked before each call and charged from actual provider usage afterward; one in-flight call can cross a token or cost threshold before subsequent calls stop. Retry attempts do not yet have idempotent durable charge records, so a crash between provider completion, charge, and outcome can undercount or double-count usage. `/memory status` shows worker heartbeat, queue depth, budget usage, and exhaustion; the footer warns when the worker is offline or a limit is reached. The reviewer profile never silently inherits whichever foreground model happened to be active.
 
 ## Mutation safety
 
