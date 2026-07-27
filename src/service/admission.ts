@@ -5,8 +5,8 @@ import { isRecord } from "../state-validation.ts";
 import { ProjectMemoryStore } from "../store.ts";
 import { STORE_FILE_BYTE_LIMIT, STORE_VERSION } from "../types.ts";
 import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-artifacts.ts";
-import { publishReviewFeedback } from "./feedback.ts";
-import type { ReviewJob, ReviewOutcome } from "./protocol.ts";
+import { publishReviewFailure, publishReviewFeedback } from "./feedback.ts";
+import type { ReviewFailure, ReviewJob, ReviewOutcome } from "./protocol.ts";
 
 export type AdmissionStatus = "applied" | "noop" | "stale" | "rejected";
 
@@ -30,6 +30,8 @@ export interface AdmissionReceipt {
 
 export interface ProposalCommitter {
   commit(job: ReviewJob, outcome: ReviewOutcome): Promise<AdmissionReceipt>;
+  /** Reports a dead-lettered job back to any registered feedback interest. */
+  failed?(job: ReviewJob, failure: ReviewFailure): Promise<void>;
 }
 
 interface ProjectMetadataRecord {
@@ -163,5 +165,9 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
     const published = parseReceipt(await readBoundedJson(path), job, outcome);
     await store.retireReviewAdmission(job.id, bindingDigest);
     return published;
+  }
+
+  async failed(job: ReviewJob, failure: ReviewFailure): Promise<void> {
+    await publishReviewFailure(join(this.agentDir, "no-forgetti", job.projectKey), job, failure);
   }
 }

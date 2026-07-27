@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -166,6 +166,129 @@ test("receipt recovery reuses a committed store transaction instead of reporting
     "Recovery keeps the original admission.",
     "Later foreground memory remains visible.",
   ]);
+});
+
+const terminalFailure = { code: "provider_error", message: "Provider exploded.", retryable: false };
+const WEEK_AGO = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000);
+
+function jobFor(store: ProjectMemoryStore, branch: Awaited<ReturnType<ProjectMemoryStore["loadBranch"]>>, throughEntryId: string) {
+  return createReviewJob({
+    projectKey: store.projectKey,
+    sessionId: "private-session",
+    throughEntryId,
+    transcript: `USER: remember ${throughEntryId}`,
+    branch,
+    baseBranchDigest: store.branchDigest(branch),
+    maxChars: store.maxChars,
+  });
+}
+
+test("dead-letter feedback publishes only registered interest and is idempotent", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  const branch = await store.loadBranch("main");
+  const job = jobFor(store, branch, "entry-1");
+  const committer = new FileMemoryProposalCommitter(agentDir);
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+
+  await committer.failed(job, terminalFailure);
+  assert.equal(await consumeReviewFeedback(inbox, () => assert.fail("unregistered job must publish nothing")), 0);
+
+  await inbox.register(job.id, job.digest);
+  await committer.failed(job, terminalFailure);
+  await committer.failed(job, terminalFailure);
+  const feedback: ReviewFeedback[] = [];
+  assert.equal(await consumeReviewFeedback(inbox, (value) => feedback.push(value)), 1);
+  assert.deepEqual(feedback, [{
+    version: 1,
+    jobId: job.id,
+    jobDigest: job.digest,
+    branchName: "main",
+    status: "failed",
+    messages: ["Provider exploded."],
+    changes: [],
+  }]);
+});
+
+test("dead-letter publication never overwrites an earlier admission publication", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  const branch = await store.loadBranch("main");
+  const job = jobFor(store, branch, "entry-1");
+  const outcome = createReviewOutcome(job, {
+    status: "completed",
+    operations: [{ action: "add", content: "Applied before the dead-letter.", importance: "normal" }],
+    provenance,
+    completedAt: provenance.completedAt,
+  });
+  const committer = new FileMemoryProposalCommitter(agentDir);
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  await inbox.register(job.id, job.digest);
+
+  await committer.commit(job, outcome);
+  await committer.failed(job, terminalFailure);
+  const feedback: ReviewFeedback[] = [];
+  assert.equal(await consumeReviewFeedback(inbox, (value) => feedback.push(value)), 1);
+  assert.equal(feedback.at(0)?.status, "applied");
+  assert.deepEqual(feedback.at(0)?.changes, [{ kind: "add", text: "Applied before the dead-letter." }]);
+});
+
+test("aged orphan pending interest is garbage collected while fresh interest survives", async (t) => {
+  const { store } = await fixture(t);
+  const branch = await store.loadBranch("main");
+  const agedJob = jobFor(store, branch, "aged-entry");
+  const freshJob = jobFor(store, branch, "fresh-entry");
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  await inbox.register(agedJob.id, agedJob.digest);
+  await inbox.register(freshJob.id, freshJob.digest);
+  await utimes(join(inbox.pendingDir, `${agedJob.id}.json`), WEEK_AGO, WEEK_AGO);
+
+  assert.equal(await consumeReviewFeedback(inbox, () => assert.fail("nothing is ready for delivery")), 0);
+  assert.deepEqual(await readdir(inbox.pendingDir), [`${freshJob.id}.json`]);
+});
+
+test("aged pending interest with a ready publication is delivered, not collected", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  const branch = await store.loadBranch("main");
+  const job = jobFor(store, branch, "entry-1");
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  await inbox.register(job.id, job.digest);
+  await new FileMemoryProposalCommitter(agentDir).failed(job, terminalFailure);
+  await utimes(join(inbox.pendingDir, `${job.id}.json`), WEEK_AGO, WEEK_AGO);
+
+  const feedback: ReviewFeedback[] = [];
+  assert.equal(await consumeReviewFeedback(inbox, (value) => feedback.push(value)), 1);
+  assert.equal(feedback.at(0)?.status, "failed");
+  assert.deepEqual(await readdir(inbox.pendingDir), []);
+  assert.deepEqual(await readdir(inbox.readyDir), []);
+});
+
+test("a wedged mailbox of aged orphans self-heals without parsing them", async (t) => {
+  const { store } = await fixture(t);
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  for (let index = 0; index < 1_025; index += 1) {
+    const path = join(inbox.pendingDir, `review_${index.toString(16).padStart(40, "0")}.json`);
+    await writeFile(path, "not even json");
+    await utimes(path, WEEK_AGO, WEEK_AGO);
+  }
+
+  assert.equal(await consumeReviewFeedback(inbox, () => assert.fail("nothing is deliverable")), 0);
+  assert.deepEqual(await readdir(inbox.pendingDir), []);
+});
+
+test("aged ready litter without pending interest is swept", async (t) => {
+  const { store } = await fixture(t);
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  const path = join(inbox.readyDir, `review_${"a".repeat(40)}.json`);
+  await writeFile(path, "orphaned ready record");
+  await utimes(path, WEEK_AGO, WEEK_AGO);
+
+  assert.equal(await consumeReviewFeedback(inbox, () => assert.fail("nothing is deliverable")), 0);
+  assert.deepEqual(await readdir(inbox.readyDir), []);
 });
 
 test("external admission records stale proposals without overwriting foreground memory", async (t) => {

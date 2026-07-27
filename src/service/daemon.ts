@@ -18,7 +18,7 @@ import {
   type ReviewProposalDecision,
 } from "./decisions.ts";
 import type { LedgerProviderAttempt, ReviewLedger } from "./ledger.ts";
-import { createReviewOutcome, sanitizeReviewText, type ReviewFailure } from "./protocol.ts";
+import { createReviewOutcome, sanitizeReviewText, type ReviewFailure, type ReviewJob } from "./protocol.ts";
 import { ReviewEngine, ReviewEngineError, type ReviewProposal } from "./review-engine.ts";
 import { ReviewLeaseError, type ReviewClaim, type ReviewSpool } from "./spool.ts";
 
@@ -750,14 +750,29 @@ export class ReviewDaemon {
         await this.deferClaim(claim, retryDelayMs(claim.attempt, classified.configurationBlock));
         return { status: "retry", failure };
       }
+      const terminal = { ...failure, retryable: false };
       await this.spool.finish(claim, createReviewOutcome(claim.job, {
         status: "failed",
-        error: { ...failure, retryable: false },
+        error: terminal,
         ...(provenance ? { provenance } : {}),
       }));
-      const terminal = { ...failure, retryable: false };
+      await this.publishTerminalFailure(claim.job, terminal);
       this.emit({ type: "failed", jobId: claim.job.id, attempt: claim.attempt, failure: terminal });
       return { status: "failed", failure: terminal };
+    }
+  }
+
+  /**
+   * Best-effort dead-letter notification. It must only run after the durable
+   * terminal transition: publishing "failed" before `spool.finish` resolves
+   * could collide with an "applied" publication from a lease-fenced retry
+   * that later completes the job. Mailbox GC reclaims lost notifications.
+   */
+  private async publishTerminalFailure(job: ReviewJob, failure: ReviewFailure): Promise<void> {
+    try {
+      await this.committer?.failed?.(job, failure);
+    } catch {
+      // Swallowed: the job outcome is already durable and delivery is optional.
     }
   }
 
@@ -848,6 +863,7 @@ export class ReviewDaemon {
           error: terminal,
           ...(provenance ? { provenance } : {}),
         }));
+        await this.publishTerminalFailure(claim.job, terminal);
         this.emit({ type: "failed", jobId: claim.job.id, attempt: claim.attempt, failure: terminal });
         return { status: "failed", failure: terminal };
       }
@@ -905,6 +921,7 @@ export class ReviewDaemon {
         error: terminal,
         provenance: decision.outcome.provenance,
       }));
+      await this.publishTerminalFailure(decision.job, terminal);
       this.emit({ type: "failed", jobId: claim.job.id, attempt: claim.attempt, failure: terminal });
       return { status: "failed", failure: terminal };
     }

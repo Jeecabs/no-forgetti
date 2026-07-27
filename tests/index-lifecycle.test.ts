@@ -561,6 +561,84 @@ test("external review receipt appends a compact content diff to the next Pi sess
   await receiving.emit("session_shutdown", {}, context);
 });
 
+test("external review dead-letter surfaces a failure warning in the next Pi session", async (t) => {
+  const externalConfig = {
+    version: 1 as const,
+    mode: "external" as const,
+    evidenceTtlHours: 24,
+    reviewer: {
+      provider: "fake",
+      model: "reviewer",
+      reasoningEffort: "high" as const,
+      maxCallsPerDay: 10,
+      maxTokensPerDay: 10_000,
+      maxCostPerDayUsd: 1,
+    },
+  };
+  const { branch, context, extension, memoryStore, skillStore, reviewSpool, notifications } = await fixture(t, {
+    loadServiceConfig: async () => externalConfig,
+  });
+  branch.push(userEntry("dead-letter-user", "Remember that verification uses pnpm check."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  const claim = await reviewSpool.claim({ workerId: "dead-letter-worker", leaseMs: 1_000 });
+  assert.ok(claim);
+  const failure = { code: "provider_error", message: "Provider exploded.", retryable: false };
+  await reviewSpool.finish(claim, createReviewOutcome(claim.job, { status: "failed", error: failure }));
+  const agentDir = join(memoryStore.projectDir, "..", "..");
+  await new FileMemoryProposalCommitter(agentDir).failed(claim.job, failure);
+  await extension.emit("session_shutdown", {}, context);
+
+  const receiving = new FakeExtension();
+  activateProjectMemoryExtension(receiving.api, {
+    isNonPrimaryAgent: () => false,
+    createMemoryStore: () => memoryStore,
+    createSkillStore: () => skillStore,
+    loadServiceConfig: async () => externalConfig,
+    loadServiceMonitor: async () => ({
+      mode: "external",
+      budget: { day: "2026-01-01", calls: 1, tokens: 2, costUsd: 0 },
+      spool: { queued: 0, running: 0, outcomes: 1, deadLetter: 1 },
+      workerFresh: true,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:02.000Z",
+    }),
+    createReviewSpool: () => reviewSpool,
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await receiving.emit("session_start", {}, context);
+  const feedback = receiving.entries.find((entry) =>
+    entry.customType === "no-forgetti-memory-review"
+      && (entry.data as { jobId?: string }).jobId === claim.job.id
+  );
+  assert.deepEqual(feedback?.data, {
+    projectKey: memoryStore.projectKey,
+    jobId: claim.job.id,
+    branch: "main",
+    status: "failed",
+    changes: [],
+  });
+  assert.deepEqual(notifications.filter((entry) => entry.message.includes("review failed")), [{
+    message: "Project memory review failed: Provider exploded.",
+    type: "warning",
+  }]);
+
+  const renderer = receiving.entryRenderers.get("no-forgetti-memory-review") as (
+    entry: { data: unknown },
+    options: { expanded: boolean },
+    theme: { fg: (color: string, text: string) => string },
+  ) => unknown;
+  assert.equal(renderer(feedback!, { expanded: true }, { fg: (_color, text) => text }), undefined);
+
+  await receiving.emit("before_agent_start", { systemPrompt: "base", prompt: "again" }, context);
+  assert.equal(receiving.entries.filter((entry) =>
+    entry.customType === "no-forgetti-memory-review"
+      && (entry.data as { jobId?: string }).jobId === claim.job.id
+  ).length, 1);
+  await receiving.emit("session_shutdown", {}, context);
+});
+
 test("memory review appends a change entry with resolved entry IDs", async (t) => {
   let testsId = "";
   let ciId = "";
