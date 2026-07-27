@@ -2,6 +2,7 @@ import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { memoryCharCount } from "./context.ts";
+import { PROJECT_SKILL_USE_ENTRY } from "./skill-native.ts";
 import { safeContextText } from "./security.ts";
 import { isRecord } from "./state-validation.ts";
 import {
@@ -48,8 +49,28 @@ interface ReviewTurnChunk {
   userTurns: number;
 }
 
+function projectSkillUseData(entry: SessionEntry): unknown {
+  if (entry.type !== "custom") return undefined;
+  if (entry.customType !== PROJECT_SKILL_USE_ENTRY) return undefined;
+  return entry.data;
+}
+
+function projectSkillUseNames(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  if (!Array.isArray(value.names)) return [];
+  return value.names.filter((name): name is string => typeof name === "string");
+}
+
+function projectSkillUseSection(entry: SessionEntry): string | undefined {
+  const names = projectSkillUseNames(projectSkillUseData(entry));
+  if (names.length === 0) return undefined;
+  return `PROJECT SKILLS INVOKED: ${names.join(", ")}`;
+}
+
 function reviewEntrySection(entry: SessionEntry): string | undefined {
   if (entry.type === "compaction") return `[Prior conversation summary]\n${entry.summary}`;
+  const skillUse = projectSkillUseSection(entry);
+  if (skillUse) return skillUse;
   if (entry.type !== "message") return undefined;
   const message = entry.message;
   if (message.role === "user") {

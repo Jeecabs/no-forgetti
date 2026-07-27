@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { loadSkills } from "@earendil-works/pi-coding-agent";
+
 import { ProjectSkillStore } from "../src/skill-store.ts";
 
 async function fixture(options: { now?: () => Date } = {}) {
@@ -18,7 +20,7 @@ async function fixture(options: { now?: () => Date } = {}) {
 
 const skillBody = "# Verification\n\n## Procedure\n\n1. Run the canonical check. Completion criterion: the command exits successfully.";
 
-test("stores project skills outside the repository and exposes them only on request", async (t) => {
+test("stores native Pi skill packages outside the repository", async (t) => {
   const { base, project, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
 
@@ -37,6 +39,17 @@ test("stores project skills outside the repository and exposes them only on requ
   assert.match(await store.skillIndex(), /verification: Run the canonical project verification/u);
   assert.match(store.skillsDir, /state/u);
   assert.equal(store.skillsDir.startsWith(project), false);
+  const native = loadSkills({
+    cwd: project,
+    agentDir: join(base, "agent"),
+    skillPaths: [store.skillsDir],
+    includeDefaults: false,
+  });
+  assert.deepEqual(native.skills.map(({ name, description }) => ({ name, description })), [{
+    name: "verification",
+    description: "Run the canonical project verification.",
+  }]);
+  assert.equal(native.diagnostics.length, 0);
   await assert.rejects(stat(join(project, "SKILL.md")));
 });
 
@@ -94,31 +107,6 @@ test("startup migration applies legacy pending creates but preserves patches", a
   assert.deepEqual(migration, { applied: ["release-check"], retained: [] });
   assert.equal((await store.loadSkill("release-check")).state, "active");
   assert.equal((await store.listPending()).at(0)?.operations.at(0)?.action, "patch");
-});
-
-test("retrieves relevant skills by trigger terms and word variants", async (t) => {
-  const { base, store } = await fixture();
-  t.after(() => rm(base, { recursive: true, force: true }));
-  for (const [name, description] of [
-    ["verification", "Verify canonical project checks."],
-    ["release", "Prepare and publish a production release."],
-    ["diagnose", "Diagnose failing project builds."],
-    ["status", "Inspect production deployment status."],
-    ["run", "Run routine commands."],
-    ["stop", "Stop background workers."],
-    ["make", "Make release artifacts."],
-  ] as const) {
-    const proposal = await store.stageProposal([{ action: "create", name, description, content: skillBody }]);
-    await store.approveProposal(proposal.id);
-  }
-  assert.deepEqual((await store.findRelevantSkills("run canonical verification" )).map((skill) => skill.name), ["verification", "run"]);
-  assert.deepEqual((await store.findRelevantSkills("verify checks")).map((skill) => skill.name), ["verification"]);
-  assert.deepEqual((await store.findRelevantSkills("diagnosing")).map((skill) => skill.name), ["diagnose"]);
-  assert.deepEqual((await store.findRelevantSkills("running")).map((skill) => skill.name), ["run"]);
-  assert.deepEqual((await store.findRelevantSkills("stopping")).map((skill) => skill.name), ["stop"]);
-  assert.deepEqual((await store.findRelevantSkills("making")).map((skill) => skill.name), ["make"]);
-  assert.deepEqual(await store.findRelevantSkills("carve a statue"), []);
-  assert.deepEqual(await store.findRelevantSkills("explain the weather"), []);
 });
 
 test("patches with a unique match, keeps a revision, and rejects ambiguous patches", async (t) => {

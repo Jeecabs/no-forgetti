@@ -7,6 +7,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { activateProjectMemoryExtension, type ExtensionDependencies } from "../src/index.ts";
+import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
 import { ProjectMemoryStore } from "../src/store.ts";
@@ -116,10 +117,10 @@ const assistantMessage = { role: "assistant", content: [{ type: "text", text: "d
 test("registers lifecycle hooks and disables itself for companion agents", async () => {
   const primary = new FakeExtension();
   activateProjectMemoryExtension(primary.api, { isNonPrimaryAgent: () => false });
-  for (const name of ["session_start", "session_tree", "session_compact", "before_agent_start", "context", "input", "agent_end", "agent_settled", "session_shutdown"]) {
+  for (const name of ["session_start", "resources_discover", "session_tree", "session_compact", "before_agent_start", "message_end", "tool_result", "input", "agent_end", "agent_settled", "session_shutdown"]) {
     assert.equal(primary.handlers.has(name), true, name);
   }
-  assert.deepEqual([...primary.tools.keys()].sort(), ["project_memory", "project_skill"]);
+  assert.deepEqual([...primary.tools.keys()], ["project_memory"]);
   assert.deepEqual([...primary.commands.keys()].sort(), ["memory", "project-skills"]);
 
   const companion = new FakeExtension();
@@ -312,31 +313,29 @@ test("validated skill plans finish atomic admission after the commit point", asy
 
   assert.equal((await skillStore.loadSkill("commit-after-plan")).state, "active");
   assert.deepEqual(notifications, [{
-    message: "Project skill review added 'commit-after-plan' automatically.",
+    message: "Project skill review added 'commit-after-plan' automatically. It becomes a native Pi skill after /reload or next session.",
     type: "info",
   }]);
 });
 
-test("injects a recalled skill transiently and credits it only after successful settlement", async (t) => {
+test("publishes project skills through Pi native discovery and tracks slash invocation after settlement", async (t) => {
   const { branch, context, extension, skillStore } = await fixture(t);
   await extension.emit("session_start", {}, context);
-  await extension.emit("input", { text: "verify the canonical project checks", source: "interactive" }, context);
-  branch.push(userEntry("user-1", "verify the canonical project checks"));
 
-  const [before] = await extension.emit("before_agent_start", {
-    systemPrompt: "base prompt",
-    prompt: "verify the canonical project checks",
-  }, context) as Array<{ systemPrompt: string }>;
-  assert.equal(before.systemPrompt.includes("<project-skill"), false);
+  const [resources] = await extension.emit("resources_discover", {
+    cwd: context.cwd,
+    reason: "startup",
+  }, context) as Array<{ skillPaths: string[] }>;
+  assert.deepEqual(resources, { skillPaths: [skillStore.skillsDir] });
+  assert.equal(extension.handlers.has("context"), false);
 
-  const messages = [{ role: "user", content: [
-    { type: "text", text: "verify the canonical project checks" },
-    { type: "image", data: "abc", mimeType: "image/png" },
-  ] }];
-  const [injected] = await extension.emit("context", { messages }, context) as Array<{ messages: Array<{ content: unknown[] }> }>;
-  assert.match(JSON.stringify(injected.messages), /<project-skill name=\\?"verification\\?">/u);
-  assert.deepEqual(injected.messages[0]?.content[1], messages[0]?.content[1]);
-  assert.equal(JSON.stringify(messages).includes("<project-skill"), false);
+  const path = join(skillStore.skillsDir, "verification", "SKILL.md");
+  const invocation = `<skill name="verification" location="${path}">\nReferences are relative to ${join(skillStore.skillsDir, "verification")}.\n\n# Verification\n</skill>\n\nrun checks`;
+  await extension.emit("input", { text: "/skill:verification run checks", source: "interactive" }, context);
+  branch.push(userEntry("user-1", invocation));
+  await extension.emit("message_end", {
+    message: { role: "user", content: invocation, timestamp: 0 },
+  }, context);
   assert.equal((await skillStore.loadSkill("verification")).useCount, 0);
 
   await extension.emit("agent_end", { messages: [assistantMessage] }, context);
@@ -345,29 +344,35 @@ test("injects a recalled skill transiently and credits it only after successful 
   assert.equal(used.useCount, 1);
   assert.equal(used.useSessionCount, 1);
   assert.equal(await skillStore.activity.completedCount(), 1);
+  assert.deepEqual(extension.entries.filter((entry) => entry.customType === PROJECT_SKILL_USE_ENTRY), [{
+    customType: PROJECT_SKILL_USE_ENTRY,
+    data: { names: ["verification"] },
+  }]);
 });
 
-test("appends one visible chat entry after a recalled skill is injected", async (t) => {
-  const { branch, context, extension } = await fixture(t);
+test("tracks successful native SKILL.md reads once per settled run", async (t) => {
+  const { branch, context, extension, skillStore } = await fixture(t);
   await extension.emit("session_start", {}, context);
   await extension.emit("input", { text: "verify the canonical project checks", source: "interactive" }, context);
-  branch.push(userEntry("user-status", "verify the canonical project checks"));
-
-  await extension.emit("before_agent_start", {
-    systemPrompt: "base prompt",
-    prompt: "verify the canonical project checks",
-  }, context);
-  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-skill-recall"), false);
-
-  const contextEvent = {
-    messages: [{ role: "user", content: "verify the canonical project checks" }],
+  branch.push(userEntry("user-read", "verify the canonical project checks"));
+  const path = join(skillStore.skillsDir, "verification", "SKILL.md");
+  const result = {
+    toolName: "read",
+    toolCallId: "read-skill",
+    input: { path },
+    content: [{ type: "text", text: "# Verification" }],
+    details: undefined,
+    isError: false,
   };
-  await extension.emit("context", contextEvent, context);
-  await extension.emit("context", contextEvent, context);
+  await extension.emit("tool_result", result, context);
+  await extension.emit("tool_result", { ...result, toolCallId: "read-skill-again" }, context);
+  await extension.emit("tool_result", { ...result, toolCallId: "read-failed", isError: true }, context);
 
-  const recalls = extension.entries.filter((entry) => entry.customType === "no-forgetti-skill-recall");
-  assert.deepEqual(recalls, [{ customType: "no-forgetti-skill-recall", data: { names: ["verification"] } }]);
-  assert.equal(extension.entryRenderers.has("no-forgetti-skill-recall"), true);
+  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
+  await extension.emit("agent_settled", {}, context);
+  const used = await skillStore.loadSkill("verification");
+  assert.equal(used.useCount, 1);
+  assert.equal(used.useSessionCount, 1);
 });
 
 test("routes read-only command output in print and JSON modes", async (t) => {
@@ -520,28 +525,18 @@ test("shutdown aborts and waits for an active review", async (t) => {
   assert.equal((await skillStore.listPending()).length, 0);
 });
 
-test("does not credit an unpresented or aborted recall", async (t) => {
+test("does not credit a native skill observed in an aborted run", async (t) => {
   const { branch, context, extension, skillStore } = await fixture(t);
   await extension.emit("session_start", {}, context);
-  await extension.emit("input", { text: "verify the canonical project checks", source: "interactive" }, context);
-  branch.push(userEntry("user-1", "verify the canonical project checks"));
-  await extension.emit("before_agent_start", {
-    systemPrompt: "base prompt",
-    prompt: "verify the canonical project checks",
+  await extension.emit("input", { text: "/skill:verification", source: "interactive" }, context);
+  const path = join(skillStore.skillsDir, "verification", "SKILL.md");
+  const invocation = `<skill name="verification" location="${path}">\n# Verification\n</skill>`;
+  branch.push(userEntry("user-aborted", invocation));
+  await extension.emit("message_end", {
+    message: { role: "user", content: invocation, timestamp: 0 },
   }, context);
-  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
-  await extension.emit("agent_settled", {}, context);
-  assert.equal((await skillStore.loadSkill("verification")).useCount, 0);
-
-  await extension.emit("input", { text: "verify the canonical project checks", source: "interactive" }, context);
-  branch.push(userEntry("user-2", "verify the canonical project checks"));
-  await extension.emit("before_agent_start", {
-    systemPrompt: "base prompt",
-    prompt: "verify the canonical project checks",
-  }, context);
-  await extension.emit("context", { messages: [{ role: "user", content: "verify the canonical project checks" }] }, context);
   await extension.emit("agent_end", { messages: [{ ...assistantMessage, stopReason: "aborted" }] }, context);
   await extension.emit("agent_settled", {}, context);
   assert.equal((await skillStore.loadSkill("verification")).useCount, 0);
-  assert.equal(await skillStore.activity.completedCount(), 1);
+  assert.equal(await skillStore.activity.completedCount(), 0);
 });

@@ -1,16 +1,15 @@
 // Embedded `writing-great-skills` doctrine and glossary for the skill-maker.
-// ENVIRONMENT adapts it to No Forgetti: every skill
-// here is one self-contained SKILL.md, retrieved by lexical match, never a Pi
-// slash command — so the invocation, splitting, and sibling-file sections are
-// read for principle, not mechanics. The adapter states that positively so the
-// model does not emit frontmatter directives or references/ pointers the
-// single-file store cannot honor. Single source of truth for the principles.
+// ENVIRONMENT adapts it to No Forgetti: every generated skill is one
+// self-contained SKILL.md exposed through Pi's native skill discovery. The
+// adapter keeps unsupported sibling-file mechanics out of generated bodies.
+// Single source of truth for the principles.
 
 const ENVIRONMENT = `HOW SKILLS WORK HERE — read the doctrine below through this lens:
 - A No Forgetti skill is exactly one self-contained SKILL.md body. No companion files, no separate GLOSSARY.md, no references/ folder exist: write everything the skill needs inline.
-- It is retrieved automatically by lexical match on its name and description and injected as lower-priority guidance. The agent never auto-fires it and it is never a slash command, so invocation choice, context/cognitive load, router skills, and "split off a model-invoked skill" are background principle here, not actions you take.
+- No Forgetti publishes active packages through Pi's native skill discovery. Pi keeps each description in the system prompt; the model invokes a matching skill by reading SKILL.md, and users can invoke it with /skill:<name>.
+- Every generated project skill is model-invoked. Do not emit disable-model-invocation or invocation routing instructions.
 - Return the SKILL.md body only. Do not write frontmatter (---), a name line, or "see GLOSSARY.md"/references pointers; the store adds frontmatter and cannot resolve pointers.
-- The description is one sentence, <=60 characters, ending in a period; front-load the leading word so lexical retrieval fires on it.
+- The description is one sentence, <=60 characters, ending in a period; make its trigger conditions specific enough for native Pi discovery.
 Apply everything below — leading words, completion criteria, the information hierarchy within that one file, pruning, and the failure modes — to that single file.`;
 
 const RITE = `A skill exists to wrangle determinism out of a stochastic system. Predictability — the agent taking the same process every run, not producing the same output — is the root virtue; every lever below serves it.

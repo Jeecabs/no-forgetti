@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-07-27
+
+- **Breaking:** publish external project skills through Pi native discovery and `/skill:<name>` invocation; remove the custom `project_skill` tool and per-turn lexical body injection, then track successful native reads/invocations for refinement and retention.
 - Add filesystem-authoritative per-provider attempt accounting with conservative holds, exact settlement, unknown exposure, global attempt identities, legacy-budget migration, orphan recovery, and durable retry backoff.
 - Checkpoint and elect normalized provider results before memory admission so restarts reuse the same proposal without another provider call.
 - Add recoverable project admission intents spanning branch mutation and revision publication, outcome-bound immutable receipts, intent compaction, and real-process crash tests.
