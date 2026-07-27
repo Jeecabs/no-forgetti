@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stop rendering redundant project-skill invocation receipts in chat history while retaining hidden usage provenance for refinement and retention.
+
 ## 0.3.0 — 2026-07-27
 
 - **Breaking:** publish external project skills through Pi native discovery and `/skill:<name>` invocation; remove the custom `project_skill` tool and per-turn lexical body injection, then track successful native reads/invocations for refinement and retention.

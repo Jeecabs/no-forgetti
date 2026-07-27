@@ -1393,14 +1393,6 @@ export function activateProjectMemoryExtension(
     return new Text(lines.join("\n"), 1, 0);
   });
 
-  pi.registerEntryRenderer<{ names: string[] }>(PROJECT_SKILL_USE_ENTRY, (entry, _options, theme) => {
-    const names = Array.isArray(entry.data?.names)
-      ? entry.data.names.filter((name): name is string => typeof name === "string")
-      : [];
-    if (names.length === 0) return undefined;
-    return new Text(theme.fg("accent", `Project skill invoked: ${names.join(", ")}`), 1, 0);
-  });
-
   async function settleLifecycleWork(): Promise<void> {
     reviewController?.abort();
     skillReviewController?.abort(REVIEW_ABORT_LIFECYCLE);
