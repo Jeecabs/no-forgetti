@@ -8,6 +8,9 @@ import { isErrno, isRecord } from "../state-validation.ts";
 
 export const DEFAULT_ADMISSION_ARTIFACT_BYTES = 256 * 1024;
 
+/** A different publication already exists at the target path. */
+export class PublicationConflictError extends Error {}
+
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
@@ -104,7 +107,7 @@ export async function createOrCompareJsonFile(
     } catch (error) {
       if (!isErrno(error, "EEXIST")) throw error;
       const existing = await readBoundedPrivateJson(path, maxBytes);
-      if (canonicalJson(existing) !== canonical) throw new Error(`Conflicting publication already exists at ${path}.`);
+      if (canonicalJson(existing) !== canonical) throw new PublicationConflictError(`Conflicting publication already exists at ${path}.`);
       return "matching";
     }
   } finally {

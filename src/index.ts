@@ -497,7 +497,7 @@ export function activateProjectMemoryExtension(
           updatedActiveBranch ||= feedback.status === "applied" && feedback.branchName === activeName;
           // Embedded review surfaces a rejected batch as a warning; a silently
           // dropped external batch would look like memory simply never changed.
-          if ((feedback.status === "stale" || feedback.status === "rejected") && ctx.hasUI) {
+          if ((feedback.status === "stale" || feedback.status === "rejected" || feedback.status === "failed") && ctx.hasUI) {
             ctx.ui.notify(`Project memory review failed: ${feedback.messages.at(0) ?? feedback.status}`, "warning");
           }
         });

@@ -21,7 +21,7 @@ import {
   type ReviewModelProvenance,
 } from "../src/service/model-runner.ts";
 import { SQLiteReviewLedger } from "../src/service/ledger.ts";
-import { createReviewJob } from "../src/service/protocol.ts";
+import { createReviewJob, type ReviewFailure } from "../src/service/protocol.ts";
 import { ReviewEngine, ReviewEngineError } from "../src/service/review-engine.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
 import type { MemoryBranch } from "../src/types.ts";
@@ -451,6 +451,7 @@ test("a permanently failing committer dead-letters the elected decision instead 
   const runner = new CheckpointModelRunner();
   await spool.enqueue(reviewJob);
 
+  const deadLetters: ReviewFailure[] = [];
   const broken = (workerId: string) => new ReviewDaemon({
     spool,
     engine: new ReviewEngine(runner),
@@ -459,16 +460,110 @@ test("a permanently failing committer dead-letters the elected decision instead 
     decisionStore: decisions,
     workerId,
     maxAttempts: 2,
-    committer: { async commit() { throw new Error("committer is permanently broken"); } },
+    committer: {
+      async commit() { throw new Error("committer is permanently broken"); },
+      async failed(_failedJob, failure) { deadLetters.push(failure); },
+    },
   });
 
   assert.equal((await broken("ceiling-worker-1").processOne()).status, "retry");
+  assert.equal(deadLetters.length, 0, "a retryable pass must not publish a dead-letter");
   spoolNow = new Date(spoolNow.getTime() + 10_000);
   const terminal = await broken("ceiling-worker-2").processOne();
   assert.equal(terminal.status, "failed");
   if (terminal.status === "failed") assert.equal(terminal.failure.retryable, false);
   assert.equal((await spool.getOutcome(reviewJob.id))?.status, "failed");
   assert.equal(runner.dispatches, 1, "the elected decision must never redispatch the provider");
+  assert.deepEqual(deadLetters.map((failure) => failure.retryable), [false]);
+});
+
+test("legacy terminal failure publishes the dead-letter only after the durable outcome", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-legacy-deadletter-"));
+  const spool = new ReviewSpool(join(root, "spool"));
+  await spool.enqueue(reviewJob);
+  const deadLetters: ReviewFailure[] = [];
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine({
+      async run() {
+        throw new ModelRunError("provider_error", "Provider exploded.", { retryable: true });
+      },
+    }),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    budgetAccount: new InMemoryReviewBudgetAccount({ now: () => new Date("2026-01-03T12:00:00.000Z") }),
+    workerId: "legacy-deadletter-worker",
+    maxAttempts: 1,
+    committer: {
+      async commit() { throw new Error("the dead-letter path must never commit"); },
+      async failed(failedJob, failure) {
+        assert.equal((await spool.getOutcome(reviewJob.id))?.status, "failed", "spool outcome must be durable before publication");
+        assert.equal(failedJob.id, reviewJob.id);
+        deadLetters.push(failure);
+      },
+    },
+  });
+
+  assert.equal((await daemon.processOne()).status, "failed");
+  assert.deepEqual(deadLetters.map((failure) => failure.retryable), [false]);
+});
+
+test("durable provider failure dead-letters through the committer hook exactly once", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-durable-deadletter-"));
+  const spool = new ReviewSpool(join(root, "spool"));
+  const accounting = new FileReviewAttemptAccounting(spool.root, {
+    now: () => new Date("2026-01-03T12:00:00.000Z"),
+  });
+  const decisions = new ReviewDecisionStore(spool.root);
+  await spool.enqueue(reviewJob);
+  const deadLetters: ReviewFailure[] = [];
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(new CheckpointModelRunner("unknown")),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "durable-deadletter-worker",
+    maxAttempts: 1,
+    committer: {
+      async commit() { throw new Error("the dead-letter path must never commit"); },
+      async failed(failedJob, failure) {
+        assert.equal((await spool.getOutcome(reviewJob.id))?.status, "failed", "spool outcome must be durable before publication");
+        assert.equal(failedJob.id, reviewJob.id);
+        deadLetters.push(failure);
+      },
+    },
+  });
+
+  assert.equal((await daemon.processOne()).status, "failed");
+  assert.deepEqual(deadLetters.map((failure) => failure.retryable), [false]);
+});
+
+test("a throwing dead-letter hook never crashes the worker", async () => {
+  const reviewJob = job();
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-deadletter-hook-crash-"));
+  const spool = new ReviewSpool(join(root, "spool"));
+  await spool.enqueue(reviewJob);
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine({
+      async run() {
+        throw new ModelRunError("provider_error", "Provider exploded.", { retryable: true });
+      },
+    }),
+    budget: { maxCalls: 2, maxTokens: 1_000, maxCostUsd: 1 },
+    budgetAccount: new InMemoryReviewBudgetAccount({ now: () => new Date("2026-01-03T12:00:00.000Z") }),
+    workerId: "deadletter-hook-crash-worker",
+    maxAttempts: 1,
+    committer: {
+      async commit() { throw new Error("the dead-letter path must never commit"); },
+      async failed() { throw new Error("feedback mailbox is unavailable"); },
+    },
+  });
+
+  assert.equal((await daemon.processOne()).status, "failed");
+  assert.equal((await spool.getOutcome(reviewJob.id))?.status, "failed");
 });
 
 test("decision-before-settlement crash reconciles accounting on restart without provider rerun", async () => {

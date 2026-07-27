@@ -1,22 +1,23 @@
-import { mkdir, readdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { syncDirectoryStrict } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
 import { isErrno, isRecord } from "../state-validation.ts";
 import type { MemoryBranch, ReviewAdmissionResult } from "../types.ts";
-import { createOrCompareJsonFile, readBoundedPrivateJson } from "./admission-artifacts.ts";
-import type { ReviewJob, ReviewMemoryBranch } from "./protocol.ts";
+import { createOrCompareJsonFile, PublicationConflictError, readBoundedPrivateJson } from "./admission-artifacts.ts";
+import type { ReviewFailure, ReviewJob, ReviewMemoryBranch } from "./protocol.ts";
 
 const MAX_PENDING_FEEDBACK = 1_024;
 const MAX_PENDING_BYTES = 1_024;
 const MAX_READY_BYTES = 64 * 1_024;
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_STALE_MS = 30_000;
+const PENDING_FEEDBACK_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const JOB_ID = /^review_[0-9a-f]{40}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const BRANCH_NAME = /^[a-z][a-z0-9_-]{0,63}$/u;
-const ADMISSION_STATUSES = new Set(["applied", "noop", "stale", "rejected"]);
+const ADMISSION_STATUSES = new Set(["applied", "noop", "stale", "rejected", "failed"]);
 
 interface PendingFeedback {
   version: 1;
@@ -35,7 +36,7 @@ export interface ReviewFeedback {
   jobId: string;
   jobDigest: string;
   branchName: string;
-  status: ReviewAdmissionResult["status"];
+  status: ReviewAdmissionResult["status"] | "failed";
   messages: string[];
   changes: ReviewFeedbackChange[];
 }
@@ -194,12 +195,72 @@ export async function publishReviewFeedback(
   await createOrCompareJsonFile(join(inbox.readyDir, `${job.id}.json`), feedback, MAX_READY_BYTES);
 }
 
+/** Publishes a terminal review failure only when Pi registered interest in the job. */
+export async function publishReviewFailure(
+  projectDir: string,
+  job: ReviewJob,
+  failure: ReviewFailure,
+): Promise<void> {
+  const inbox = new ReviewFeedbackInbox(projectDir);
+  let pending: PendingFeedback;
+  try {
+    pending = parsePending(await readBoundedPrivateJson(join(inbox.pendingDir, `${job.id}.json`), MAX_PENDING_BYTES));
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return;
+    throw error;
+  }
+  if (pending.jobDigest !== job.digest) throw new Error("No Forgetti pending feedback does not match failed review job.");
+  const feedback: ReviewFeedback = {
+    version: 1,
+    jobId: job.id,
+    jobDigest: job.digest,
+    branchName: job.branch.name,
+    status: "failed",
+    messages: [failure.message],
+    changes: [],
+  };
+  try {
+    await createOrCompareJsonFile(join(inbox.readyDir, `${job.id}.json`), feedback, MAX_READY_BYTES);
+  } catch (error) {
+    // A ready file from an earlier admission of this job is authoritative;
+    // the dead-letter can legitimately follow a committed publication.
+    if (!(error instanceof PublicationConflictError)) throw error;
+  }
+}
+
+async function sweepAgedOrphans(directory: string, names: string[], partners: ReadonlySet<string>): Promise<string[]> {
+  const cutoff = Date.now() - PENDING_FEEDBACK_TTL_MS;
+  const swept = new Set<string>();
+  for (const name of names) {
+    if (partners.has(name)) continue;
+    let info;
+    try {
+      info = await stat(join(directory, name));
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) continue;
+      throw error;
+    }
+    if (info.mtimeMs >= cutoff) continue;
+    await unlink(join(directory, name)).catch((error) => {
+      if (!isErrno(error, "ENOENT")) throw error;
+    });
+    swept.add(name);
+  }
+  if (swept.size > 0) await syncDirectoryStrict(directory);
+  return names.filter((name) => !swept.has(name));
+}
+
 export async function consumeReviewFeedback(
   inbox: ReviewFeedbackInbox,
   consume: (feedback: ReviewFeedback) => void,
 ): Promise<number> {
   return withFileLock(inbox.lockPath, LOCK_TIMEOUT_MS, LOCK_STALE_MS, "review feedback", async () => {
-    const names = (await readdir(inbox.pendingDir)).filter((name) => name.endsWith(".json")).sort();
+    const allPending = (await readdir(inbox.pendingDir)).filter((name) => name.endsWith(".json")).sort();
+    const allReady = (await readdir(inbox.readyDir)).filter((name) => name.endsWith(".json"));
+    // Stat-only orphan GC before the capacity check so a wedged mailbox
+    // self-heals; a pending with a ready file is always left for delivery.
+    const names = await sweepAgedOrphans(inbox.pendingDir, allPending, new Set(allReady));
+    await sweepAgedOrphans(inbox.readyDir, allReady, new Set(allPending));
     if (names.length > MAX_PENDING_FEEDBACK) throw new Error("Too many pending No Forgetti feedback records.");
     let consumed = 0;
     for (const name of names) {
