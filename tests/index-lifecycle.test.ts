@@ -320,7 +320,7 @@ test("validated skill plans finish atomic admission after the commit point", asy
   }]);
 });
 
-test("publishes project skills through Pi native discovery and tracks slash invocation after settlement", async (t) => {
+test("publishes project skills and tracks slash invocation without rendering duplicate history", async (t) => {
   const { branch, context, extension, skillStore } = await fixture(t);
   await extension.emit("session_start", {}, context);
 
@@ -346,6 +346,7 @@ test("publishes project skills through Pi native discovery and tracks slash invo
   assert.equal(used.useCount, 1);
   assert.equal(used.useSessionCount, 1);
   assert.equal(await skillStore.activity.completedCount(), 1);
+  assert.equal(extension.entryRenderers.has(PROJECT_SKILL_USE_ENTRY), false);
   assert.deepEqual(extension.entries.filter((entry) => entry.customType === PROJECT_SKILL_USE_ENTRY), [{
     customType: PROJECT_SKILL_USE_ENTRY,
     data: { names: ["verification"] },
