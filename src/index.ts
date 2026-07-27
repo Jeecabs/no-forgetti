@@ -495,6 +495,11 @@ export function activateProjectMemoryExtension(
           });
           deliveredExternalReviews.add(feedback.jobId);
           updatedActiveBranch ||= feedback.status === "applied" && feedback.branchName === activeName;
+          // Embedded review surfaces a rejected batch as a warning; a silently
+          // dropped external batch would look like memory simply never changed.
+          if ((feedback.status === "stale" || feedback.status === "rejected") && ctx.hasUI) {
+            ctx.ui.notify(`Project memory review failed: ${feedback.messages.at(0) ?? feedback.status}`, "warning");
+          }
         });
         if (updatedActiveBranch) frozenBranch = await memoryStore.loadBranch(activeName);
         externalFeedbackErrorAnnounced = false;
@@ -780,14 +785,24 @@ export function activateProjectMemoryExtension(
       baseBranchDigest: memoryStore.branchDigest(branch),
       maxChars: memoryStore.maxChars,
     });
-    const enqueue = await spool.enqueue(job);
-    if (enqueue === "quarantined") throw new Error(`Review job '${job.id}' conflicted with an existing durable job.`);
-    if (serviceConfig.mode === "external") {
-      try {
-        await reviewFeedbackInbox?.register(job.id, job.digest);
-      } catch (error) {
-        if (ctx.hasUI) ctx.ui.notify(`No Forgetti could not register memory feedback: ${errorMessage(error)}`, "warning");
-      }
+    // Interest must be durable before the job is claimable, or a worker can
+    // admit and publish its diff before Pi has anywhere to receive it.
+    const inbox = serviceConfig.mode === "external" ? reviewFeedbackInbox : undefined;
+    try {
+      await inbox?.register(job.id, job.digest);
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.notify(`No Forgetti could not register memory feedback: ${errorMessage(error)}`, "warning");
+    }
+    let enqueue: Awaited<ReturnType<typeof spool.enqueue>>;
+    try {
+      enqueue = await spool.enqueue(job);
+    } catch (error) {
+      await inbox?.discard(job.id).catch(() => undefined);
+      throw error;
+    }
+    if (enqueue === "quarantined") {
+      await inbox?.discard(job.id).catch(() => undefined);
+      throw new Error(`Review job '${job.id}' conflicted with an existing durable job.`);
     }
     pi.appendEntry(MEMORY_REVIEW_JOB_ENTRY, {
       version: 1,

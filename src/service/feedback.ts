@@ -27,6 +27,7 @@ interface PendingFeedback {
 export type ReviewFeedbackChange =
   | { kind: "add"; text: string }
   | { kind: "replace"; text: string; oldText: string }
+  | { kind: "assess"; text: string }
   | { kind: "remove"; text: string };
 
 export interface ReviewFeedback {
@@ -45,7 +46,10 @@ function checkedIdentity(value: unknown, pattern: RegExp, label: string): string
 }
 
 function checkedText(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 1_000) {
+  // Sanitized review memory text is bounded at 4,000 characters and an assess
+  // change only prefixes its importance, so a shorter bound here would reject
+  // real diffs and wedge the mailbox permanently.
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096) {
     throw new Error(`Invalid No Forgetti feedback ${label}.`);
   }
   return value;
@@ -61,7 +65,7 @@ function checkedMessages(value: unknown): string[] {
 function parseFeedbackChange(value: unknown): ReviewFeedbackChange {
   if (!isRecord(value)) throw new Error("Invalid No Forgetti feedback change.");
   const text = checkedText(value.text, "change text");
-  if (value.kind === "add" || value.kind === "remove") return { kind: value.kind, text };
+  if (value.kind === "add" || value.kind === "remove" || value.kind === "assess") return { kind: value.kind, text };
   if (value.kind !== "replace") throw new Error("Invalid No Forgetti feedback change kind.");
   return { kind: value.kind, text, oldText: checkedText(value.oldText, "previous text") };
 }
@@ -108,12 +112,9 @@ function feedbackChanges(before: ReviewMemoryBranch, after: MemoryBranch): Revie
     const previous = beforeById.get(entry.id);
     if (!previous) added.push({ kind: "add", text: entry.text });
     else if (previous.text !== entry.text) replaced.push({ kind: "replace", text: entry.text, oldText: previous.text });
+    // Importance-only changes render as embedded review renders them.
     else if (previous.importance !== entry.importance || previous.importanceAssessedAt !== entry.importanceAssessedAt) {
-      replaced.push({
-        kind: "replace",
-        text: `[${entry.importance}] ${entry.text}`,
-        oldText: `[${previous.importance}] ${previous.text}`,
-      });
+      replaced.push({ kind: "assess", text: `${entry.importance}: ${entry.text}` });
     }
   }
   for (const entry of before.entries) {
@@ -154,6 +155,16 @@ export class ReviewFeedbackInbox {
     await createOrCompareJsonFile(join(this.pendingDir, `${jobId}.json`), pending, MAX_PENDING_BYTES);
   }
 
+  /** Drops interest in a job that never reached the durable queue. */
+  async discard(jobId: string): Promise<void> {
+    try {
+      await unlink(join(this.pendingDir, `${checkedIdentity(jobId, JOB_ID, "job id")}.json`));
+    } catch (error) {
+      if (!isErrno(error, "ENOENT")) throw error;
+      return;
+    }
+    await syncDirectoryStrict(this.pendingDir);
+  }
 }
 
 /** Publishes the exact admitted diff only when Pi registered interest in the job. */
