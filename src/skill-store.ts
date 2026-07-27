@@ -34,46 +34,11 @@ import {
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 5_000;
 const SKILL_FILE = "SKILL.md";
-const RETRIEVAL_STOP_WORDS = new Set([
-  "a", "an", "and", "are", "do", "for", "how", "i", "in", "is", "it", "my", "of", "on", "or", "project", "the", "to", "use", "what", "when", "with",
-]);
-const MAX_RETRIEVAL_QUERY_CHARS = 256;
-const MAX_RETRIEVAL_TERMS = 32;
 const MAX_SKILL_INDEX_CHARS = 6_000;
 const MAX_SKILL_JSON_BYTES = 5 * 1024 * 1024;
 const LEGACY_SKILL_REVIEW_STATE_VERSION = 1;
 const SKILL_REVIEW_STATE_VERSION = 2;
 const UUID = /^[a-f0-9-]{36}$/u;
-
-function retrievalVariants(term: string): string[] {
-  const variants = [term];
-  const replacements: ReadonlyArray<readonly [RegExp, string]> = [
-    [/ability$/u, "able"],
-    [/ification$/u, "ify"],
-    [/ied$/u, "y"],
-    [/ies$/u, "y"],
-    [/ing$/u, ""],
-    [/ed$/u, ""],
-    [/s$/u, ""],
-  ];
-  const rule = replacements.find(([pattern]) => pattern.test(term));
-  if (!rule) return variants;
-  const stem = term.replace(rule[0], rule[1]);
-  if (stem.length > 2 && stem !== term) variants.push(stem);
-  if (term.endsWith("ing") && stem.length > 2) {
-    if (!stem.endsWith("e")) variants.push(`${stem}e`);
-    if (/([^aeiou])\1$/u.test(stem)) variants.push(stem.slice(0, -1));
-  }
-  return variants;
-}
-
-function retrievalTerms(value: string): string[] {
-  const tokens = value.normalize("NFKC").slice(0, MAX_RETRIEVAL_QUERY_CHARS).toLowerCase().match(/[a-z0-9]+/gu) ?? [];
-  return [...new Set(tokens
-    .filter((term) => term.length > 2 && !RETRIEVAL_STOP_WORDS.has(term))
-    .flatMap(retrievalVariants))]
-    .slice(0, MAX_RETRIEVAL_TERMS);
-}
 
 interface SkillStoreOptions {
   storageRoot?: string;
@@ -381,23 +346,6 @@ export class ProjectSkillStore {
       usedChars += line.length + 1;
     }
     return lines.join("\n");
-  }
-
-  async findRelevantSkills(query: string, limit = 2): Promise<ProjectSkill[]> {
-    const terms = retrievalTerms(query);
-    if (terms.length === 0) return [];
-    const scored = (await this.listSkills()).map((skill) => {
-      const nameTerms = new Set(retrievalTerms(skill.name.replaceAll("-", " ")));
-      const descriptionTerms = new Set(retrievalTerms(skill.description));
-      const score = terms.reduce((total, term) => total + (nameTerms.has(term) ? 3 : descriptionTerms.has(term) ? 1 : 0), 0);
-      return { skill, score };
-    });
-    const safeLimit = Number.isFinite(limit) ? Math.min(5, Math.max(1, Math.floor(limit))) : 2;
-    return scored
-      .filter(({ score }) => score > 0)
-      .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
-      .slice(0, safeLimit)
-      .map(({ skill }) => skill);
   }
 
   async usageReport(retentionSessions = DEFAULT_SKILL_RETENTION_SESSIONS): Promise<string> {

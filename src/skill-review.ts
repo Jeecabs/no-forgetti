@@ -72,6 +72,8 @@ export async function requestSkillReviewPlan(
     "Return ONLY JSON: {\"operations\":[...]}. Return zero or one operation.",
     "Use {\"operations\":[]} unless the conversation contains a durable, repeatable process worth replaying.",
     "Prefer patching an existing skill over creating a near-duplicate.",
+    "PROJECT SKILLS INVOKED markers and recall counts prove retrieval, not usefulness or successful application.",
+    "Patch an invoked skill when the surrounding conversation shows a durable missing or incorrect step. Archive only with direct obsolescence evidence; inactivity retention separately stages archive review after its threshold.",
     "",
     "SKILL DOCTRINE — apply this when writing or patching a skill:",
     SKILL_DOCTRINE,

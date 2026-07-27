@@ -203,7 +203,7 @@ export async function showSkillViewer(
     if (presentOutput) presentOutput(output);
     else if (ctx.hasUI) ctx.ui.notify(output, "info");
     else if (ctx.mode === "print") process.stdout.write(`${output}\n`);
-    else throw new Error("Project skill reading requires TUI/RPC mode; use the project_skill tool in JSON mode.");
+    else throw new Error("Project skill reading requires TUI/RPC/print mode; invoke /skill:<name> in JSON mode.");
     return "close";
   }
   return ctx.ui.custom<SkillViewerAction>((tui, theme, keybindings, done) => (

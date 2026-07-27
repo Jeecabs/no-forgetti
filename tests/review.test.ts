@@ -5,6 +5,7 @@ import { formatMemoryContext } from "../src/context.ts";
 import { scoreMemorySignal } from "../src/heuristics.ts";
 import { buildReviewEvidenceWindow, buildReviewPrompt, buildReviewTranscript, parseReviewPlan } from "../src/review.ts";
 import { validateMemoryText } from "../src/security.ts";
+import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import type { MemoryBranch } from "../src/types.ts";
 
 const branch: MemoryBranch = {
@@ -104,11 +105,19 @@ test("review transcript strips tool arguments and results", () => {
       isError: false,
       timestamp: 2,
     },
+  }, {
+    type: "custom",
+    id: "skill-use-1",
+    parentId: "tool-1",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    customType: PROJECT_SKILL_USE_ENTRY,
+    data: { names: ["verification"] },
   }] as unknown as Parameters<typeof buildReviewTranscript>[0];
   const transcript = buildReviewTranscript(entries);
   assert.match(transcript, /USER: Review this change/u);
   assert.match(transcript, /tool call: read/u);
   assert.match(transcript, /TOOL read: completed/u);
+  assert.match(transcript, /PROJECT SKILLS INVOKED: verification/u);
   assert.doesNotMatch(transcript, /SECRET SKILL BODY|do-not-leak|untrusted raw output/u);
 
   const afterUser = buildReviewTranscript(entries, "user-1");
