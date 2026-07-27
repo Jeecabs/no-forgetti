@@ -5,6 +5,7 @@ import { isRecord } from "../state-validation.ts";
 import { ProjectMemoryStore } from "../store.ts";
 import { STORE_FILE_BYTE_LIMIT, STORE_VERSION } from "../types.ts";
 import { admissionJsonDigest, createOrCompareJsonFile } from "./admission-artifacts.ts";
+import { publishReviewFeedback } from "./feedback.ts";
 import type { ReviewJob, ReviewOutcome } from "./protocol.ts";
 
 export type AdmissionStatus = "applied" | "noop" | "stale" | "rejected";
@@ -133,8 +134,7 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
       await store.retireReviewAdmission(job.id, bindingDigest);
       return durableReceipt;
     }
-    const recovered = await store.getReviewAdmissionMetadata(job.id, bindingDigest);
-    const result = recovered ?? await store.applyReviewAdmission({
+    const result = await store.applyReviewAdmission({
       transactionId: job.id,
       branchName: job.branch.name,
       expectedBranchDigest: job.baseBranchDigest,
@@ -158,6 +158,7 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
       bindingDigest,
       ...(result.revisionId ? { revisionId: result.revisionId } : {}),
     };
+    await publishReviewFeedback(projectDir, job, result);
     await createOrCompareJsonFile(path, receipt, STORE_FILE_BYTE_LIMIT);
     const published = parseReceipt(await readBoundedJson(path), job, outcome);
     await store.retireReviewAdmission(job.id, bindingDigest);

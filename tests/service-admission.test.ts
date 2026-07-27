@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { ProjectMemoryStore } from "../src/store.ts";
 import { admissionBindingDigest, FileMemoryProposalCommitter } from "../src/service/admission.ts";
+import { consumeReviewFeedback, ReviewFeedbackInbox, type ReviewFeedback } from "../src/service/feedback.ts";
 import { createReviewJob, createReviewOutcome, type ReviewModelProvenance } from "../src/service/protocol.ts";
 
 const provenance: ReviewModelProvenance = {
@@ -76,6 +77,55 @@ test("external admission applies a proposal once through branch CAS", async (t) 
     (await store.getReviewAdmissionMetadata(job.id, admissionBindingDigest(job, outcome)))?.resultingBranchDigest,
     receipt.resultingBranchDigest,
   );
+});
+
+test("external admission feedback reports actual added, changed, and removed content", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  const first = await store.applyOperation("main", { action: "add", content: "Tests run with pnpm test." });
+  const second = await store.applyOperation("main", { action: "add", content: "CI runs on Node 18." });
+  const branch = await store.loadBranch("main");
+  const testsId = first.branch.entries.at(0)!.id;
+  const ciId = second.branch.entries.at(1)!.id;
+  const job = createReviewJob({
+    projectKey: store.projectKey,
+    sessionId: "private-session",
+    throughEntryId: "entry-1",
+    transcript: "USER: update project verification",
+    branch,
+    baseBranchDigest: store.branchDigest(branch),
+    maxChars: store.maxChars,
+  });
+  const outcome = createReviewOutcome(job, {
+    status: "completed",
+    operations: [
+      { action: "replace", entryId: testsId, content: "Tests run with pnpm check.", importance: "high" },
+      { action: "remove", entryId: ciId },
+      { action: "add", content: "Deploys use the release workflow.", importance: "normal" },
+    ],
+    provenance,
+    completedAt: provenance.completedAt,
+  });
+
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  await inbox.register(job.id, job.digest);
+  const receipt = await new FileMemoryProposalCommitter(agentDir).commit(job, outcome);
+  const feedback: ReviewFeedback[] = [];
+  assert.equal(await consumeReviewFeedback(inbox, (value) => feedback.push(value)), 1);
+  assert.deepEqual(feedback, [{
+    version: 1,
+    jobId: job.id,
+    jobDigest: job.digest,
+    branchName: "main",
+    status: "applied",
+    messages: receipt.messages,
+    changes: [
+      { kind: "add", text: "Deploys use the release workflow." },
+      { kind: "replace", text: "Tests run with pnpm check.", oldText: "Tests run with pnpm test." },
+      { kind: "remove", text: "CI runs on Node 18." },
+    ],
+  }]);
+  assert.equal(await consumeReviewFeedback(inbox, (value) => feedback.push(value)), 0);
 });
 
 test("receipt recovery reuses a committed store transaction instead of reporting stale", async (t) => {
