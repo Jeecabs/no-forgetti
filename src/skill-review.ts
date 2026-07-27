@@ -91,7 +91,7 @@ export async function requestSkillReviewPlan(
     "",
     "Create shape:",
     '{"action":"create","name":"lowercase-hyphenated","description":"<=60 character trigger sentence.","content":"complete SKILL.md body"}',
-    "Patch shape:",
+    "Patch shape (oldText must occur exactly once across the trigger description and body):",
     '{"action":"patch","name":"existing-skill","oldText":"unique existing text","newText":"replacement text","reason":"why this improves recurrence"}',
     "Archive shape:",
     '{"action":"archive","name":"obsolete-skill","reason":"why it is obsolete"}',

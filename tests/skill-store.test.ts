@@ -109,6 +109,36 @@ test("startup migration applies legacy pending creates but preserves patches", a
   assert.equal((await store.listPending()).at(0)?.operations.at(0)?.action, "patch");
 });
 
+test("patches trigger descriptions and keeps the skill body unchanged", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const content = "# Capture\n\nDiagnose DOM-to-image export failures.";
+  const proposal = await store.stageProposal([{
+    action: "create",
+    name: "diagnose-dom-image-export",
+    description: "Capture: diagnose DOM-to-image export failures.",
+    content,
+  }]);
+  await store.approveProposal(proposal.id);
+
+  const patch = await store.stageProposal([{
+    action: "patch",
+    name: "diagnose-dom-image-export",
+    oldText: "Capture: diagnose DOM-to-image export failures.",
+    newText: "Capture: diagnose blocked or failed DOM image exports.",
+  }]);
+  const result = await store.approveProposal(patch.id);
+  const skill = await store.loadSkill("diagnose-dom-image-export");
+  assert.match(result.message, /Patched/u);
+  assert.equal(skill.description, "Capture: diagnose blocked or failed DOM image exports.");
+  assert.equal(skill.content, content);
+  assert.match(
+    await readFile(join(store.revisionsDir, patch.id, "diagnose-dom-image-export", "SKILL.md"), "utf8"),
+    /Capture: diagnose DOM-to-image export failures\./u,
+  );
+  assert.equal((await store.listPending()).length, 0);
+});
+
 test("patches with a unique match, keeps a revision, and rejects ambiguous patches", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
@@ -143,10 +173,10 @@ test("patches with a unique match, keeps a revision, and rejects ambiguous patch
   const ambiguous = await store.stageProposal([{
     action: "patch",
     name: "verification",
-    oldText: "the",
-    newText: "a",
+    oldText: "canonical",
+    newText: "standard",
   }]);
-  await assert.rejects(store.approveProposal(ambiguous.id), /match exactly once/u);
+  await assert.rejects(store.approveProposal(ambiguous.id), /match exactly once \(found 2\)/u);
 });
 
 test("tracks recalls across completed sessions and stages stale archives", async (t) => {

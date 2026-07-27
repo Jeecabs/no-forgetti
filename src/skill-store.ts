@@ -158,6 +158,10 @@ function parseReviewSettlement(value: unknown): { claim: SkillReviewClaim; outco
   return { claim: parseReviewClaim(value.claim), outcome: parseReviewOutcome(value.outcome) };
 }
 
+function countOccurrences(text: string, search: string): number {
+  return text.split(search).length - 1;
+}
+
 function parseYamlScalar(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
@@ -684,12 +688,17 @@ export class ProjectSkillStore {
 
     const existing = await this.loadSkill(validated.name);
     if (validated.action === "patch") {
-      const matches = existing.content.split(validated.oldText!).length - 1;
+      const oldText = validated.oldText!;
+      const newText = validated.newText!;
+      const descriptionMatches = countOccurrences(existing.description, oldText);
+      const contentMatches = countOccurrences(existing.content, oldText);
+      const matches = descriptionMatches + contentMatches;
       if (matches !== 1) throw new Error(`Skill patch text must match exactly once (found ${matches}).`);
-      const content = validateSkillContent(existing.content.replace(validated.oldText!, validated.newText!));
       const next: ProjectSkill = {
         ...existing,
-        content,
+        ...(descriptionMatches === 1
+          ? { description: validateSkillDescription(existing.description.replace(oldText, newText)) }
+          : { content: validateSkillContent(existing.content.replace(oldText, newText)) }),
         updatedAt: timestamp,
         updatedBy: origin,
         patchCount: existing.patchCount + 1,
