@@ -46,7 +46,7 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   }
 }
 
-async function readBoundedPrivateJson(path: string, maxBytes: number): Promise<unknown> {
+export async function readBoundedPrivateJson(path: string, maxBytes: number): Promise<unknown> {
   const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
   const file = await open(path, constants.O_RDONLY | noFollow);
   try {

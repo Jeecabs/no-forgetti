@@ -14,6 +14,7 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 - Pi `/fork` and `/clone` keep using the same memory branch. They **do not** clone memory automatically.
 - `/memory fork <name>` explicitly clones the active memory and switches only the current Pi session to it. With Pi session persistence disabled, that selection lasts only for the current process.
 - Writes persist immediately. Every turn reloads and injects the active memory branch, so foreground tools, background review, and other sessions become visible without `/memory refresh`.
+- External admissions also publish durable UI feedback. An open Pi picks it up on the service-monitor tick; if Pi is closed, the next project session consumes it. Applied reviews render the actual committed content as `+` additions, `~` replacements, and `-` removals rather than summarizing the model proposal.
 - Review starts only after Pi is fully settled at the end of a completed turn. The default `embedded` mode preserves in-process review; `shadow` durably mirrors bounded sanitized jobs; opt-in `external` authority hands accepted jobs to the separately runnable No Forgetti worker so Pi shutdown does not abort them. Review processes the oldest bounded unreviewed window and advances only through included evidence, preventing truncation from skipping history. Validated changes use branch compare-and-swap, append-only history, and inverse-CAS `/memory undo` that refuses to erase later conflicting writes. Explicit signals trigger early review; 10 completed prompts remain the periodic fallback. `/memory review` and `/project-skills review` run on demand.
 - Successful complex workflows can form an external project skill. Validated new skills are added automatically; patches and archives remain pending until you inspect and approve them. Skills stay in No Forgetti storage, are published through Pi's native skill discovery, support `/skill:<name>`, and are never written into the repository.
 
@@ -209,7 +210,10 @@ $PI_CODING_AGENT_DIR/no-forgetti/
     ├── skill-pending/
     ├── skill-revisions/
     ├── service/
-    │   └── commit-receipts/
+    │   ├── commit-receipts/
+    │   └── review-feedback/
+    │       ├── pending/                   # registered Pi UI deliveries
+    │       └── ready/                     # admitted content diffs awaiting Pi
     ├── review-admissions/                 # active intents, then compact tombstones
     └── branches/
         ├── main.json

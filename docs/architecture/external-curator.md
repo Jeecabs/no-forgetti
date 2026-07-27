@@ -32,6 +32,8 @@ Review service
 
 The extension remains the Pi lifecycle adapter. The service never edits Pi JSONL. Existing memory JSON remains canonical during the mixed-version release. SQLite is observational shadow state, not authority for queue ownership, provider attempts, budgets, decisions, or memory.
 
+External UI feedback uses a project-local durable mailbox. The extension registers accepted external jobs before returning to Pi. Successful admission publishes a private, bounded event containing the actual post-validation content diff before its compact receipt. An open Pi consumes ready feedback during service polling; otherwise the next project session consumes it at startup. Consumption appends the same custom transcript entry used by embedded review, then removes the pending and ready files. The card shows `+` added content, `~` replacement content with its prior value when expanded, and `-` removed content. Proposed operations never drive the card because admission may reject, stale, or partially no-op them.
+
 ## Authority modes and rollout
 
 - `embedded`: current in-process reviewer owns review.

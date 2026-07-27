@@ -9,6 +9,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { activateProjectMemoryExtension, type ExtensionDependencies } from "../src/index.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
+import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
+import { createReviewOutcome } from "../src/service/protocol.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
 import { ProjectMemoryStore } from "../src/store.ts";
 
@@ -445,6 +447,117 @@ test("external review authority durably queues bounded evidence without an in-pr
   assert.match(claim.job.transcript, /verification uses pnpm check/u);
   assert.equal(claim.job.baseBranchDigest, memoryStore.branchDigest(await memoryStore.loadBranch("main")));
   assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-memory-review-job"), true);
+});
+
+test("external review receipt appends a compact content diff to the next Pi session", async (t) => {
+  const externalConfig = {
+    version: 1 as const,
+    mode: "external" as const,
+    evidenceTtlHours: 24,
+    reviewer: {
+      provider: "fake",
+      model: "reviewer",
+      reasoningEffort: "high" as const,
+      maxCallsPerDay: 10,
+      maxTokensPerDay: 10_000,
+      maxCostPerDayUsd: 1,
+    },
+  };
+  const { branch, context, extension, memoryStore, skillStore, reviewSpool } = await fixture(t, {
+    loadServiceConfig: async () => externalConfig,
+  });
+  const tests = await memoryStore.applyOperation("main", { action: "add", content: "Tests run with pnpm test." });
+  const ci = await memoryStore.applyOperation("main", { action: "add", content: "CI runs on Node 18." });
+  const testsId = tests.branch.entries.at(0)!.id;
+  const ciId = ci.branch.entries.at(1)!.id;
+  branch.push(userEntry("external-feedback-user", "Remember that verification uses pnpm check."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  const claim = await reviewSpool.claim({ workerId: "feedback-worker", leaseMs: 1_000 });
+  assert.ok(claim);
+  const completedAt = "2026-01-01T00:00:01.000Z";
+  const outcome = createReviewOutcome(claim.job, {
+    status: "completed",
+    operations: [
+      { action: "replace", entryId: testsId, content: "Tests run with pnpm check.", importance: "high" },
+      { action: "remove", entryId: ciId },
+      { action: "add", content: "Deploys use the release workflow.", importance: "normal" },
+    ],
+    completedAt,
+    provenance: {
+      provider: "fake",
+      model: "reviewer",
+      api: "fake-api",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt,
+      durationMs: 1_000,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  });
+  const agentDir = join(memoryStore.projectDir, "..", "..");
+  await new FileMemoryProposalCommitter(agentDir).commit(claim.job, outcome);
+  await reviewSpool.finish(claim, outcome);
+  await extension.emit("session_shutdown", {}, context);
+
+  const receiving = new FakeExtension();
+  activateProjectMemoryExtension(receiving.api, {
+    isNonPrimaryAgent: () => false,
+    createMemoryStore: () => memoryStore,
+    createSkillStore: () => skillStore,
+    loadServiceConfig: async () => externalConfig,
+    loadServiceMonitor: async () => ({
+      mode: "external",
+      budget: { day: "2026-01-01", calls: 1, tokens: 2, costUsd: 0 },
+      spool: { queued: 0, running: 0, outcomes: 1, deadLetter: 0 },
+      workerFresh: true,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:02.000Z",
+    }),
+    createReviewSpool: () => reviewSpool,
+  });
+  await receiving.emit("session_start", {}, context);
+  const feedback = receiving.entries.find((entry) =>
+    entry.customType === "no-forgetti-memory-review"
+      && (entry.data as { jobId?: string }).jobId === claim.job.id
+  );
+  assert.deepEqual(feedback?.data, {
+    projectKey: memoryStore.projectKey,
+    jobId: claim.job.id,
+    branch: "main",
+    status: "applied",
+    changes: [
+      { kind: "add", text: "Deploys use the release workflow." },
+      { kind: "replace", text: "Tests run with pnpm check.", oldText: "Tests run with pnpm test." },
+      { kind: "remove", text: "CI runs on Node 18." },
+    ],
+  });
+
+  const renderer = receiving.entryRenderers.get("no-forgetti-memory-review") as (
+    entry: { data: unknown },
+    options: { expanded: boolean },
+    theme: { fg: (color: string, text: string) => string },
+  ) => { render: (width: number) => string[] };
+  const rendered = renderer(feedback!, { expanded: true }, { fg: (_color, text) => text }).render(120).join("\n");
+  assert.match(rendered, /no-forgetti memory updated/u);
+  assert.match(rendered, /\+ Deploys use the release workflow\./u);
+  assert.match(rendered, /~ Tests run with pnpm check\./u);
+  assert.match(rendered, /was: Tests run with pnpm test\./u);
+  assert.match(rendered, /- CI runs on Node 18\./u);
+
+  await receiving.emit("before_agent_start", { systemPrompt: "base", prompt: "again" }, context);
+  assert.equal(receiving.entries.filter((entry) =>
+    entry.customType === "no-forgetti-memory-review"
+      && (entry.data as { jobId?: string }).jobId === claim.job.id
+  ).length, 1);
+  await receiving.emit("session_shutdown", {}, context);
 });
 
 test("memory review appends a change entry with resolved entry IDs", async (t) => {
