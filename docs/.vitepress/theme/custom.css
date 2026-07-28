@@ -4,10 +4,10 @@
  * stock inside, engraved double rules, thumb-index tabs, numbered sections,
  * mono data labels, NOTE / CAUTION blocks.
  */
-@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=Bitter:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..700,0..100,0..1&family=JetBrains+Mono:wght@400;500;700&display=swap");
 
 :root {
-  --font-display: "Bitter", ui-serif, Georgia, serif;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
   --font-body: "Archivo", ui-sans-serif, sans-serif;
   --font-code: "JetBrains Mono", ui-monospace, monospace;
 
@@ -28,10 +28,10 @@
   --space-sm: 0.75rem;
   --space-md: 1rem;
   --space-lg: 1.5rem;
-  --space-xl: 2.5rem;
-  --space-2xl: 4rem;
+  --space-xl: 1.9rem;
+  --space-2xl: 2.6rem;
 
-  --label: 0.68rem;
+  --label: 0.66rem;
   --track: 0.14em;
   --dur-micro: 120ms;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -92,8 +92,23 @@ body {
 
 body {
   font-family: var(--font-body);
-  font-size: 16px;
-  line-height: 1.62;
+  font-size: 15px;
+  line-height: 1.58;
+}
+
+/* paper tooth: tiled turbulence, no asset, no request */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
+}
+
+.dark body::before {
+  opacity: 0.035;
 }
 
 /* ---- chrome: the manual's covers and tabs ------------------------------- */
@@ -125,6 +140,8 @@ body {
 
 .VPNavBarTitle .title {
   font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-variation-settings: "SOFT" 0, "WONK" 1;
   font-weight: 700;
   font-size: 0.98rem;
   letter-spacing: 0.12em;
@@ -139,12 +156,9 @@ body {
   letter-spacing: 0.05em;
 }
 
-/* sidebar groups are thumb-index tabs, stamped like divider labels */
+/* sidebar groups are divider legends: quiet gold caps above the hairline */
 .VPSidebarItem.level-0 > .item > .text {
-  display: inline-block;
-  padding: 0.2rem 0.55rem;
-  background: var(--color-ink);
-  color: var(--color-paper);
+  color: var(--color-accent);
   font-family: var(--font-code);
   font-size: 0.64rem;
   font-weight: 700;
@@ -152,11 +166,8 @@ body {
   text-transform: uppercase;
 }
 
-/* VitePress recolours the active group's label from a scoped rule that outranks
- * this file, so the tab label needs !important to stay legible on the ink */
-.VPSidebarItem.level-0 > .item > .text,
-.VPSidebarItem.level-0.has-active > .item > .text {
-  color: var(--color-paper) !important;
+.VPSidebarItem .indicator {
+  background-color: var(--color-accent);
 }
 
 .VPSidebarItem.level-0 > .item {
@@ -201,6 +212,9 @@ body {
 .vp-doc h3,
 .vp-doc h4 {
   font-family: var(--font-display);
+  /* low softness + wonk on: flared stems, angled terminals, engraved not typeset */
+  font-optical-sizing: auto;
+  font-variation-settings: "SOFT" 0, "WONK" 1;
   overflow-wrap: anywhere;
   min-width: 0;
 }
@@ -210,7 +224,7 @@ body {
   margin-bottom: var(--space-lg);
   padding-bottom: var(--space-md);
   border-bottom: 4px double var(--color-ink);
-  font-size: clamp(2rem, 3.9vw, 2.9rem);
+  font-size: clamp(2.3rem, 4vw, 3.2rem);
   font-weight: 700;
   line-height: 1.12;
   letter-spacing: 0.01em;
@@ -224,9 +238,9 @@ body {
 .vp-doc h2 {
   counter-increment: section;
   margin-top: var(--space-2xl);
-  padding-top: var(--space-lg);
-  border-top: 3px double var(--color-rule-heavy);
-  font-size: 1.45rem;
+  padding-top: 0.9rem;
+  border-top: 3px double var(--color-accent);
+  font-size: 1.75rem;
   font-weight: 700;
   letter-spacing: 0.005em;
 }
@@ -250,7 +264,7 @@ body {
 .vp-doc h3 {
   counter-increment: subsection;
   margin-top: var(--space-xl);
-  font-size: 1.1rem;
+  font-size: 1.02rem;
   font-weight: 600;
   letter-spacing: 0.005em;
 }
@@ -263,10 +277,24 @@ body {
   color: var(--color-muted);
 }
 
+/* narrow prose against full-width data plates: the manual's own convention */
 .vp-doc > p,
 .vp-doc > ul,
 .vp-doc > ol {
-  max-width: 72ch;
+  max-width: 66ch;
+}
+
+.vp-doc p {
+  margin: 0.85rem 0;
+}
+
+.vp-doc ul,
+.vp-doc ol {
+  margin: 0.85rem 0;
+}
+
+.vp-doc li + li {
+  margin-top: 0.3rem;
 }
 
 .vp-doc a {
@@ -293,7 +321,7 @@ button:focus-visible {
   counter-increment: step;
   position: relative;
   padding-left: 2.9rem;
-  margin-top: var(--space-sm);
+  margin-top: var(--space-xs);
 }
 
 .vp-doc ol > li::before {
@@ -357,9 +385,9 @@ button:focus-visible {
 }
 
 .vp-doc th {
-  padding: var(--space-sm) var(--space-md) var(--space-sm) 0;
+  padding: 0.5rem 0.9rem 0.5rem 0;
   border: 0;
-  border-bottom: 1px solid var(--color-rule-heavy);
+  border-bottom: 1px solid var(--color-accent);
   font-family: var(--font-code);
   font-size: var(--label);
   font-weight: 700;
@@ -370,7 +398,7 @@ button:focus-visible {
 }
 
 .vp-doc td {
-  padding: var(--space-sm) var(--space-md) var(--space-sm) 0;
+  padding: 0.5rem 0.9rem 0.5rem 0;
   border: 0;
   border-bottom: 1px solid var(--color-rule);
   vertical-align: top;
@@ -425,7 +453,7 @@ button:focus-visible {
   border-left-width: 4px;
   border-radius: 0;
   background: var(--color-paper-raised);
-  padding: var(--space-md) var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
 }
 
 .vp-doc .custom-block .custom-block-title {
@@ -453,7 +481,7 @@ button:focus-visible {
   font-weight: 700;
   letter-spacing: var(--track);
   text-transform: uppercase;
-  color: var(--color-muted);
+  color: var(--color-accent);
 }
 
 .vp-doc .custom-block.tip .custom-block-title::before,
