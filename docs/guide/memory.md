@@ -1,84 +1,116 @@
 # Project memory
 
-Project memory is a small, durable set of facts that helps future Pi sessions work correctly without rediscovering the same conventions.
+Project memory is a short, durable record for one project. Pi loads the active memory branch before each turn. Future sessions can follow established conventions without rediscovering them.
 
-## Scope
+::: tip A simple test
+Store a fact when it should still help in a future session and does not already exist in project documentation.
+:::
 
-No Forgetti identifies a project by:
+## Choose what to remember
 
-1. the nearest Git root; or
-2. the exact Pi launch directory when no Git root exists.
+Keep facts that are stable and expensive to rediscover. For example:
 
-Git worktrees intentionally receive separate memory because their canonical working-tree roots differ. Gang and Pi subagent children are memory-isolated; only the primary or superintendent session loads and writes No Forgetti memory.
+- `Use pnpm check before pnpm test.`
+- `The API package owns request validation.`
+- `Prefer named options objects when an API includes boolean settings.`
+- `The release script requires a clean Git worktree.`
 
-## What belongs in memory
+Memory is also useful for architecture facts, recurring project preferences, and non-obvious tool behavior.
 
-Good entries are stable and expensive to rediscover:
+Leave out facts that are temporary, sensitive, or already documented. Do not store:
 
-- project conventions
-- architecture facts
-- canonical verification commands
-- recurring project-specific preferences
-- non-obvious workflows or tool quirks
-
-Do not store:
-
-- task progress or completed-work diaries
+- current task progress or completed-work diaries
 - issue numbers, pull request numbers, or commit hashes
 - raw logs and tool output
 - temporary failures
 - secrets
-- facts already documented in `AGENTS.md` or checked-in project docs
+- facts from `AGENTS.md` or other checked-in project documents
 
-Importance is `high`, `normal`, or `low`. It measures the cost of forgetting—not certainty, age, or urgency.
+Each entry has `high`, `normal`, or `low` importance. Importance measures the cost of forgetting. It does not measure certainty, age, or urgency.
 
-## Immediate writes and automatic review
+## How memory changes
 
-The foreground `project_memory` tool writes directly to canonical project JSON. These writes do not wait for the background reviewer or external worker.
+No Forgetti has two write paths:
 
-Automatic review runs only after a successfully settled turn. It sees bounded, sanitized evidence and can add, replace, remove, merge, or assess entries. A proposal must pass memory-policy validation and an exact branch-digest compare-and-swap before it can commit.
+| Path | When it runs | Result |
+| --- | --- | --- |
+| Direct write | Pi uses the `project_memory` tool during a turn | Saves the change immediately |
+| Automatic review | Pi completes a successful turn and becomes idle | Reviews recent evidence and proposes bounded changes |
 
-Memory has four capacity boundaries:
+### Direct writes
 
-| Boundary | Size | Meaning |
+The `project_memory` tool can list, add, replace, or remove entries. Each change writes to the active memory branch immediately. No background reviewer or external worker delays the change.
+
+Pi reloads the active branch before the next turn. This makes writes from other sessions and review processes visible without a manual refresh.
+
+### Automatic review
+
+Automatic review follows this sequence:
+
+1. Pi completes a successful turn and becomes idle.
+2. No Forgetti selects the oldest unreviewed evidence window.
+3. No Forgetti removes sensitive or unnecessary evidence.
+4. The reviewer proposes additions, replacements, removals, or consolidations.
+5. No Forgetti validates the proposal against the memory policy.
+6. No Forgetti commits the proposal only when the branch still matches the reviewed version.
+
+Step 6 uses compare-and-swap (CAS). CAS prevents a stale review from overwriting a newer memory change.
+
+A review window contains at most 12 user turns and 32,000 sanitized characters. No Forgetti excludes thinking, images, raw tool arguments, raw tool results, user Bash, provider headers, and diagnostics.
+
+No Forgetti advances the review position only through evidence in the selected window. This prevents a truncated window from skipping evidence.
+
+## Capacity controls
+
+Memory has four capacity controls:
+
+| Control | Size | Effect |
 | --- | ---: | --- |
-| Maintenance goal | 4,000 characters | Lossless maintenance aims for this size |
-| Review target | 4,500 characters | Automatic review cannot grow beyond this target |
-| Hard limit | 6,000 characters | Reserves space for foreground writes |
-| Per entry | 800 characters | Keeps individual facts compact |
+| Entry limit | 800 characters | Keeps each fact compact |
+| Maintenance goal | 4,000 characters | Guides lossless consolidation |
+| Working target | 4,500 characters | Limits growth from automatic review |
+| Hard limit | 6,000 characters | Reserves capacity for direct writes |
 
-Reviews below the target cannot cross it. Reviews at or above the target cannot grow memory. Exact duplicates are ignored.
+Automatic review below the working target cannot cross it. At or above the target, review can keep the same size or shrink toward the maintenance goal. Direct writes can use the reserved capacity up to the hard limit. Exact duplicate entries have no effect.
 
-## Branches and Pi sessions
+## Inspect and undo
 
-Normal, new, forked, and cloned Pi sessions keep using the same `main` memory branch. Pi’s `/fork` and `/clone` commands do not clone project memory.
+| Command | Result |
+| --- | --- |
+| `/memory status` | Show the project, active branch, capacity, and review mode |
+| `/memory show` | Show entries in the active branch |
+| `/memory branches` | List all memory branches |
+| `/memory undo` | Undo the latest eligible automatic review |
 
-Create an independent copy explicitly:
+Each changed automatic review creates an immutable revision record. `/memory undo` reverts reviewed entries only when they still match that revision. It preserves unrelated later writes. It stops if a later write changed a reviewed entry.
+
+## Use a separate memory branch
+
+Pi `/fork` and `/clone` commands create session histories. They do not create memory branches.
+
+Create an independent copy of the active memory branch when an experiment needs different facts:
 
 ```text
 /memory fork experiment
 ```
 
-This clones the active branch and switches only the current Pi session to it. Switch back with:
+This command switches only the current Pi session to the new branch. Switch the session back to `main` when the experiment ends:
 
 ```text
 /memory use main
 ```
 
-The selected branch is stored in Pi session state. With Pi session persistence disabled, the selection lasts only for the current process.
+No Forgetti stores the selected branch in Pi session state. If Pi does not persist the session, the selection lasts only for the current process.
 
-## Inspect and undo
+## Project scope
 
-```text
-/memory show
-/memory branches
-/memory undo
-```
+No Forgetti identifies the project with this order:
 
-Changed automatic reviews append immutable revision records. `/memory undo` performs an inverse compare-and-swap: it reverts the reviewed fields only when they still match. It refuses to erase later conflicting writes, while unrelated later additions survive.
+1. Use the nearest Git root.
+2. If no Git root exists, use the exact Pi launch directory.
 
-## Review timing
+Each Git worktree receives separate memory because each worktree has a different root.
 
-Review starts only after Pi is fully settled at the end of a completed turn. No Forgetti processes the oldest bounded unreviewed window and advances only through evidence actually included in that window. This prevents evidence truncation from skipping history.
+Gang members and Pi subagents do not load or write project memory. Only the primary or superintendent session can use it.
 
-Accepted external jobs contain at most 12 user turns and 32,000 sanitized characters. Thinking, images, raw tool arguments and results, user Bash, provider headers, and diagnostics are excluded.
+No Forgetti stores memory outside the repository. See the [storage reference](../reference/storage.md) for paths, permissions, and retention details.
