@@ -19,8 +19,6 @@ No Forgetti ports the useful part of [Hermes Agent](https://github.com/NousResea
 - **Keeps state outside the repository.** Memory and generated skills do not create project-file churn.
 - **Supports durable review.** Optional external mode queues accepted memory-review work for a separately managed worker, so Pi can exit without aborting it.
 
-No Forgetti isolates Gang and Pi subagent children. Only the primary or superintendent session loads and writes project memory.
-
 ## Install
 
 Install globally for all Pi projects:

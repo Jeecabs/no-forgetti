@@ -321,7 +321,7 @@ export function activateProjectMemoryExtension(
   overrides: Partial<ExtensionDependencies> = {},
 ): void {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...overrides };
-  // Gang/pi-subagents children share the project cwd with the superintendent.
+  // Child-agent processes can share the primary session's project directory.
   // They must neither receive project memory nor learn/write into it.
   if (dependencies.isNonPrimaryAgent()) return;
 
