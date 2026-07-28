@@ -1250,7 +1250,11 @@ export function activateProjectMemoryExtension(
       }
 
       if (subcommand === "show" || subcommand === "list") {
-        presentCommandOutput(ctx, formatBranch(await memoryStore.loadBranch(activeName)));
+        const output = formatBranch(await memoryStore.loadBranch(activeName));
+        const readableOutput = ctx.mode === "tui"
+          ? output.split("\n").map((line) => ctx.ui.theme.fg("text", line)).join("\n")
+          : output;
+        presentCommandOutput(ctx, readableOutput);
         return;
       }
 
