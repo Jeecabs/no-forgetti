@@ -58,8 +58,6 @@ export default defineConfig({
         collapsed: true,
         items: [
           { text: "External curator architecture", link: "/architecture/external-curator" },
-          { text: "Durable review spool", link: "/adr/0001-durable-review-spool" },
-          { text: "Evidence and projection", link: "/adr/0002-evidence-claims-projection" },
         ],
       },
     ],
