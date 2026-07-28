@@ -392,6 +392,18 @@ button:focus-visible {
   }
 }
 
+/* ---- figures: plated like the code blocks, full data-plate width -------- */
+
+.vp-doc video {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: var(--space-lg) 0;
+  border: 1px solid var(--color-rule-heavy);
+  border-radius: 2px;
+  background: var(--color-paper-soft);
+}
+
 /* ---- code: flat plates, no gloss ---------------------------------------- */
 
 .vp-doc div[class*="language-"] {
