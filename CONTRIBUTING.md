@@ -18,6 +18,8 @@ Keep generated project memory and skills outside the repository. Add regression 
 ```bash
 pnpm check
 pnpm test
+pnpm docs:install
+pnpm docs:build
 git diff --check
 ```
 

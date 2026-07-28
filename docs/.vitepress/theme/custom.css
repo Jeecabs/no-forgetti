@@ -1,0 +1,193 @@
+/* Hallmark · pre-emit critique: P5 H4 E4 S5 R5 V4
+ * genre: modern-minimal · macrostructure: Index-First · theme: Cobalt
+ * nav: N13 inline search · footer: Ft4 compact colophon · motion: cut
+ */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;650;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  --font-display: "Geist", ui-sans-serif, sans-serif;
+  --font-body: "Geist", ui-sans-serif, sans-serif;
+  --font-code: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-paper: oklch(98% 0.006 255);
+  --color-paper-raised: oklch(100% 0.003 255);
+  --color-paper-soft: oklch(95% 0.012 255);
+  --color-ink: oklch(22% 0.025 255);
+  --color-muted: oklch(49% 0.025 255);
+  --color-rule: oklch(88% 0.018 255);
+  --color-accent: oklch(52% 0.19 258);
+  --color-accent-soft: oklch(94% 0.028 258);
+  --color-focus: oklch(58% 0.2 258);
+  --color-code: oklch(96% 0.012 255);
+
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+
+  --dur-micro: 120ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --vp-font-family-base: var(--font-body);
+  --vp-font-family-mono: var(--font-code);
+  --vp-c-bg: var(--color-paper);
+  --vp-c-bg-alt: var(--color-paper-soft);
+  --vp-c-bg-elv: var(--color-paper-raised);
+  --vp-c-bg-soft: var(--color-paper-soft);
+  --vp-c-text-1: var(--color-ink);
+  --vp-c-text-2: var(--color-muted);
+  --vp-c-text-3: var(--color-muted);
+  --vp-c-divider: var(--color-rule);
+  --vp-c-border: var(--color-rule);
+  --vp-c-brand-1: var(--color-accent);
+  --vp-c-brand-2: var(--color-accent);
+  --vp-c-brand-3: var(--color-focus);
+  --vp-c-brand-soft: var(--color-accent-soft);
+  --vp-code-block-bg: var(--color-code);
+  --vp-code-line-highlight-color: var(--color-accent-soft);
+  --vp-custom-block-tip-border: var(--color-accent);
+  --vp-custom-block-tip-bg: var(--color-accent-soft);
+  --vp-button-brand-bg: var(--color-accent);
+  --vp-button-brand-hover-bg: var(--color-focus);
+  --vp-button-brand-active-bg: var(--color-focus);
+  --vp-nav-logo-height: 28px;
+}
+
+.dark {
+  --color-paper: oklch(16% 0.018 255);
+  --color-paper-raised: oklch(20% 0.02 255);
+  --color-paper-soft: oklch(23% 0.022 255);
+  --color-ink: oklch(94% 0.012 255);
+  --color-muted: oklch(72% 0.018 255);
+  --color-rule: oklch(31% 0.025 255);
+  --color-accent: oklch(72% 0.14 255);
+  --color-accent-soft: oklch(25% 0.045 255);
+  --color-focus: oklch(78% 0.13 255);
+  --color-code: oklch(19% 0.022 255);
+}
+
+html,
+body {
+  overflow-x: clip;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.VPNavBarTitle .title,
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3 {
+  font-family: var(--font-display);
+  font-style: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.VPNavBarTitle .title {
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+.vp-doc h1 {
+  max-width: 18ch;
+  font-size: clamp(2.4rem, 5vw, 4.25rem);
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  font-weight: 700;
+}
+
+.vp-doc h2 {
+  margin-top: var(--space-2xl);
+  border-top-color: var(--color-rule);
+  letter-spacing: -0.025em;
+  font-weight: 650;
+}
+
+.vp-doc h3 {
+  letter-spacing: -0.015em;
+  font-weight: 650;
+}
+
+.vp-doc > p,
+.vp-doc > ul,
+.vp-doc > ol {
+  max-width: 70ch;
+}
+
+.vp-doc a {
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 0.06em;
+}
+
+.vp-doc a:focus-visible,
+.VPNav a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+}
+
+.vp-doc div[class*="language-"] {
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.vp-doc code,
+.vp-doc pre {
+  font-family: var(--font-code);
+  font-variant-numeric: tabular-nums;
+}
+
+.vp-doc table {
+  font-variant-numeric: tabular-nums;
+}
+
+.VPNavBarSearch .DocSearch-Button,
+.VPNavBarSearch .VPNavBarSearchButton {
+  border-color: var(--color-rule);
+  border-radius: 6px;
+  background: var(--color-paper-raised);
+  box-shadow: none;
+}
+
+.VPLink,
+.VPNavBarMenuLink,
+.VPSidebarItem .link {
+  transition: color var(--dur-micro) var(--ease-out);
+}
+
+.VPLink,
+.VPNavBarMenuLink {
+  white-space: nowrap;
+}
+
+@media (pointer: coarse) {
+  .VPNavBarMenuLink,
+  .VPSidebarItem .link,
+  button {
+    min-height: 44px;
+  }
+}
+
+@media (min-width: 60rem) {
+  .vp-doc h1 + p {
+    max-width: 58ch;
+    font-size: 1.12rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
