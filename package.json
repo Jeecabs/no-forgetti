@@ -47,6 +47,10 @@
     "check": "tsc --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "review:once": "node --experimental-strip-types src/service/cli.ts review --once",
+    "docs:install": "pnpm --dir docs install --frozen-lockfile",
+    "docs:dev": "pnpm --dir docs dev",
+    "docs:build": "pnpm --dir docs build",
+    "docs:preview": "pnpm --dir docs preview",
     "prepack": "pnpm check && pnpm test"
   },
   "engines": {
