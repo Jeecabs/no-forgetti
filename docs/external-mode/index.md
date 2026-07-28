@@ -11,7 +11,7 @@ In embedded mode, Pi captures evidence, calls the reviewer, validates the propos
 In external mode, responsibility splits:
 
 1. **Pi captures.** After a successful settled turn, the extension builds the oldest bounded unreviewed evidence window.
-2. **Pi queues.** The sanitized job is durably published to a local spool. Once accepted, the service—not the embedded reviewer—owns it.
+2. **Pi queues.** The sanitized job is durably published to a local spool. Once accepted, the service owns it, not the embedded reviewer.
 3. **The worker reviews.** A user-scoped process claims the job, reserves budget, and calls the configured model without coding tools.
 4. **The worker checkpoints.** Provider results and the elected proposal are persisted before any project effect.
 5. **The project store admits.** The proposal is revalidated and commits only if the captured branch digest still matches current memory.
@@ -55,7 +55,7 @@ It does **not** guarantee provider exactly-once execution. A crash after dispatc
 
 You need:
 
-- a persistent No Forgetti installation—not `pi -e`;
+- a persistent No Forgetti installation, not `pi -e`;
 - Node.js 22.19 or newer;
 - a reviewer provider and exact model ID known to Pi;
 - provider credentials available to the worker;

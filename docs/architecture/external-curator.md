@@ -62,7 +62,7 @@ Provider-attempt states are:
 - `unknown`: dispatch may have happened, but no trustworthy durable result proves its outcome.
 - `cancelled`: the reservation is durably closed with proof that dispatch did not happen.
 
-Recovery may cancel an orphaned `reserved` attempt. It must conservatively turn an orphaned `dispatched` attempt into `unknown`; it must not pretend the call was cancelled or free its full budget. State transitions are monotonic and idempotent. Attempt files—not process memory or SQLite rows—answer whether a provider call may have occurred.
+Recovery may cancel an orphaned `reserved` attempt. It must conservatively turn an orphaned `dispatched` attempt into `unknown`; it must not pretend the call was cancelled or free its full budget. State transitions are monotonic and idempotent. Attempt files, not process memory or SQLite rows, answer whether a provider call may have occurred.
 
 Provider APIs generally cannot participate in No Forgetti's local transaction and may not accept an idempotency key. Therefore provider exactly-once execution is impossible to promise. A worker can crash after the provider accepted a request but before the response is durable. Retrying an `unknown` attempt may make another paid call. No Forgetti instead guarantees at-most-one elected proposal effect per job: every observed result is checkpointed under its attempt identity, and one immutable proposal-decision record selects the result eligible for admission. Later or replayed results remain accounted evidence and cannot replace the elected decision.
 
@@ -119,7 +119,7 @@ Initial authoritative review preserves the existing evidence boundary:
 - no user bash
 - no auth, provider headers, or diagnostics
 
-Evidence and durable checkpoints use private files and directories. Evidence expires after configured terminal-job TTL. Logs contain IDs, sizes, digests, outcomes, usage, and cost—never evidence or credentials. Result/decision checkpoints and admission intents embed sanitized jobs and proposals, so they inherit the same sensitivity and retention obligations.
+Evidence and durable checkpoints use private files and directories. Evidence expires after configured terminal-job TTL. Logs contain IDs, sizes, digests, outcomes, usage, and cost, never evidence or credentials. Result/decision checkpoints and admission intents embed sanitized jobs and proposals, so they inherit the same sensitivity and retention obligations.
 
 ## Append-graph trajectory track
 
