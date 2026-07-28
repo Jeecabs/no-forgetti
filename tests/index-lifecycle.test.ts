@@ -393,6 +393,21 @@ test("routes read-only command output in print and JSON modes", async (t) => {
   await assert.rejects(extension.command("project-skills", "stats", context), /corresponding model tool/u);
 });
 
+test("memory show uses primary text color in the TUI", async (t) => {
+  const { context, extension, memoryStore, notifications } = await fixture(t);
+  await extension.emit("session_start", {}, context);
+  await memoryStore.applyOperation("main", { action: "add", content: "Readable project fact." });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  context.ui.theme.fg = (color: string, text: string) => `<${color}>${text}</${color}>`;
+
+  await extension.command("memory", "show", context);
+
+  assert.deepEqual(notifications, [{
+    message: "<text>1. [normal?] Readable project fact.</text>",
+    type: "info",
+  }]);
+});
+
 test("memory review applies immediately and next turn injects live state", async (t) => {
   const { context, extension, memoryStore } = await fixture(t, {
     requestReviewPlan: async () => ({
