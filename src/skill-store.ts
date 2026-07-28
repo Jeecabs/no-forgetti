@@ -251,6 +251,11 @@ function renderSkillFile(skill: ProjectSkill): string {
   ].join("\n");
 }
 
+/** Diff source: a patch may land in either the description or the body. */
+function skillText(skill: ProjectSkill): string {
+  return `${skill.description}\n\n${skill.content}`;
+}
+
 export class ProjectSkillStore {
   readonly projectDir: string;
   readonly skillsDir: string;
@@ -449,10 +454,67 @@ export class ProjectSkillStore {
   ): Promise<{ proposal: SkillProposal; staged: boolean; result?: SkillMutationResult }> {
     const existingIds = new Set((await this.listPending()).map((proposal) => proposal.id));
     const proposal = await this.stageProposal(operations, sourceSessionId);
-    if (proposal.operations.at(0)?.action !== "create") {
-      return { proposal, staged: !existingIds.has(proposal.id) };
+    const action = proposal.operations.at(0)?.action;
+    if (action === "create") return { proposal, staged: false, result: await this.approveProposal(proposal.id, origin) };
+    if (action === "patch") {
+      try {
+        return { proposal, staged: false, result: await this.approveProposal(proposal.id, origin) };
+      } catch {
+        // A stale oldText is exactly the case auto-apply must not be trusted with.
+        // approveProposal only unlinks after a successful apply, so it stays queued.
+        return { proposal, staged: !existingIds.has(proposal.id) };
+      }
     }
-    return { proposal, staged: false, result: await this.approveProposal(proposal.id, origin) };
+    return { proposal, staged: !existingIds.has(proposal.id) };
+  }
+
+  /** Rendered diff source for the last recorded change to `name`, newest revision first. */
+  async lastChange(name: string): Promise<{ before: string; current: string } | undefined> {
+    const current = await this.loadStoredSkill(name);
+    const snapshot = await this.previousRevision(current);
+    return snapshot ? { before: skillText(snapshot), current: skillText(current) } : undefined;
+  }
+
+  async undoLastPatch(name: string): Promise<SkillMutationResult> {
+    const skillName = validateSkillName(name);
+    return this.withLock(async () => {
+      const current = await this.loadStoredSkill(skillName);
+      const snapshot = await this.previousRevision(current);
+      if (!snapshot) return { changed: false, message: `No recorded change to undo for '${skillName}'.` };
+      // Every write path bumps patchCount, so a later edit is always caught. Restoring
+      // resets the counter, which makes a second undo of the same revision fail too.
+      if (current.patchCount !== snapshot.patchCount + 1) {
+        return { changed: false, message: `'${skillName}' changed again after that patch; refusing to undo.` };
+      }
+      await this.backupSkill(current, this.newProposalId());
+      // View counters track reading, not content, and must not regress with the body.
+      const restored: ProjectSkill = { ...snapshot, viewCount: current.viewCount, lastViewedAt: current.lastViewedAt };
+      await this.atomicWrite(join(this.skillsDir, skillName, SKILL_FILE), renderSkillFile(restored));
+      return { changed: true, message: `Reverted the last change to project skill '${skillName}'.`, skill: restored };
+    });
+  }
+
+  /**
+   * Proposal ids are `<14 timestamp digits>-<uuid8>`, so a plain sort is chronological
+   * to the second; prefer the snapshot the CAS expects when a second holds several.
+   */
+  private async previousRevision(current: ProjectSkill): Promise<ProjectSkill | undefined> {
+    const entries = await readdir(this.revisionsDir, { withFileTypes: true });
+    const ids = entries
+      .filter((entry) => entry.isDirectory() && /^\d{14}-[0-9a-f]{8}$/u.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+    const snapshots: ProjectSkill[] = [];
+    for (const id of ids) {
+      try {
+        const path = join(this.revisionsDir, validateProposalId(id), current.name, SKILL_FILE);
+        snapshots.push(parseSkillFile(await readFile(path, "utf8"), current.name, this.timestamp()));
+      } catch {
+        // Revisions for other skills, or unreadable snapshots, are simply not candidates.
+      }
+    }
+    return snapshots.find((snapshot) => snapshot.patchCount === current.patchCount - 1) ?? snapshots.at(0);
   }
 
   /**
@@ -608,6 +670,10 @@ export class ProjectSkillStore {
     });
   }
 
+  private newProposalId(): string {
+    return `${this.timestamp().replace(/[^0-9]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+  }
+
   private createProposal(
     operations: SkillOperation[],
     sourceSessionId?: string,
@@ -619,7 +685,7 @@ export class ProjectSkillStore {
     const normalized = operations.map((operation) => this.validateOperation(operation));
     return {
       version: SKILL_STORE_VERSION,
-      id: `${this.timestamp().replace(/[^0-9]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`,
+      id: this.newProposalId(),
       createdAt: this.timestamp(),
       ...(sourceSessionId ? { sourceSessionId } : {}),
       ...(retention ? { retention: true } : {}),

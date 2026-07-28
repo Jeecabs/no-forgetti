@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { memoryCharCount } from "../src/context.ts";
 import { canonicalPath, resolveProjectRoot } from "../src/project.ts";
 import { memoryBranchDigest, memoryEntryDigest, ProjectMemoryStore } from "../src/store.ts";
 import { STORE_FILE_BYTE_LIMIT, type ReviewOperation } from "../src/types.ts";
@@ -122,7 +123,7 @@ test("default capacity accepts memory beyond the old 2,200-character limit", asy
   await store.applyOperation("main", { action: "add", content: "a".repeat(800) });
   await store.applyOperation("main", { action: "add", content: "b".repeat(800) });
   await store.applyOperation("main", { action: "add", content: "c".repeat(800) });
-  assert.equal(store.maxChars, 4_000);
+  assert.equal(store.maxChars, 6_000);
   assert.equal((await store.loadBranch("main")).entries.length, 3);
 });
 
@@ -308,40 +309,87 @@ test("inverse-CAS undo preserves later foreground writes and rejects overwritten
   ]);
 });
 
-test("treats 3,000 characters as advisory while enforcing the 4,000 hard cap", async (t) => {
+test("reserves hard-limit headroom from background review growth", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
-  for (const content of ["a", "b", "c", "d"]) {
-    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
-  }
-  const entryId = (await store.loadBranch("main")).entries.at(0)!.id;
-
-  const assessment = await store.applyOperations("main", [{ action: "assess", entryId, importance: "high" }]);
-  assert.equal(assessment.at(0)?.changed, true, "review need not shrink memory above advisory target");
-
-  const filled = await store.applyOperations("main", [{
-    action: "add",
-    content: "e".repeat(800),
-    importance: "normal",
-  }]);
-  assert.equal(filled.at(0)?.changed, true);
-  assert.equal((await store.loadBranch("main")).entries.reduce((total, entry) => total + entry.text.length, 0), 4_000);
-
-  const rejected = await store.applyOperations("main", [{ action: "add", content: "f", importance: "normal" }]);
-  assert.match(rejected.at(0)?.message ?? "", /exceed 4000 characters/u);
-  assert.equal((await store.loadBranch("main")).entries.length, 5);
-});
-
-test("does not allow configuration to raise the 4,000-character hard cap", async (t) => {
-  const { base, store } = await fixture({ maxChars: 10_000 });
-  t.after(() => rm(base, { recursive: true, force: true }));
-  assert.equal(store.maxChars, 4_000);
   for (const content of ["a", "b", "c", "d", "e"]) {
     await store.applyOperation("main", { action: "add", content: content.repeat(800) });
   }
+
+  const reachingTarget = await store.applyOperations("main", [{
+    action: "add",
+    content: "f".repeat(500),
+    importance: "normal",
+  }]);
+  assert.equal(reachingTarget.at(0)?.changed, true);
+  assert.equal(memoryCharCount(await store.loadBranch("main")), 4_500);
+
+  const entryId = (await store.loadBranch("main")).entries.at(0)!.id;
+  const assessment = await store.applyOperations("main", [{ action: "assess", entryId, importance: "high" }]);
+  assert.equal(assessment.at(0)?.changed, true, "metadata-only review may keep usage equal to target");
+
+  const growth = await store.applyOperations("main", [{
+    action: "add",
+    content: "e",
+    importance: "normal",
+  }]);
+  assert.match(growth.at(0)?.message ?? "", /Review batch skipped.*cannot grow at or above the 4500-character working target/u);
+  assert.equal(memoryCharCount(await store.loadBranch("main")), 4_500);
+
+  const refinement = await store.applyOperations("main", [{
+    action: "replace",
+    entryId,
+    content: "a".repeat(799),
+    importance: "high",
+  }]);
+  assert.equal(refinement.at(0)?.changed, true);
+  assert.equal(memoryCharCount(await store.loadBranch("main")), 4_499);
+});
+
+test("accepts the former 4,023-character overflow scenario below the new target", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  for (const content of ["a", "b", "c"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+  await store.applyOperation("main", { action: "add", content: "d".repeat(745) });
+
+  const applied = await store.applyOperations("main", [
+    { action: "add", content: "e".repeat(800), importance: "normal" },
+    { action: "add", content: "f".repeat(78), importance: "normal" },
+  ]);
+
+  assert.equal(applied.every((result) => result.changed), true);
+  assert.equal(memoryCharCount(await store.loadBranch("main")), 4_023);
+});
+
+test("review batches below the working target cannot consume reserved headroom", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  for (const content of ["a", "b", "c", "d", "e"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+
+  const skipped = await store.applyOperations("main", [{
+    action: "add",
+    content: "f".repeat(501),
+    importance: "normal",
+  }]);
+  assert.match(skipped.at(0)?.message ?? "", /Review batch skipped.*exceed the working target of 4500 characters \(4501\/4500\)/u);
+  assert.equal(memoryCharCount(await store.loadBranch("main")), 4_000);
+});
+
+test("does not allow configuration to raise the 6,000-character hard cap", async (t) => {
+  const { base, store } = await fixture({ maxChars: 10_000 });
+  t.after(() => rm(base, { recursive: true, force: true }));
+  assert.equal(store.maxChars, 6_000);
+  for (const content of ["a", "b", "c", "d", "e", "f", "g"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+  await store.applyOperation("main", { action: "add", content: "h".repeat(400) });
   await assert.rejects(
-    store.applyOperation("main", { action: "add", content: "f" }),
-    /exceed 4000 characters/u,
+    store.applyOperation("main", { action: "add", content: "i" }),
+    /exceed 6000 characters/u,
   );
 });
 

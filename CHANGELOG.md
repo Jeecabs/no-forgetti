@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Apply reviewer project-skill patches automatically with a one-line receipt, and replace the approval queue for them with `/project-skills undo <name>`, which shows a rendered diff and refuses once the skill has changed again. Archives still require explicit approval.
+- Drop the confirmation step from `/project-skills edit`; the editor saves straight through and the notify names the undo command.
+- Address pending proposals by skill name (`/project-skills approve verification`); proposal ids still resolve, and argument completions are now fuzzy-matched rather than prefix-matched.
+- Expand project memory to a 6,000-character hard limit with a 4,500-character background-review target.
+- Safely no-op capacity-violating review proposals instead of surfacing a repeating failure.
 - Stop rendering redundant project-skill invocation receipts in chat history while retaining hidden usage provenance for refinement and retention.
 
 ## 0.3.0 — 2026-07-27

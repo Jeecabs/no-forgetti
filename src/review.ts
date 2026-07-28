@@ -252,7 +252,7 @@ export function buildReviewPrompt(
 ): string {
   const usedChars = memoryCharCount(branch);
   const refinementTarget = Math.max(1, Math.floor(maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
-  const refinementRecommended = usedChars >= refinementTarget;
+  const refinementRequired = usedChars >= refinementTarget;
   const current = branch.entries.length
     ? branch.entries.map((entry) => {
       const importance = entry.importanceAssessedAt
@@ -288,9 +288,9 @@ export function buildReviewPrompt(
     "- low: valid but narrow, redundant, or cheap to rediscover",
     "Unassessed legacy entries behave as normal until conservatively assessed. Newer assessment metadata is better calibrated, but newer facts do not automatically outrank older facts.",
     `HARD LIMIT: ${maxChars} characters. WORKING TARGET: ${refinementTarget} characters. Current usage: ${usedChars} characters.`,
-    `The working target is advisory: prefer concise, lossless memory near ${refinementTarget} characters. The final state may exceed it when preserving useful semantics, but must never exceed the hard limit.`,
-    ...(refinementRecommended ? [
-      `REFINEMENT RECOMMENDED: current memory has reached the ${refinementTarget}-character working target. Prefer lossless merges and removal of contradicted, documented, or low-value facts, but never discard valid semantics merely to shrink. A safe no-op is allowed.`,
+    `Reviews below the working target must finish at or below ${refinementTarget} characters. Hard-limit headroom is reserved for foreground writes and imperfect proposals. Never exceed the hard limit.`,
+    ...(refinementRequired ? [
+      `REFINEMENT REQUIRED: current memory has reached the ${refinementTarget}-character working target. The final state must not exceed the current ${usedChars} characters. Preserve useful semantics through concise replacements or merges; never discard valid semantics merely to shrink. A safe no-op is allowed.`,
     ] : []),
     "Refine in this order: remove contradicted or documented facts regardless of importance; merge overlaps; remove low-importance facts; then consider unassessed or normal facts. Preserve high-importance facts unless contradicted or merged.",
     "The operation batch is atomic and capacity is checked only against final size, so removals need not precede additions. Operations still execute sequentially; never target an entry after removing or merging it.",
