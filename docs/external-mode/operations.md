@@ -29,10 +29,10 @@ queued → running → completed
 
 A transient failure can return it for a bounded retry. A terminal failure moves it to dead-letter. A completed provider call can still produce:
 
-- `applied` — one or more validated memory operations committed;
-- `unchanged` — the reviewer proposed no change;
-- `stale` — current memory no longer matched the captured digest; or
-- `rejected` — validation or admission refused the proposal.
+- `applied`: one or more validated memory operations committed;
+- `unchanged`: the reviewer proposed no change;
+- `stale`: current memory no longer matched the captured digest; or
+- `rejected`: validation or admission refused the proposal.
 
 `unchanged`, `stale`, and a safe rejection are not worker crashes. In particular, stale admission is how foreground writes win over delayed review.
 
@@ -128,7 +128,7 @@ Do not start several duplicate workers to “unstick” a queue. One healthy wor
 
 ### A review finished but memory did not change
 
-The outcome may be `unchanged`, stale, rejected, or a valid partial no-op. External UI feedback is based on the actual post-validation content diff—not the model’s proposed operations—so no applied diff means Pi should not display an applied-change card.
+The outcome may be `unchanged`, stale, rejected, or a valid partial no-op. External UI feedback is based on the actual post-validation content diff, not the model’s proposed operations, so no applied diff means Pi should not display an applied-change card.
 
 ## Disable external mode
 

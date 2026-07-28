@@ -1,27 +1,28 @@
-/* No Forgetti docs theme — "operating handbook"
+/* No Forgetti docs theme, "airway manual".
  * Reference points: the logo (hand-inked, monochrome, high contrast) and the
- * layout language of aircraft flight manuals: ruled plates, numbered sections,
- * mono data labels, NOTE / CAUTION blocks. Ink on paper, one signal colour.
+ * vintage Jeppesen airway manual: gold foil stamped on dark leather, cream
+ * stock inside, engraved double rules, thumb-index tabs, numbered sections,
+ * mono data labels, NOTE / CAUTION blocks.
  */
-@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;500;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=Bitter:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
 
 :root {
-  --font-display: "Archivo", ui-sans-serif, sans-serif;
+  --font-display: "Bitter", ui-serif, Georgia, serif;
   --font-body: "Archivo", ui-sans-serif, sans-serif;
   --font-code: "JetBrains Mono", ui-monospace, monospace;
 
-  /* warm stock, true ink, one signal red */
-  --color-paper: oklch(97.2% 0.008 85);
-  --color-paper-raised: oklch(99% 0.005 85);
-  --color-paper-soft: oklch(94% 0.011 85);
-  --color-ink: oklch(19% 0.006 60);
-  --color-muted: oklch(46% 0.008 70);
-  --color-rule: oklch(82% 0.012 80);
-  --color-rule-heavy: oklch(35% 0.008 70);
-  --color-accent: oklch(50% 0.19 30);
-  --color-accent-soft: oklch(94% 0.03 45);
-  --color-focus: oklch(50% 0.19 30);
-  --color-code: oklch(95% 0.01 85);
+  /* aged cream stock, ink, gold foil */
+  --color-paper: oklch(96.3% 0.017 88);
+  --color-paper-raised: oklch(98.4% 0.012 88);
+  --color-paper-soft: oklch(93.2% 0.021 88);
+  --color-ink: oklch(19% 0.012 60);
+  --color-muted: oklch(46% 0.014 70);
+  --color-rule: oklch(80% 0.022 80);
+  --color-rule-heavy: oklch(36% 0.016 70);
+  --color-accent: oklch(46% 0.1 76);
+  --color-accent-soft: oklch(93% 0.04 85);
+  --color-focus: oklch(46% 0.1 76);
+  --color-code: oklch(94% 0.019 88);
 
   --space-xs: 0.5rem;
   --space-sm: 0.75rem;
@@ -63,18 +64,18 @@
 }
 
 .dark {
-  /* the logo's field: near-black stock, warm white ink */
-  --color-paper: oklch(15% 0.004 60);
-  --color-paper-raised: oklch(19% 0.005 60);
-  --color-paper-soft: oklch(21% 0.005 60);
-  --color-ink: oklch(94% 0.006 85);
-  --color-muted: oklch(70% 0.008 80);
-  --color-rule: oklch(32% 0.006 70);
-  --color-rule-heavy: oklch(62% 0.008 80);
-  --color-accent: oklch(70% 0.16 38);
-  --color-accent-soft: oklch(26% 0.05 35);
-  --color-focus: oklch(70% 0.16 38);
-  --color-code: oklch(18% 0.005 60);
+  /* the cover: dark leather, gold foil */
+  --color-paper: oklch(15% 0.01 60);
+  --color-paper-raised: oklch(19% 0.012 60);
+  --color-paper-soft: oklch(21% 0.013 60);
+  --color-ink: oklch(93% 0.011 85);
+  --color-muted: oklch(70% 0.014 80);
+  --color-rule: oklch(32% 0.014 65);
+  --color-rule-heavy: oklch(60% 0.02 75);
+  --color-accent: oklch(80% 0.125 85);
+  --color-accent-soft: oklch(26% 0.045 80);
+  --color-focus: oklch(80% 0.125 85);
+  --color-code: oklch(18% 0.011 60);
   --vp-button-brand-bg: var(--color-ink);
   --vp-button-brand-border: var(--color-ink);
   --vp-c-bg: var(--color-paper);
@@ -125,29 +126,40 @@ body {
 .VPNavBarTitle .title {
   font-family: var(--font-display);
   font-weight: 700;
-  font-stretch: 88%;
-  font-size: 1.02rem;
-  letter-spacing: 0.06em;
+  font-size: 0.98rem;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
 .VPNavBarMenuLink,
 .VPNavScreenMenuLink {
   font-family: var(--font-code);
-  font-size: var(--label) !important;
+  font-size: 0.78rem !important;
   font-weight: 500;
+  letter-spacing: 0.05em;
+}
+
+/* sidebar groups are thumb-index tabs, stamped like divider labels */
+.VPSidebarItem.level-0 > .item > .text {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-family: var(--font-code);
+  font-size: 0.64rem;
+  font-weight: 700;
   letter-spacing: var(--track);
   text-transform: uppercase;
 }
 
-/* sidebar groups read as manual tabs */
-.VPSidebarItem.level-0 > .item > .text {
-  font-family: var(--font-code);
-  font-size: var(--label);
-  font-weight: 700;
-  letter-spacing: var(--track);
-  text-transform: uppercase;
-  color: var(--color-muted);
+/* VitePress recolours the active group's label from a scoped rule that outranks
+ * this file, so the tab label needs !important to stay legible on the ink */
+.VPSidebarItem.level-0 > .item > .text,
+.VPSidebarItem.level-0.has-active > .item > .text {
+  color: var(--color-paper) !important;
+}
+
+.VPSidebarItem.level-0 > .item {
   padding-bottom: var(--space-xs);
   border-bottom: 1px solid var(--color-rule);
 }
@@ -193,19 +205,18 @@ body {
   min-width: 0;
 }
 
+/* the cover stamp: serif, lightly tracked, engraved double rule beneath */
 .vp-doc h1 {
   margin-bottom: var(--space-lg);
   padding-bottom: var(--space-md);
-  border-bottom: 3px solid var(--color-ink);
-  font-size: clamp(2rem, 4.2vw, 3.1rem);
-  font-stretch: 86%;
+  border-bottom: 4px double var(--color-ink);
+  font-size: clamp(2rem, 3.9vw, 2.9rem);
   font-weight: 700;
-  line-height: 1.03;
-  letter-spacing: -0.005em;
-  text-transform: uppercase;
+  line-height: 1.12;
+  letter-spacing: 0.01em;
 }
 
-/* section register: 01, 01.1 — numbered like a handbook, not a blog */
+/* section register: 01, 01.1, numbered like a handbook rather than a blog */
 .vp-doc {
   counter-reset: section;
 }
@@ -214,12 +225,10 @@ body {
   counter-increment: section;
   margin-top: var(--space-2xl);
   padding-top: var(--space-lg);
-  border-top: 1px solid var(--color-rule-heavy);
-  font-size: 1.5rem;
-  font-stretch: 90%;
+  border-top: 3px double var(--color-rule-heavy);
+  font-size: 1.45rem;
   font-weight: 700;
   letter-spacing: 0.005em;
-  text-transform: uppercase;
 }
 
 .vp-doc h2 {
@@ -241,10 +250,9 @@ body {
 .vp-doc h3 {
   counter-increment: subsection;
   margin-top: var(--space-xl);
-  font-size: 1.12rem;
-  font-weight: 650;
-  letter-spacing: 0;
-  text-transform: uppercase;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.005em;
 }
 
 .vp-doc h3::before {
@@ -422,10 +430,9 @@ button:focus-visible {
 
 .vp-doc .custom-block .custom-block-title {
   font-family: var(--font-code);
-  font-size: var(--label);
+  font-size: 0.82rem;
   font-weight: 700;
-  letter-spacing: var(--track);
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .vp-doc .custom-block p:not(.custom-block-title) {
@@ -442,7 +449,10 @@ button:focus-visible {
 .vp-doc .custom-block .custom-block-title::before {
   display: block;
   margin-bottom: 0.25rem;
+  font-size: var(--label);
   font-weight: 700;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
   color: var(--color-muted);
 }
 
@@ -474,12 +484,15 @@ button:focus-visible {
 
 /* ---- the plate block used at the top of a chapter ----------------------- */
 
+/* embossed cover frame: outer rule, gap, inner rule */
 .plate {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
   gap: 0;
   margin: 0 0 var(--space-xl);
+  padding: 4px;
   border: 1px solid var(--color-rule-heavy);
+  box-shadow: inset 0 0 0 5px var(--color-paper), inset 0 0 0 6px var(--color-rule);
 }
 
 .plate > div {
@@ -520,6 +533,35 @@ button:focus-visible {
   .plate > div:last-child {
     border-bottom: 0;
   }
+}
+
+/* ---- link row: stamped tabs instead of separators ----------------------- */
+
+.vp-doc .actions p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  max-width: none;
+  margin: var(--space-lg) 0;
+}
+
+.vp-doc .actions a {
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--color-rule-heavy);
+  font-family: var(--font-code);
+  font-size: var(--label);
+  font-weight: 500;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--color-ink);
+  transition: background var(--dur-micro) var(--ease-out),
+    color var(--dur-micro) var(--ease-out);
+}
+
+.vp-doc .actions a:hover {
+  background: var(--color-ink);
+  color: var(--color-paper);
 }
 
 /* ---- footer of the page ------------------------------------------------- */

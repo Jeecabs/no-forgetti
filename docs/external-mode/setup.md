@@ -46,7 +46,7 @@ Then use `/model` to confirm the provider and exact model ID you intend to confi
 /model
 ```
 
-The reviewer profile is dedicated and stable—it does not silently inherit whichever foreground model happens to be active. It may use the same provider as your foreground session, but its `provider` and `model` values must match Pi’s registered identifiers exactly.
+The reviewer profile is dedicated and stable. It does not silently inherit whichever foreground model happens to be active. It may use the same provider as your foreground session, but its `provider` and `model` values must match Pi’s registered identifiers exactly.
 
 ::: warning Environment-only credentials
 If you rely on a variable such as `ANTHROPIC_API_KEY`, the worker service must receive that variable itself. Exporting it in an interactive shell does not make it available to `launchd`, and may not make it available to the systemd user manager. Prefer Pi’s `auth.json` unless you already have secure service-environment management.

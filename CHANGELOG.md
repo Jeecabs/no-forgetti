@@ -12,7 +12,7 @@
 - Safely no-op capacity-violating review proposals instead of surfacing a repeating failure.
 - Stop rendering redundant project-skill invocation receipts in chat history while retaining hidden usage provenance for refinement and retention.
 
-## 0.3.0 — 2026-07-27
+## 0.3.0 - 2026-07-27
 
 - **Breaking:** publish external project skills through Pi native discovery and `/skill:<name>` invocation; remove the custom `project_skill` tool and per-turn lexical body injection, then track successful native reads/invocations for refinement and retention.
 - Add filesystem-authoritative per-provider attempt accounting with conservative holds, exact settlement, unknown exposure, global attempt identities, legacy-budget migration, orphan recovery, and durable retry backoff.
@@ -24,7 +24,7 @@
 - Give embedded reviews two minutes to finish; harden project-skill reviews with enforced aborts, an explicit atomic admission commit point, truthful retry messaging, and silent lifecycle cancellation.
 - Migrate project-skill cadence state to fenced claims so forced reviews cannot bypass live leases and stale workers cannot settle newer work.
 
-## 0.2.0 — 2026-07-26
+## 0.2.0 - 2026-07-26
 
 - **Breaking:** add embedded, shadow, and opt-in external memory-review authority modes.
 - Add a separately runnable `no-forgetti review --once` worker and durable local review spool with deterministic jobs, fenced leases, crash recovery, strict schemas, redaction, usage/cost provenance, and daily budgets.
@@ -42,7 +42,7 @@
 - Reload active project memory at every turn boundary so foreground writes and accepted refinements require no manual refresh.
 - Add roll-forward high/normal/low memory importance with explicit assessment provenance and ID-targeted merge/assessment operations.
 
-## 0.1.0 — 2026-07-15
+## 0.1.0 - 2026-07-15
 
 - Add project-scoped bounded memory.
 - Add frozen system-prompt snapshot injection with refresh at Pi compaction boundaries.

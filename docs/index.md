@@ -7,7 +7,13 @@ description: Project-scoped persistent memory and self-forming skills for Pi.
 
 No Forgetti gives [Pi](https://github.com/earendil-works/pi-mono) durable, project-scoped memory and reusable project skills. State stays outside the repository, so learning does not create project-file churn.
 
-[Install No Forgetti](./getting-started.md) · [Set up external mode](./external-mode/setup.md) · [View on GitHub](https://github.com/Jeecabs/no-forgetti)
+<div class="actions">
+
+[Install No Forgetti](./getting-started.md)
+[Set up external mode](./external-mode/setup.md)
+[View on GitHub](https://github.com/Jeecabs/no-forgetti)
+
+</div>
 
 ::: tip New to No Forgetti?
 Start with [Getting started](./getting-started.md). The default embedded reviewer requires no daemon or service configuration.
