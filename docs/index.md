@@ -25,7 +25,7 @@ Start with [Getting started](./getting-started.md). The default embedded reviewe
 
 The two paths a memory change can take. A direct `project_memory` write crosses straight to the branch and lands at once. Automatic review takes the long way: it starts only after a turn settles, reads a bounded and sanitized slice of evidence, proposes changes, and commits them only while the branch still matches the version it reviewed. If a newer write got there first, the proposal is refused rather than applied.
 
-The diagram is silent and animated only in the order things appear, so the paragraph above carries the same information. [Project memory](./guide/memory.md) covers each step in full.
+The video is silent and animated only in the order things appear, so the paragraph above carries the same information. [Project memory](./guide/memory.md) covers each step in full.
 
 ## Choose what you need
 
