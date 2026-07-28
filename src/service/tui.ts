@@ -45,6 +45,7 @@ function age(value: string, observedAt: string): string {
 function serviceState(snapshot: ReviewServiceMonitor): { label: string; color: StatusColor } {
   if (snapshot.mode === "embedded") return { label: "embedded", color: "muted" };
   if (snapshot.exhausted.length > 0) return { label: "limit reached", color: "error" };
+  if (snapshot.workerCompatible === false) return { label: "restart required", color: "warning" };
   if (!snapshot.workerFresh) return { label: "worker offline", color: "warning" };
   if (snapshot.worker?.state === "working") return { label: "reviewing", color: "success" };
   if (snapshot.worker?.state === "waiting-retry") return { label: "waiting to retry", color: "warning" };
@@ -174,6 +175,8 @@ export function renderReviewServiceMonitorCard(
 
   const notice = snapshot.exhausted.length > 0
     ? { color: "error" as const, text: `limit reached on ${snapshot.exhausted.join(" and ")} · resumes next utc day` }
+    : snapshot.workerCompatible === false
+      ? { color: "warning" as const, text: "worker memory policy is outdated · restart the managed worker" }
     : !snapshot.workerFresh && snapshot.mode === "external"
       ? { color: "warning" as const, text: "worker heartbeat is stale · queued evidence stays durable" }
       : error

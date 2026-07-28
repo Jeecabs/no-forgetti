@@ -7,6 +7,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { atomicCreateFile, atomicWriteFile } from "./atomic-file.ts";
 import { memoryCharCount } from "./context.ts";
 import { withFileLock } from "./file-lock.ts";
+import { reviewCapacityViolation } from "./memory-policy.ts";
 import { projectKey } from "./project.ts";
 import { validateMemoryText } from "./security.ts";
 import { beginReviewClaim, settleReviewClaim } from "./review-cadence.ts";
@@ -15,7 +16,6 @@ import {
   DEFAULT_MAX_CHARS,
   DEFAULT_MAX_ENTRY_CHARS,
   MAIN_MEMORY,
-  MEMORY_REFINEMENT_TARGET_RATIO,
   STORE_FILE_BYTE_LIMIT,
   STORE_VERSION,
   type MemoryBranch,
@@ -1335,18 +1335,12 @@ export class ProjectMemoryStore {
   }
 
   private assertReviewCapacity(before: MemoryBranch, after: MemoryBranch): void {
-    const target = Math.max(1, Math.floor(this.maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
-    const beforeChars = memoryCharCount(before);
-    const afterChars = memoryCharCount(after);
-    if (afterChars > this.maxChars) {
-      throw new ReviewCapacityError(`Proposal would exceed the ${this.maxChars}-character hard limit (${afterChars}/${this.maxChars}).`);
-    }
-    if (beforeChars < target && afterChars > target) {
-      throw new ReviewCapacityError(`Proposal would exceed the working target of ${target} characters (${afterChars}/${target}).`);
-    }
-    if (beforeChars >= target && afterChars > beforeChars) {
-      throw new ReviewCapacityError(`Proposal cannot grow at or above the ${target}-character working target (${beforeChars}→${afterChars}). Consolidate, remove, or return no operations.`);
-    }
+    const violation = reviewCapacityViolation({
+      beforeChars: memoryCharCount(before),
+      afterChars: memoryCharCount(after),
+      maxChars: this.maxChars,
+    });
+    if (violation) throw new ReviewCapacityError(violation);
   }
 
   private assertCapacity(branch: MemoryBranch): void {

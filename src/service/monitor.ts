@@ -6,6 +6,8 @@ import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { atomicWriteFile } from "../atomic-file.ts";
+import { exactKeys, isRecord, requireIsoTimestamp } from "../state-validation.ts";
+import { DEFAULT_MAX_CHARS, MEMORY_POLICY_VERSION } from "../types.ts";
 import { FileReviewAttemptAccounting, type ReviewBudgetAmount } from "./accounting.ts";
 import { FileReviewBudgetAccount, type ReviewBudgetUsage, type ReviewDaemonEvent } from "./daemon.ts";
 import { loadServiceConfig, type ReviewAuthorityMode, type ReviewerProfile } from "./config.ts";
@@ -26,6 +28,8 @@ export interface ReviewWorkerStatus {
   startedAt: string;
   updatedAt: string;
   state: ReviewWorkerState;
+  memoryPolicyVersion?: number;
+  maxMemoryChars?: number;
   jobId?: string;
   attempt?: number;
 }
@@ -50,45 +54,76 @@ export interface ReviewServiceMonitor {
   spool: ReviewSpoolCounts;
   worker?: ReviewWorkerStatus;
   workerFresh: boolean;
+  /** Undefined when no worker exists; false identifies a legacy/stale-policy worker. */
+  workerCompatible?: boolean;
   exhausted: Array<"calls" | "tokens" | "cost">;
   observedAt: string;
 }
 
-function validIso(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(`Invalid ${label}.`);
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new Error(`Invalid ${label}.`);
+const WORKER_STATES = new Set<ReviewWorkerState>([
+  "starting", "idle", "working", "waiting-retry", "budget-exhausted", "stopped",
+]);
+
+function workerId(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 128) {
+    throw new Error("Invalid review worker id.");
+  }
   return value;
 }
 
-function parseWorkerStatus(value: unknown): ReviewWorkerStatus {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid review worker status.");
-  const record = value as Record<string, unknown>;
-  const allowed = new Set(["version", "workerId", "pid", "startedAt", "updatedAt", "state", "jobId", "attempt"]);
-  if (Object.keys(record).some((key) => !allowed.has(key)) || record.version !== WORKER_STATUS_VERSION) {
-    throw new Error("Invalid review worker status.");
+function positiveInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`Invalid ${label}.`);
+  return value as number;
+}
+
+function optionalPositiveInteger(value: unknown, label: string): number | undefined {
+  return value === undefined ? undefined : positiveInteger(value, label);
+}
+
+function workerState(value: unknown): ReviewWorkerState {
+  if (typeof value !== "string" || !WORKER_STATES.has(value as ReviewWorkerState)) {
+    throw new Error("Invalid review worker state.");
   }
-  const states: ReviewWorkerState[] = ["starting", "idle", "working", "waiting-retry", "budget-exhausted", "stopped"];
-  if (typeof record.workerId !== "string" || record.workerId.length < 1 || record.workerId.length > 128
-    || !Number.isSafeInteger(record.pid) || (record.pid as number) < 1
-    || typeof record.state !== "string" || !states.includes(record.state as ReviewWorkerState)) {
-    throw new Error("Invalid review worker status.");
-  }
-  if (record.jobId !== undefined && (typeof record.jobId !== "string" || !/^review_[0-9a-f]{40}$/u.test(record.jobId))) {
+  return value as ReviewWorkerState;
+}
+
+function optionalJobId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^review_[0-9a-f]{40}$/u.test(value)) {
     throw new Error("Invalid review worker status job.");
   }
-  if (record.attempt !== undefined && (!Number.isSafeInteger(record.attempt) || (record.attempt as number) < 1)) {
-    throw new Error("Invalid review worker status attempt.");
-  }
+  return value;
+}
+
+function definedWorkerFields(fields: {
+  memoryPolicyVersion?: number;
+  maxMemoryChars?: number;
+  jobId?: string;
+  attempt?: number;
+}): Partial<ReviewWorkerStatus> {
+  return Object.fromEntries(Object.entries(fields).filter(([, field]) => field !== undefined));
+}
+
+function parseWorkerStatus(value: unknown): ReviewWorkerStatus {
+  if (!isRecord(value)) throw new Error("Invalid review worker status.");
+  exactKeys(
+    value,
+    ["version", "workerId", "pid", "startedAt", "updatedAt", "state"],
+    ["memoryPolicyVersion", "maxMemoryChars", "jobId", "attempt"],
+  );
+  if (value.version !== WORKER_STATUS_VERSION) throw new Error("Invalid review worker status version.");
+  const memoryPolicyVersion = optionalPositiveInteger(value.memoryPolicyVersion, "review worker memory policy version");
+  const maxMemoryChars = optionalPositiveInteger(value.maxMemoryChars, "review worker memory capacity");
+  const jobId = optionalJobId(value.jobId);
+  const attempt = optionalPositiveInteger(value.attempt, "review worker status attempt");
   return {
     version: WORKER_STATUS_VERSION,
-    workerId: record.workerId,
-    pid: record.pid as number,
-    startedAt: validIso(record.startedAt, "review worker start time"),
-    updatedAt: validIso(record.updatedAt, "review worker update time"),
-    state: record.state as ReviewWorkerState,
-    ...(record.jobId ? { jobId: record.jobId as string } : {}),
-    ...(record.attempt ? { attempt: record.attempt as number } : {}),
+    workerId: workerId(value.workerId),
+    pid: positiveInteger(value.pid, "review worker pid"),
+    startedAt: requireIsoTimestamp(value.startedAt, "review worker start time"),
+    updatedAt: requireIsoTimestamp(value.updatedAt, "review worker update time"),
+    state: workerState(value.state),
+    ...definedWorkerFields({ memoryPolicyVersion, maxMemoryChars, jobId, attempt }),
   };
 }
 
@@ -192,6 +227,10 @@ export async function readReviewServiceMonitor(
     ...(worker ? { worker } : {}),
     workerFresh: Boolean(worker && worker.state !== "stopped" && now.getTime() - new Date(worker.updatedAt).getTime()
       <= (worker.state === "working" ? WORKER_ACTIVE_FRESH_MS : WORKER_IDLE_FRESH_MS)),
+    ...(worker ? {
+      workerCompatible: worker.memoryPolicyVersion === MEMORY_POLICY_VERSION
+        && worker.maxMemoryChars === DEFAULT_MAX_CHARS,
+    } : {}),
     exhausted: exhaustedDimensions(config.reviewer, budget),
     observedAt: now.toISOString(),
   };
@@ -220,6 +259,8 @@ export class ReviewWorkerStatusReporter {
       startedAt: this.startedAt,
       updatedAt: this.startedAt,
       state: "starting",
+      memoryPolicyVersion: MEMORY_POLICY_VERSION,
+      maxMemoryChars: DEFAULT_MAX_CHARS,
     };
   }
 
@@ -263,6 +304,8 @@ export class ReviewWorkerStatusReporter {
       startedAt: this.startedAt,
       updatedAt,
       state: update.state,
+      memoryPolicyVersion: MEMORY_POLICY_VERSION,
+      maxMemoryChars: DEFAULT_MAX_CHARS,
       ...(update.jobId ? { jobId: update.jobId } : {}),
       ...(update.attempt ? { attempt: update.attempt } : {}),
     };

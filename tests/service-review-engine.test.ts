@@ -24,7 +24,7 @@ import { SQLiteReviewLedger } from "../src/service/ledger.ts";
 import { createReviewJob, type ReviewFailure } from "../src/service/protocol.ts";
 import { ReviewEngine, ReviewEngineError } from "../src/service/review-engine.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
-import type { MemoryBranch } from "../src/types.ts";
+import { DEFAULT_MAX_CHARS, type MemoryBranch } from "../src/types.ts";
 
 const branch: MemoryBranch = {
   version: 1,
@@ -307,6 +307,29 @@ test("review engine forwards daemon checkpoints across its model seam", async ()
   assert.deepEqual(events, ["dispatch", "provider", "observed:fake-reviewer", "returned"]);
 });
 
+test("review engine defers jobs from a newer memory policy before model dispatch", async () => {
+  const incompatibleJob = createReviewJob({
+    projectKey: "a".repeat(24),
+    sessionId: "private-session-id",
+    throughEntryId: "assistant-newer-policy",
+    transcript: "USER: remember this durable fact",
+    branch,
+    maxChars: DEFAULT_MAX_CHARS + 1,
+  });
+  const runner = new FakeModelRunner({ text: '{"operations":[]}', provenance });
+
+  await assert.rejects(
+    new ReviewEngine(runner).review(incompatibleJob),
+    (error: unknown) => error instanceof ReviewEngineError
+      && error.code === "incompatible_policy"
+      && error.retryable,
+  );
+  assert.equal(runner.requests.length, 0);
+  assert.equal(classifyReviewFailure(
+    new ReviewEngineError("incompatible_policy", "restart required", { retryable: true }),
+  ).configurationBlock, true);
+});
+
 test("tool-less review engine builds prompt from job and returns typed proposal with provenance", async () => {
   const reviewJob = job();
   const original = structuredClone(reviewJob);
@@ -333,6 +356,41 @@ test("tool-less review engine builds prompt from job and returns typed proposal 
   assert.match(request.prompt, new RegExp(reviewJob.id, "u"));
   assert.doesNotMatch(request.prompt, /private-session-id/u);
   assert.equal(Object.hasOwn(request, "tools"), false);
+});
+
+test("review engine retries a proposal that would consume reserved review headroom", async () => {
+  const crowdedBranch: MemoryBranch = {
+    ...branch,
+    entries: Array.from({ length: 5 }, (_, index) => ({
+      id: `crowded-${index}`,
+      text: String(index).repeat(800),
+      createdAt: branch.createdAt,
+      updatedAt: branch.updatedAt,
+      importance: "normal" as const,
+    })),
+  };
+  const crowdedJob = createReviewJob({
+    projectKey: "a".repeat(24),
+    sessionId: "private-session-id",
+    throughEntryId: "assistant-crowded",
+    transcript: "USER: remember another durable fact",
+    branch: crowdedBranch,
+    maxChars: DEFAULT_MAX_CHARS,
+  });
+  const runner = new FakeModelRunner({
+    text: JSON.stringify({ operations: [{ action: "add", content: "x".repeat(600), importance: "normal" }] }),
+    provenance,
+  });
+
+  await assert.rejects(
+    new ReviewEngine(runner).review(crowdedJob),
+    (error: unknown) => error instanceof ReviewEngineError
+      && error.code === "invalid_proposal"
+      && error.retryable
+      && error.provenance === provenance
+      && /working target of 4500 characters/u.test(error.message),
+  );
+  assert.equal(runner.requests.length, 1);
 });
 
 test("review engine rejects malformed or unsafe model proposals and retains call provenance", async () => {

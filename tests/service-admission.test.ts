@@ -79,6 +79,37 @@ test("external admission applies a proposal once through branch CAS", async (t) 
   );
 });
 
+test("external admission enforces the capacity carried by an older producer job", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  for (const content of ["a", "b", "c", "d", "e"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(700) });
+  }
+  await store.applyOperation("main", { action: "add", content: "f".repeat(257) });
+  const branch = await store.loadBranch("main");
+  assert.equal(branch.entries.reduce((total, entry) => total + entry.text.length, 0), 3_757);
+  const job = createReviewJob({
+    projectKey: store.projectKey,
+    sessionId: "private-session",
+    throughEntryId: "entry-policy",
+    transcript: "USER: remember the academic grant package",
+    branch,
+    baseBranchDigest: store.branchDigest(branch),
+    maxChars: 4_000,
+  });
+  const outcome = createReviewOutcome(job, {
+    status: "completed",
+    operations: [{ action: "add", content: "g".repeat(395), importance: "normal" }],
+    provenance,
+    completedAt: provenance.completedAt,
+  });
+
+  const receipt = await new FileMemoryProposalCommitter(agentDir).commit(job, outcome);
+
+  assert.equal(receipt.status, "noop");
+  assert.match(receipt.messages.at(0) ?? "", /4000-character hard limit \(4152\/4000\)/u);
+  assert.equal((await store.loadBranch("main")).entries.length, 6);
+});
+
 test("external admission safely no-ops a proposal that consumes review headroom", async (t) => {
   const { agentDir, store } = await fixture(t);
   for (const content of ["a", "b", "c", "d", "e"]) {

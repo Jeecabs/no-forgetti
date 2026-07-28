@@ -59,6 +59,17 @@ test("review prompt exposes hard capacity and an earlier refinement target", () 
   assert.match(prompt, /high: forgetting likely causes user correction or expensive rediscovery/u);
 });
 
+test("review prompt gives an exact low-headroom budget before the working target", () => {
+  const nearTarget: MemoryBranch = {
+    ...branch,
+    entries: [{ ...branch.entries[0]!, text: "x".repeat(4_000) }],
+  };
+  const prompt = buildReviewPrompt(nearTarget, "USER: one more durable correction", 6_000);
+  assert.match(prompt, /HEADROOM LOW/u);
+  assert.match(prompt, /500 characters remain before the working target/u);
+  assert.match(prompt, /merge or shorten existing entries in the same atomic batch/u);
+});
+
 test("review prompt requires non-growing refinement once the working target is reached", () => {
   const fullBranch: MemoryBranch = {
     ...branch,
@@ -67,6 +78,7 @@ test("review prompt requires non-growing refinement once the working target is r
   const prompt = buildReviewPrompt(fullBranch, "", 6_000);
   assert.match(prompt, /REFINEMENT REQUIRED/u);
   assert.match(prompt, /final state must not exceed the current 4500 characters/u);
+  assert.match(prompt, /compact toward the 4000-character maintenance goal/u);
   assert.match(prompt, /never discard valid semantics merely to shrink/u);
   assert.match(prompt, /safe no-op is allowed/u);
 });

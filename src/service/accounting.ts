@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 
 import { atomicCreateFile, atomicWriteFile, durableUnlink } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
-import { exactKeys, isErrno, isRecord } from "../state-validation.ts";
+import { exactKeys, isErrno, isRecord, requireIsoTimestamp as checkedIso } from "../state-validation.ts";
 import type { ReviewModelProvenance } from "./protocol.ts";
 
 export const REVIEW_ACCOUNTING_VERSION = 1 as const;
@@ -203,13 +203,6 @@ function positiveInteger(value: unknown, label: string): number {
   const parsed = nonnegativeInteger(value, label);
   if (parsed < 1) throw new Error(`Invalid ${label}.`);
   return parsed;
-}
-
-function checkedIso(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(`Invalid ${label}.`);
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new Error(`Invalid ${label}.`);
-  return value;
 }
 
 function checkedProvider(value: unknown): string {

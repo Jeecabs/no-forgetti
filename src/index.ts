@@ -445,6 +445,7 @@ export function activateProjectMemoryExtension(
     if (pendingSkillCount > 0) segs.push(`pending:${pendingSkillCount}`);
     if (serviceConfig.mode !== "embedded") {
       if (serviceMonitor?.exhausted.length) segs.push(t.fg("error", `review:limit-${serviceMonitor.exhausted.join("+")}`));
+      else if (serviceMonitor?.workerCompatible === false) segs.push(t.fg("warning", "review:update"));
       else if (serviceMonitor && !serviceMonitor.workerFresh) segs.push(t.fg("warning", "review:offline"));
       else if (!serviceMonitor) segs.push(t.fg("warning", "review:monitor-error"));
       else if (serviceMonitor.spool.queued) segs.push(t.fg("accent", `review:q${serviceMonitor.spool.queued}`));
@@ -796,6 +797,13 @@ export function activateProjectMemoryExtension(
     transcript: string,
     throughEntryId: string,
   ): Promise<void> {
+    // Do not hand durable evidence to a worker whose admission policy predates
+    // this extension. The review claim remains failed (and therefore retryable),
+    // while its session evidence cursor stays before the unpersisted job.
+    await refreshServiceMonitor(ctx);
+    if (serviceMonitor?.workerCompatible === false) {
+      throw new Error("No Forgetti review worker restart required: its memory policy is out of date.");
+    }
     const spool = reviewSpool;
     if (!spool) throw new Error("External review spool is unavailable.");
     const memoryStore = requireStore();
