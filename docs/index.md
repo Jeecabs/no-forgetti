@@ -19,6 +19,12 @@ No Forgetti gives [Pi](https://github.com/earendil-works/pi-mono) durable, proje
 Start with [Getting started](./getting-started.md). The default embedded reviewer requires no daemon or service configuration.
 :::
 
+## How it works
+
+<video controls preload="none" width="1920" height="1080" poster="/how-it-works-poster.jpg" src="/how-it-works.mp4"></video>
+
+A one-minute walkthrough of the same ground as [The short version](#the-short-version) below: how memory is scoped to a project, the two ways it changes, what automatic review is allowed to admit, and where review can run. The video is silent, so nothing in it is lost by reading instead.
+
 ## Choose what you need
 
 | Task | Start here |
