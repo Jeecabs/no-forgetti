@@ -6,9 +6,10 @@ import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { activateProjectMemoryExtension, type ExtensionDependencies } from "../src/index.ts";
+import { activateProjectMemoryExtension, resolvePendingRef, type ExtensionDependencies } from "../src/index.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
+import type { SkillProposal } from "../src/skill-types.ts";
 import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
 import { createReviewOutcome } from "../src/service/protocol.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
@@ -430,6 +431,26 @@ test("memory review applies immediately and next turn injects live state", async
   assert.match(before.systemPrompt, /Type checks run with pnpm check\./u);
 });
 
+test("capacity-violating embedded reviews safely no-op without a failure warning", async (t) => {
+  const { context, extension, memoryStore, notifications } = await fixture(t, {
+    requestReviewPlan: async () => ({
+      operations: [{ action: "add", content: "overflow", importance: "normal" }],
+    }),
+  });
+  for (const content of ["a", "b", "c", "d", "e"]) {
+    await memoryStore.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+  await memoryStore.applyOperation("main", { action: "add", content: "f".repeat(500) });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+
+  await extension.command("memory", "review", context);
+
+  assert.equal((await memoryStore.loadBranch("main")).entries.length, 6);
+  assert.equal(notifications.some((item) => item.message.includes("review failed")), false);
+  assert.equal(notifications.some((item) => item.message.includes("nothing durable to save")), true);
+});
+
 test("external review authority durably queues bounded evidence without an in-process model call", async (t) => {
   let modelCalls = 0;
   const { branch, context, extension, memoryStore, reviewSpool } = await fixture(t, {
@@ -746,4 +767,24 @@ test("does not credit a native skill observed in an aborted run", async (t) => {
   await extension.emit("agent_settled", {}, context);
   assert.equal((await skillStore.loadSkill("verification")).useCount, 0);
   assert.equal(await skillStore.activity.completedCount(), 0);
+});
+
+function pendingProposal(id: string, action: "patch" | "archive", name: string): SkillProposal {
+  return { version: 1, id, createdAt: "2026-07-28T00:00:00.000Z", operations: [{ action, name }] };
+}
+
+test("resolves pending proposals by skill name, by id, and by qualified ref", () => {
+  const archive = pendingProposal("20260728000000-aaaaaaaa", "archive", "verification");
+  const patch = pendingProposal("20260728000001-bbbbbbbb", "patch", "verification");
+  const other = pendingProposal("20260728000002-cccccccc", "archive", "release-check");
+
+  assert.equal(resolvePendingRef([archive, other], "verification"), archive);
+  assert.equal(resolvePendingRef([archive, other], archive.id), archive);
+  assert.throws(() => resolvePendingRef([archive], "missing"), /No pending proposal 'missing'/u);
+
+  assert.throws(
+    () => resolvePendingRef([archive, patch], "verification"),
+    /more than one pending proposal; use 'archive verification' or 'patch verification'/u,
+  );
+  assert.equal(resolvePendingRef([archive, patch], "patch verification"), patch);
 });

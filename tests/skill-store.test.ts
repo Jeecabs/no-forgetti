@@ -53,7 +53,7 @@ test("stores native Pi skill packages outside the repository", async (t) => {
   await assert.rejects(stat(join(project, "SKILL.md")));
 });
 
-test("generated skill creates auto-approve while patches remain pending", async (t) => {
+test("generated skill creates and patches auto-approve while archives remain pending", async (t) => {
   const { base, store } = await fixture();
   t.after(() => rm(base, { recursive: true, force: true }));
   const submission = await store.submitProposal([{
@@ -74,9 +74,121 @@ test("generated skill creates auto-approve while patches remain pending", async 
     oldText: "canonical check",
     newText: "canonical verification check",
   }], "session-1");
-  assert.equal(patch.staged, true);
-  assert.equal(patch.result, undefined);
+  assert.equal(patch.staged, false);
+  assert.equal(patch.result?.changed, true);
+  assert.match((await store.loadSkill("verification")).content, /canonical verification check/u);
+  assert.equal((await store.listPending()).length, 0);
+
+  const archive = await store.submitProposal([{ action: "archive", name: "verification" }], "session-1");
+  assert.equal(archive.staged, true);
+  assert.equal(archive.result, undefined);
   assert.equal((await store.listPending()).length, 1);
+});
+
+test("a patch whose oldText no longer matches stays pending instead of throwing", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.submitProposal([{
+    action: "create",
+    name: "verification",
+    description: "Run the canonical project verification.",
+    content: skillBody,
+  }], "session-1");
+
+  const stale = await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "text that was never in the body",
+    newText: "replacement",
+  }], "session-1");
+  assert.equal(stale.staged, true);
+  assert.equal(stale.result, undefined);
+  assert.equal((await store.loadSkill("verification")).content, skillBody);
+  assert.deepEqual((await store.listPending()).map((proposal) => proposal.id), [stale.proposal.id]);
+});
+
+test("undo reverts the last patch once and refuses after any later change", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.submitProposal([{
+    action: "create",
+    name: "verification",
+    description: "Run the canonical project verification.",
+    content: skillBody,
+  }], "session-1");
+  assert.equal(await store.lastChange("verification"), undefined);
+
+  await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "canonical check",
+    newText: "canonical verification check",
+  }], "session-1");
+  const change = await store.lastChange("verification");
+  assert.match(change!.before, /canonical check\./u);
+  assert.match(change!.current, /canonical verification check\./u);
+
+  const undone = await store.undoLastPatch("verification");
+  assert.equal(undone.changed, true);
+  assert.equal((await store.loadSkill("verification")).content, skillBody);
+
+  const again = await store.undoLastPatch("verification");
+  assert.equal(again.changed, false);
+  assert.match(again.message, /changed again after that patch/u);
+  assert.equal((await store.loadSkill("verification")).content, skillBody);
+});
+
+test("undo targets the newest recorded change rather than a stale snapshot", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.submitProposal([{
+    action: "create",
+    name: "verification",
+    description: "Run the canonical project verification.",
+    content: skillBody,
+  }], "session-1");
+  await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "canonical check",
+    newText: "canonical verification check",
+  }], "session-1");
+  await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "Completion criterion",
+    newText: "Done when",
+  }], "session-1");
+
+  // The newest revision is the pre-edit body, so undoing that edit is still allowed;
+  // the stale first snapshot must never be the one restored.
+  const undone = await store.undoLastPatch("verification");
+  assert.equal(undone.changed, true);
+  const reverted = await store.loadSkill("verification");
+  assert.match(reverted.content, /canonical verification check/u);
+  assert.match(reverted.content, /Completion criterion/u);
+});
+
+test("undo preserves view counters recorded after the patch", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.submitProposal([{
+    action: "create",
+    name: "verification",
+    description: "Run the canonical project verification.",
+    content: skillBody,
+  }], "session-1");
+  await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "canonical check",
+    newText: "canonical verification check",
+  }], "session-1");
+  await store.viewSkill("verification");
+  await store.viewSkill("verification");
+
+  assert.equal((await store.undoLastPatch("verification")).changed, true);
+  assert.equal((await store.loadSkill("verification")).viewCount, 2);
 });
 
 test("startup migration applies legacy pending creates but preserves patches", async (t) => {

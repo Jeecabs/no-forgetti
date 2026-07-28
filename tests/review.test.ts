@@ -47,25 +47,26 @@ test("parses ID-targeted review operations with assessed importance", () => {
 });
 
 test("review prompt exposes hard capacity and an earlier refinement target", () => {
-  const prompt = buildReviewPrompt(branch, "USER: Durable correction.", 4_000);
-  assert.match(prompt, /HARD LIMIT: 4000 characters/u);
-  assert.match(prompt, /WORKING TARGET: 3000 characters/u);
+  const prompt = buildReviewPrompt(branch, "USER: Durable correction.", 6_000);
+  assert.match(prompt, /HARD LIMIT: 6000 characters/u);
+  assert.match(prompt, /WORKING TARGET: 4500 characters/u);
   assert.match(prompt, /Current usage: 26 characters/u);
   assert.match(prompt, /id one; importance unassessed \(effective normal\)/u);
   assert.match(prompt, /created 2026-01-01T00:00:00.000Z; updated 2026-01-01T00:00:00.000Z/u);
-  assert.match(prompt, /working target is advisory/u);
-  assert.match(prompt, /must never exceed the hard limit/u);
+  assert.match(prompt, /Reviews below the working target must finish at or below 4500 characters/u);
+  assert.match(prompt, /Hard-limit headroom is reserved for foreground writes/u);
   assert.match(prompt, /Target existing entries by entryId, never by text/u);
   assert.match(prompt, /high: forgetting likely causes user correction or expensive rediscovery/u);
 });
 
-test("review prompt recommends only lossless refinement once the working target is reached", () => {
+test("review prompt requires non-growing refinement once the working target is reached", () => {
   const fullBranch: MemoryBranch = {
     ...branch,
-    entries: [{ ...branch.entries[0]!, text: "x".repeat(3_000) }],
+    entries: [{ ...branch.entries[0]!, text: "x".repeat(4_500) }],
   };
-  const prompt = buildReviewPrompt(fullBranch, "", 4_000);
-  assert.match(prompt, /REFINEMENT RECOMMENDED/u);
+  const prompt = buildReviewPrompt(fullBranch, "", 6_000);
+  assert.match(prompt, /REFINEMENT REQUIRED/u);
+  assert.match(prompt, /final state must not exceed the current 4500 characters/u);
   assert.match(prompt, /never discard valid semantics merely to shrink/u);
   assert.match(prompt, /safe no-op is allowed/u);
 });

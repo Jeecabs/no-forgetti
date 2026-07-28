@@ -15,6 +15,7 @@ import {
   DEFAULT_MAX_CHARS,
   DEFAULT_MAX_ENTRY_CHARS,
   MAIN_MEMORY,
+  MEMORY_REFINEMENT_TARGET_RATIO,
   STORE_FILE_BYTE_LIMIT,
   STORE_VERSION,
   type MemoryBranch,
@@ -73,6 +74,13 @@ interface ReviewMutationRequest {
   operation: ReviewOperation;
   sourceSessionId?: string;
   writeOrigin: MemoryWriteOrigin;
+}
+
+class ReviewCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewCapacityError";
+  }
 }
 
 interface AddedRevisionChange {
@@ -778,11 +786,13 @@ export class ProjectMemoryStore {
           changed ||= result.changed;
           results.push(result);
         }
-        this.assertReviewCapacity(branch);
+        this.assertReviewCapacity(original, branch);
       } catch (error) {
         return [{
           changed: false,
-          message: `Review batch rejected; memory unchanged. ${error instanceof Error ? error.message : String(error)}`,
+          message: error instanceof ReviewCapacityError
+            ? `Review batch skipped; memory unchanged. ${error.message}`
+            : `Review batch rejected; memory unchanged. ${error instanceof Error ? error.message : String(error)}`,
           branch: original,
         }];
       }
@@ -860,13 +870,16 @@ export class ProjectMemoryStore {
             changed ||= result.changed;
             results.push(result);
           }
-          this.assertReviewCapacity(afterBranch);
+          this.assertReviewCapacity(original, afterBranch);
           status = changed ? "applied" : "noop";
           messages = results.map((result) => result.message);
         } catch (error) {
           afterBranch = original;
-          status = "rejected";
-          messages = [`Review batch rejected; memory unchanged. ${error instanceof Error ? error.message : String(error)}`];
+          changed = false;
+          status = error instanceof ReviewCapacityError ? "noop" : "rejected";
+          messages = [error instanceof ReviewCapacityError
+            ? `Review batch skipped; memory unchanged. ${error.message}`
+            : `Review batch rejected; memory unchanged. ${error instanceof Error ? error.message : String(error)}`];
         }
       }
 
@@ -1321,9 +1334,19 @@ export class ProjectMemoryStore {
     return previous;
   }
 
-  private assertReviewCapacity(after: MemoryBranch): void {
-    // 3,000 characters is a reviewer prompt target, not a storage invariant.
-    this.assertCapacity(after);
+  private assertReviewCapacity(before: MemoryBranch, after: MemoryBranch): void {
+    const target = Math.max(1, Math.floor(this.maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
+    const beforeChars = memoryCharCount(before);
+    const afterChars = memoryCharCount(after);
+    if (afterChars > this.maxChars) {
+      throw new ReviewCapacityError(`Proposal would exceed the ${this.maxChars}-character hard limit (${afterChars}/${this.maxChars}).`);
+    }
+    if (beforeChars < target && afterChars > target) {
+      throw new ReviewCapacityError(`Proposal would exceed the working target of ${target} characters (${afterChars}/${target}).`);
+    }
+    if (beforeChars >= target && afterChars > beforeChars) {
+      throw new ReviewCapacityError(`Proposal cannot grow at or above the ${target}-character working target (${beforeChars}→${afterChars}). Consolidate, remove, or return no operations.`);
+    }
   }
 
   private assertCapacity(branch: MemoryBranch): void {

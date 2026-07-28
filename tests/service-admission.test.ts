@@ -79,6 +79,37 @@ test("external admission applies a proposal once through branch CAS", async (t) 
   );
 });
 
+test("external admission safely no-ops a proposal that consumes review headroom", async (t) => {
+  const { agentDir, store } = await fixture(t);
+  for (const content of ["a", "b", "c", "d", "e"]) {
+    await store.applyOperation("main", { action: "add", content: content.repeat(800) });
+  }
+  await store.applyOperation("main", { action: "add", content: "f".repeat(500) });
+  const branch = await store.loadBranch("main");
+  const job = createReviewJob({
+    projectKey: store.projectKey,
+    sessionId: "private-session",
+    throughEntryId: "entry-1",
+    transcript: "USER: remember one more fact",
+    branch,
+    baseBranchDigest: store.branchDigest(branch),
+    maxChars: store.maxChars,
+  });
+  const outcome = createReviewOutcome(job, {
+    status: "completed",
+    operations: [{ action: "add", content: "One more durable fact.", importance: "normal" }],
+    provenance,
+    completedAt: provenance.completedAt,
+  });
+
+  const receipt = await new FileMemoryProposalCommitter(agentDir).commit(job, outcome);
+
+  assert.equal(receipt.status, "noop");
+  assert.match(receipt.messages.at(0) ?? "", /Review batch skipped/u);
+  assert.equal((await store.loadBranch("main")).entries.length, 6);
+  await assert.rejects(readdir(join(store.projectDir, "revisions", "main")), /ENOENT/u);
+});
+
 test("external admission feedback reports actual added, changed, and removed content", async (t) => {
   const { agentDir, store } = await fixture(t);
   const first = await store.applyOperation("main", { action: "add", content: "Tests run with pnpm test." });
