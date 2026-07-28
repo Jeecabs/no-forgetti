@@ -2,7 +2,7 @@
 
 <div class="plate">
   <div><dt>Section</dt><dd>Core guide</dd></div>
-  <div><dt>Applies to</dt><dd>Primary and superintendent sessions</dd></div>
+  <div><dt>Applies to</dt><dd>Primary Pi sessions</dd></div>
   <div><dt>Storage</dt><dd>Outside the repository</dd></div>
   <div><dt>Write paths</dt><dd>Direct and automatic review</dd></div>
 </div>
@@ -118,6 +118,6 @@ No Forgetti identifies the project with this order:
 
 Each Git worktree receives separate memory because each worktree has a different root.
 
-Gang members and Pi subagents do not load or write project memory. Only the primary or superintendent session can use it.
+Child-agent processes marked with `PI_SUBAGENT_CHILD_AGENT` or `PI_SUBAGENT_RUN_ID` do not load or write project memory.
 
 No Forgetti stores memory outside the repository. See the [storage reference](../reference/storage.md) for paths, permissions, and retention details.
