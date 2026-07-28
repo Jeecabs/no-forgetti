@@ -48,7 +48,15 @@ launchctl enable "gui/$(id -u)/com.jeecabs.no-forgetti-review"
 launchctl kickstart -k "gui/$(id -u)/com.jeecabs.no-forgetti-review"
 ```
 
-After registration, macOS starts and restarts the worker automatically. Unregister it with:
+After registration, macOS starts and restarts the worker automatically. Restart it after updating No Forgetti so the daemon loads the same memory policy as the extension:
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.jeecabs.no-forgetti-review"
+```
+
+The worker heartbeat carries its memory-policy version and capacity. `/memory status` shows `restart required` for an incompatible worker. New evidence remains unqueued, and its cursor does not advance. Jobs from a newer producer defer before model dispatch. Therefore, an already queued candidate survives until restart.
+
+Unregister the worker with:
 
 ```bash
 launchctl bootout "gui/$(id -u)/com.jeecabs.no-forgetti-review"
@@ -77,6 +85,12 @@ Enable it once:
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now no-forgetti-review.service
+```
+
+Restart it after updating No Forgetti:
+
+```bash
+systemctl --user restart no-forgetti-review.service
 ```
 
 ## Observe it from Pi

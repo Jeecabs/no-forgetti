@@ -2,12 +2,13 @@ import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { memoryCharCount } from "./context.ts";
+import { memoryPolicy } from "./memory-policy.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "./skill-native.ts";
 import { safeContextText } from "./security.ts";
 import { isRecord } from "./state-validation.ts";
 import {
   DEFAULT_MAX_CHARS,
-  MEMORY_REFINEMENT_TARGET_RATIO,
+  DEFAULT_MAX_ENTRY_CHARS,
   type MemoryBranch,
   type MemoryImportance,
   type ReviewOperation,
@@ -245,13 +246,105 @@ export function parseReviewPlan(raw: string): ReviewPlan {
   return { operations: operations.map(parseReviewOperation) };
 }
 
+interface ProjectedEntry {
+  id: string;
+  text: string;
+}
+
+function projectedEntryIndex(entries: readonly ProjectedEntry[], entryId: string): number {
+  const index = entries.findIndex((entry) => entry.id === entryId);
+  if (index < 0) throw new Error(`Review operation targets unknown entry '${entryId}'.`);
+  return index;
+}
+
+function projectedDuplicate(
+  entries: readonly ProjectedEntry[],
+  text: string,
+  excludedIds: ReadonlySet<string> = new Set(),
+): boolean {
+  return entries.some((entry) => !excludedIds.has(entry.id) && entry.text === text);
+}
+
+function applyProjectedMerge(entries: ProjectedEntry[], operation: Extract<ReviewOperation, { action: "merge" }>): void {
+  for (const entryId of operation.entryIds) projectedEntryIndex(entries, entryId);
+  const mergedIds = new Set(operation.entryIds);
+  if (projectedDuplicate(entries, operation.content, mergedIds)) {
+    throw new Error("Review merge would duplicate another memory entry.");
+  }
+  const retainedId = operation.entryIds.at(0)!;
+  entries[projectedEntryIndex(entries, retainedId)] = { id: retainedId, text: operation.content };
+  for (const entryId of operation.entryIds.slice(1)) entries.splice(projectedEntryIndex(entries, entryId), 1);
+}
+
+function applyProjectedIdentityOperation(
+  entries: ProjectedEntry[],
+  operation: Extract<ReviewOperation, { action: "remove" | "assess" }>,
+): void {
+  const index = projectedEntryIndex(entries, operation.entryId);
+  if (operation.action === "remove") entries.splice(index, 1);
+}
+
+function applyProjectedReplacement(
+  entries: ProjectedEntry[],
+  operation: Extract<ReviewOperation, { action: "replace" }>,
+): void {
+  const index = projectedEntryIndex(entries, operation.entryId);
+  if (projectedDuplicate(entries, operation.content, new Set([operation.entryId]))) {
+    throw new Error("Review replacement would duplicate another memory entry.");
+  }
+  entries[index] = { id: operation.entryId, text: operation.content };
+}
+
+function applyProjectedExistingOperation(
+  entries: ProjectedEntry[],
+  operation: Exclude<ReviewOperation, { action: "add" }>,
+): void {
+  if (operation.action === "merge") return applyProjectedMerge(entries, operation);
+  if (operation.action === "replace") return applyProjectedReplacement(entries, operation);
+  applyProjectedIdentityOperation(entries, operation);
+}
+
+function applyProjectedOperation(entries: ProjectedEntry[], operation: ReviewOperation, operationIndex: number): void {
+  if (operation.action !== "add") return applyProjectedExistingOperation(entries, operation);
+  if (!projectedDuplicate(entries, operation.content)) {
+    entries.push({ id: `__review_add_${operationIndex}`, text: operation.content });
+  }
+}
+
+/** Projects only review-visible text usage; canonical admission remains authoritative. */
+export function projectedReviewChars(
+  branch: Pick<MemoryBranch, "entries">,
+  operations: readonly ReviewOperation[],
+): number {
+  const entries = branch.entries.map(({ id, text }) => ({ id, text }));
+  for (const [index, operation] of operations.entries()) applyProjectedOperation(entries, operation, index);
+  return entries.reduce((total, entry) => total + entry.text.length, 0);
+}
+
+function maintenanceGuidance(request: {
+  refinementRequired: boolean;
+  availableBeforeTarget: number;
+  refinementTarget: number;
+  maintenanceGoal: number;
+  usedChars: number;
+}): string[] {
+  if (request.refinementRequired) return [
+    `REFINEMENT REQUIRED: current memory has reached the ${request.refinementTarget}-character working target. The final state must not exceed the current ${request.usedChars} characters. When lossless, compact toward the ${request.maintenanceGoal}-character maintenance goal to restore room for later facts. Preserve useful semantics through concise replacements or merges; never discard valid semantics merely to shrink. A safe no-op is allowed.`,
+  ];
+  if (request.availableBeforeTarget < DEFAULT_MAX_ENTRY_CHARS) return [
+    `HEADROOM LOW: ${request.availableBeforeTarget} characters remain before the working target. New durable facts must fit that exact budget; otherwise merge or shorten existing entries in the same atomic batch.`,
+  ];
+  return [];
+}
+
 export function buildReviewPrompt(
   branch: MemoryBranch,
   transcript: string,
   maxChars = DEFAULT_MAX_CHARS,
 ): string {
   const usedChars = memoryCharCount(branch);
-  const refinementTarget = Math.max(1, Math.floor(maxChars * MEMORY_REFINEMENT_TARGET_RATIO));
+  const { workingTarget: refinementTarget, maintenanceGoal } = memoryPolicy(maxChars);
+  const availableBeforeTarget = Math.max(0, refinementTarget - usedChars);
   const refinementRequired = usedChars >= refinementTarget;
   const current = branch.entries.length
     ? branch.entries.map((entry) => {
@@ -289,9 +382,13 @@ export function buildReviewPrompt(
     "Unassessed legacy entries behave as normal until conservatively assessed. Newer assessment metadata is better calibrated, but newer facts do not automatically outrank older facts.",
     `HARD LIMIT: ${maxChars} characters. WORKING TARGET: ${refinementTarget} characters. Current usage: ${usedChars} characters.`,
     `Reviews below the working target must finish at or below ${refinementTarget} characters. Hard-limit headroom is reserved for foreground writes and imperfect proposals. Never exceed the hard limit.`,
-    ...(refinementRequired ? [
-      `REFINEMENT REQUIRED: current memory has reached the ${refinementTarget}-character working target. The final state must not exceed the current ${usedChars} characters. Preserve useful semantics through concise replacements or merges; never discard valid semantics merely to shrink. A safe no-op is allowed.`,
-    ] : []),
+    ...maintenanceGuidance({
+      refinementRequired,
+      availableBeforeTarget,
+      refinementTarget,
+      maintenanceGoal,
+      usedChars,
+    }),
     "Refine in this order: remove contradicted or documented facts regardless of importance; merge overlaps; remove low-importance facts; then consider unassessed or normal facts. Preserve high-importance facts unless contradicted or merged.",
     "The operation batch is atomic and capacity is checked only against final size, so removals need not precede additions. Operations still execute sequentially; never target an entry after removing or merging it.",
     "Target existing entries by entryId, never by text. Merge only explicit entryIds; the first ID supplies the retained entry identity and position.",

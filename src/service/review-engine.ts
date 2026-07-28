@@ -1,5 +1,6 @@
-import { buildReviewPrompt, parseReviewPlan } from "../review.ts";
-import type { ReviewPlan } from "../types.ts";
+import { reviewCapacityViolation } from "../memory-policy.ts";
+import { buildReviewPrompt, parseReviewPlan, projectedReviewChars } from "../review.ts";
+import { DEFAULT_MAX_CHARS, type ReviewPlan } from "../types.ts";
 import { createReviewOutcome, parseReviewJob, type ReviewJob } from "./protocol.ts";
 import type { ModelRunHooks, ModelRunner, ReviewModelProvenance } from "./model-runner.ts";
 
@@ -18,7 +19,7 @@ export interface ReviewProposal {
   provenance: ReviewModelProvenance;
 }
 
-export type ReviewEngineErrorCode = "invalid_job" | "invalid_model_output" | "invalid_proposal";
+export type ReviewEngineErrorCode = "incompatible_policy" | "invalid_job" | "invalid_model_output" | "invalid_proposal";
 
 export class ReviewEngineError extends Error {
   readonly code: ReviewEngineErrorCode;
@@ -69,6 +70,17 @@ export class ReviewEngine {
       });
     }
 
+    // A producer with a larger bound is newer than this worker. Defer before
+    // dispatch so the durable job survives until the managed worker restarts.
+    // Smaller producer bounds remain safe and are honored during admission.
+    if (checked.maxChars > DEFAULT_MAX_CHARS) {
+      throw new ReviewEngineError(
+        "incompatible_policy",
+        `Review job requires a ${checked.maxChars}-character memory policy; this worker supports ${DEFAULT_MAX_CHARS}. Restart the No Forgetti review worker.`,
+        { retryable: true },
+      );
+    }
+
     const result = await this.runner.run({
       systemPrompt: REVIEWER_SYSTEM_PROMPT,
       prompt: buildExternalReviewPrompt(checked),
@@ -87,6 +99,11 @@ export class ReviewEngine {
     }
 
     try {
+      const beforeChars = checked.branch.entries.reduce((total, entry) => total + entry.text.length, 0);
+      const afterChars = projectedReviewChars(checked.branch, plan.operations);
+      const capacityViolation = reviewCapacityViolation({ beforeChars, afterChars, maxChars: checked.maxChars });
+      if (capacityViolation) throw new Error(capacityViolation);
+
       // Reuse transport's strict operation parser now, before any proposal is persisted.
       const outcome = createReviewOutcome(checked, {
         status: "completed",
@@ -97,7 +114,8 @@ export class ReviewEngine {
       if (outcome.status !== "completed") throw new Error("Unexpected failed review outcome.");
       plan = { operations: outcome.operations };
     } catch (error) {
-      throw new ReviewEngineError("invalid_proposal", "Reviewer proposal failed strict validation.", {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new ReviewEngineError("invalid_proposal", `Reviewer proposal failed strict validation: ${detail}`, {
         retryable: true,
         cause: error,
         provenance: result.provenance,

@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { atomicWriteFile, durableUnlink, syncDirectoryStrict } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
-import { exactKeys, isErrno, isRecord } from "../state-validation.ts";
+import { exactKeys, isErrno, isRecord, requireIsoTimestamp as isoTimestamp } from "../state-validation.ts";
 import type { LedgerAttempt, ReviewLedger } from "./ledger.ts";
 import {
   decodeReviewJob,
@@ -97,13 +97,6 @@ export class ReviewSpoolConflictError extends Error {
 function positiveInteger(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`Invalid ${label}.`);
   return value as number;
-}
-
-function isoTimestamp(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(`Invalid ${label}.`);
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new Error(`Invalid ${label}.`);
-  return value;
 }
 
 function workerId(value: unknown): string {

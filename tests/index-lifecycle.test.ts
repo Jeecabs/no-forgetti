@@ -486,6 +486,49 @@ test("external review authority durably queues bounded evidence without an in-pr
   assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-memory-review-job"), true);
 });
 
+test("external review keeps evidence unqueued when the worker memory policy is stale", async (t) => {
+  const { branch, context, extension, reviewSpool, notifications } = await fixture(t, {
+    loadServiceConfig: async () => ({
+      version: 1,
+      mode: "external",
+      evidenceTtlHours: 24,
+      reviewer: {
+        provider: "fake",
+        model: "reviewer",
+        reasoningEffort: "high",
+        maxCallsPerDay: 10,
+        maxTokensPerDay: 10_000,
+        maxCostPerDayUsd: 1,
+      },
+    }),
+    loadServiceMonitor: async () => ({
+      mode: "external",
+      budget: { day: "2026-01-01", calls: 0, tokens: 0, costUsd: 0 },
+      spool: { queued: 0, running: 0, outcomes: 0, deadLetter: 0 },
+      worker: {
+        version: 1,
+        workerId: "legacy-worker",
+        pid: 123,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        state: "idle",
+      },
+      workerFresh: true,
+      workerCompatible: false,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:00.000Z",
+    }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  branch.push(userEntry("stale-policy-user", "Remember that verification uses pnpm check."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  assert.equal(await reviewSpool.claim({ workerId: "test-worker", leaseMs: 1_000 }), undefined);
+  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-memory-review-job"), false);
+  assert.equal(notifications.some((entry) => entry.message.includes("restart required")), true);
+});
+
 test("external review receipt appends a compact content diff to the next Pi session", async (t) => {
   const externalConfig = {
     version: 1 as const,

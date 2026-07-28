@@ -52,7 +52,10 @@ test("service monitor exposes queue, worker heartbeat, and exhausted dimensions"
 
   const monitor = await readReviewServiceMonitor(agentDir, new Date(now.getTime() + 1_000));
   assert.equal(monitor.workerFresh, true);
+  assert.equal(monitor.workerCompatible, true);
   assert.equal(monitor.worker?.state, "working");
+  assert.equal(monitor.worker?.memoryPolicyVersion, 1);
+  assert.equal(monitor.worker?.maxMemoryChars, 6_000);
   assert.equal(monitor.worker?.attempt, 2);
   assert.deepEqual(monitor.spool, { queued: 1, running: 0, outcomes: 1, deadLetter: 0 });
   assert.deepEqual(monitor.exhausted, ["calls"]);
@@ -110,6 +113,24 @@ test("worker heartbeat preserves retry state", async () => {
   const monitor = await readReviewServiceMonitor(agentDir, new Date(now.getTime() + 1_000));
   assert.equal(monitor.worker?.state, "waiting-retry");
   assert.equal(monitor.workerFresh, true);
+});
+
+test("service monitor marks a legacy worker without policy provenance incompatible", async () => {
+  const { agentDir, root } = await fixture();
+  const now = new Date();
+  await mkdir(join(root, "review-workers"), { recursive: true });
+  await writeFile(join(root, "review-workers", `${"a".repeat(24)}.json`), JSON.stringify({
+    version: 1,
+    workerId: "legacy-worker",
+    pid: 123,
+    startedAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    state: "idle",
+  }));
+
+  const monitor = await readReviewServiceMonitor(agentDir, new Date(now.getTime() + 1_000));
+  assert.equal(monitor.workerFresh, true);
+  assert.equal(monitor.workerCompatible, false);
 });
 
 test("service monitor marks stale and stopped workers offline", async () => {

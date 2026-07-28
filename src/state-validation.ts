@@ -34,6 +34,13 @@ export function requireNonnegativeInteger(value: unknown, label: string): number
   return value as number;
 }
 
+export function requireIsoTimestamp(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`Invalid ${label}.`);
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) throw new Error(`Invalid ${label}.`);
+  return value;
+}
+
 export function optionalIsoTimestamp(value: unknown, label: string): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new Error(`Invalid ${label}.`);

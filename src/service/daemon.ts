@@ -309,7 +309,7 @@ export function classifyReviewFailure(error: unknown, aborted = false): FailureC
       code: errorCode(error.code),
       message: safeFailureMessage(error.message),
       retryable: error.retryable,
-      configurationBlock: false,
+      configurationBlock: error.code === "incompatible_policy",
     };
   }
   const message = error instanceof Error ? error.message : String(error);

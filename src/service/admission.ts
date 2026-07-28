@@ -130,7 +130,13 @@ export class FileMemoryProposalCommitter implements ProposalCommitter {
 
     const projectDir = join(this.agentDir, "no-forgetti", job.projectKey);
     const metadata = parseMetadata(await readBoundedJson(join(projectDir, "project.json")), job.projectKey);
-    const store = new ProjectMemoryStore(metadata.projectRoot, { storageRoot: this.agentDir });
+    // The producer's bounded policy is part of the immutable job. A newer
+    // worker may safely honor an older, stricter capacity; ProjectMemoryStore
+    // still caps attempts to raise capacity above the worker's compiled limit.
+    const store = new ProjectMemoryStore(metadata.projectRoot, {
+      storageRoot: this.agentDir,
+      maxChars: job.maxChars,
+    });
     await store.initialize();
     if (durableReceipt) {
       await store.retireReviewAdmission(job.id, bindingDigest);
