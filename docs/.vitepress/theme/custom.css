@@ -1,24 +1,27 @@
-/* Hallmark · pre-emit critique: P5 H4 E4 S5 R5 V4
- * genre: modern-minimal · macrostructure: Index-First · theme: Cobalt
- * nav: N13 inline search · footer: Ft4 compact colophon · motion: cut
+/* No Forgetti docs theme — "operating handbook"
+ * Reference points: the logo (hand-inked, monochrome, high contrast) and the
+ * layout language of aircraft flight manuals: ruled plates, numbered sections,
+ * mono data labels, NOTE / CAUTION blocks. Ink on paper, one signal colour.
  */
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;650;700&family=JetBrains+Mono:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=JetBrains+Mono:wght@400;500;700&display=swap");
 
 :root {
-  --font-display: "Geist", ui-sans-serif, sans-serif;
-  --font-body: "Geist", ui-sans-serif, sans-serif;
+  --font-display: "Archivo", ui-sans-serif, sans-serif;
+  --font-body: "Archivo", ui-sans-serif, sans-serif;
   --font-code: "JetBrains Mono", ui-monospace, monospace;
 
-  --color-paper: oklch(98% 0.006 255);
-  --color-paper-raised: oklch(100% 0.003 255);
-  --color-paper-soft: oklch(95% 0.012 255);
-  --color-ink: oklch(22% 0.025 255);
-  --color-muted: oklch(49% 0.025 255);
-  --color-rule: oklch(88% 0.018 255);
-  --color-accent: oklch(52% 0.19 258);
-  --color-accent-soft: oklch(94% 0.028 258);
-  --color-focus: oklch(58% 0.2 258);
-  --color-code: oklch(96% 0.012 255);
+  /* warm stock, true ink, one signal red */
+  --color-paper: oklch(97.2% 0.008 85);
+  --color-paper-raised: oklch(99% 0.005 85);
+  --color-paper-soft: oklch(94% 0.011 85);
+  --color-ink: oklch(19% 0.006 60);
+  --color-muted: oklch(46% 0.008 70);
+  --color-rule: oklch(82% 0.012 80);
+  --color-rule-heavy: oklch(35% 0.008 70);
+  --color-accent: oklch(50% 0.19 30);
+  --color-accent-soft: oklch(94% 0.03 45);
+  --color-focus: oklch(50% 0.19 30);
+  --color-code: oklch(95% 0.01 85);
 
   --space-xs: 0.5rem;
   --space-sm: 0.75rem;
@@ -27,6 +30,8 @@
   --space-xl: 2.5rem;
   --space-2xl: 4rem;
 
+  --label: 0.68rem;
+  --track: 0.14em;
   --dur-micro: 120ms;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -41,31 +46,42 @@
   --vp-c-text-3: var(--color-muted);
   --vp-c-divider: var(--color-rule);
   --vp-c-border: var(--color-rule);
+  --vp-c-gutter: var(--color-rule);
   --vp-c-brand-1: var(--color-accent);
   --vp-c-brand-2: var(--color-accent);
   --vp-c-brand-3: var(--color-focus);
   --vp-c-brand-soft: var(--color-accent-soft);
   --vp-code-block-bg: var(--color-code);
   --vp-code-line-highlight-color: var(--color-accent-soft);
-  --vp-custom-block-tip-border: var(--color-accent);
-  --vp-custom-block-tip-bg: var(--color-accent-soft);
-  --vp-button-brand-bg: var(--color-accent);
-  --vp-button-brand-hover-bg: var(--color-focus);
-  --vp-button-brand-active-bg: var(--color-focus);
-  --vp-nav-logo-height: 28px;
+  --vp-button-brand-bg: var(--color-ink);
+  --vp-button-brand-border: var(--color-ink);
+  --vp-button-brand-hover-bg: var(--color-accent);
+  --vp-button-brand-hover-border: var(--color-accent);
+  --vp-button-brand-active-bg: var(--color-accent);
+  --vp-nav-logo-height: 30px;
+  --vp-layout-max-width: 1440px;
 }
 
 .dark {
-  --color-paper: oklch(16% 0.018 255);
-  --color-paper-raised: oklch(20% 0.02 255);
-  --color-paper-soft: oklch(23% 0.022 255);
-  --color-ink: oklch(94% 0.012 255);
-  --color-muted: oklch(72% 0.018 255);
-  --color-rule: oklch(31% 0.025 255);
-  --color-accent: oklch(72% 0.14 255);
-  --color-accent-soft: oklch(25% 0.045 255);
-  --color-focus: oklch(78% 0.13 255);
-  --color-code: oklch(19% 0.022 255);
+  /* the logo's field: near-black stock, warm white ink */
+  --color-paper: oklch(15% 0.004 60);
+  --color-paper-raised: oklch(19% 0.005 60);
+  --color-paper-soft: oklch(21% 0.005 60);
+  --color-ink: oklch(94% 0.006 85);
+  --color-muted: oklch(70% 0.008 80);
+  --color-rule: oklch(32% 0.006 70);
+  --color-rule-heavy: oklch(62% 0.008 80);
+  --color-accent: oklch(70% 0.16 38);
+  --color-accent-soft: oklch(26% 0.05 35);
+  --color-focus: oklch(70% 0.16 38);
+  --color-code: oklch(18% 0.005 60);
+  --vp-button-brand-bg: var(--color-ink);
+  --vp-button-brand-border: var(--color-ink);
+  --vp-c-bg: var(--color-paper);
+}
+
+.dark .VPButton.brand {
+  color: var(--color-paper);
 }
 
 html,
@@ -76,48 +92,173 @@ body {
 body {
   font-family: var(--font-body);
   font-size: 16px;
-  line-height: 1.6;
+  line-height: 1.62;
 }
 
-.VPNavBarTitle .title,
+/* ---- chrome: the manual's covers and tabs ------------------------------- */
+
+/* logo is white-on-black; on paper stock, print it as black-on-paper instead */
+.VPNavBarTitle .logo,
+.VPHero .image-src {
+  border-radius: 0;
+  /* brightness lifts the inverted black field to pure white so multiply drops it */
+  filter: invert(1) brightness(1.18);
+  mix-blend-mode: multiply;
+}
+
+.dark .VPNavBarTitle .logo,
+.dark .VPHero .image-src {
+  filter: none;
+  mix-blend-mode: screen;
+}
+
+.VPNav,
+.VPNavBar {
+  background: var(--color-paper);
+}
+
+.VPNavBar:not(.home) .divider-line,
+.VPNavBar .divider-line {
+  background-color: var(--color-rule-heavy);
+}
+
+.VPNavBarTitle .title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-stretch: 88%;
+  font-size: 1.02rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.VPNavBarMenuLink,
+.VPNavScreenMenuLink {
+  font-family: var(--font-code);
+  font-size: var(--label) !important;
+  font-weight: 500;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+}
+
+/* sidebar groups read as manual tabs */
+.VPSidebarItem.level-0 > .item > .text {
+  font-family: var(--font-code);
+  font-size: var(--label);
+  font-weight: 700;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  color: var(--color-muted);
+  padding-bottom: var(--space-xs);
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.VPSidebarItem.level-1 .link .text {
+  font-size: 0.875rem;
+}
+
+.VPSidebarItem.is-active > .item > .link > .text {
+  font-weight: 650;
+}
+
+.VPDocOutlineItem .outline-link {
+  font-size: 0.8rem;
+}
+
+.VPDocAsideOutline .outline-title,
+.VPLocalNav .menu-text {
+  font-family: var(--font-code);
+  font-size: var(--label);
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+}
+
+.VPNavBarSearch .DocSearch-Button,
+.VPNavBarSearch .VPNavBarSearchButton {
+  border: 1px solid var(--color-rule);
+  border-radius: 2px;
+  background: var(--color-paper-raised);
+  box-shadow: none;
+  font-family: var(--font-code);
+  font-size: 0.78rem;
+}
+
+/* ---- page head: the title plate ----------------------------------------- */
+
 .vp-doc h1,
 .vp-doc h2,
-.vp-doc h3 {
+.vp-doc h3,
+.vp-doc h4 {
   font-family: var(--font-display);
-  font-style: normal;
   overflow-wrap: anywhere;
   min-width: 0;
 }
 
-.VPNavBarTitle .title {
+.vp-doc h1 {
+  margin-bottom: var(--space-lg);
+  padding-bottom: var(--space-md);
+  border-bottom: 3px solid var(--color-ink);
+  font-size: clamp(2rem, 4.2vw, 3.1rem);
+  font-stretch: 86%;
   font-weight: 700;
-  letter-spacing: -0.025em;
+  line-height: 1.03;
+  letter-spacing: -0.005em;
+  text-transform: uppercase;
 }
 
-.vp-doc h1 {
-  max-width: 18ch;
-  font-size: clamp(2.4rem, 5vw, 4.25rem);
-  line-height: 1.02;
-  letter-spacing: -0.045em;
-  font-weight: 700;
+/* section register: 01, 01.1 — numbered like a handbook, not a blog */
+.vp-doc {
+  counter-reset: section;
 }
 
 .vp-doc h2 {
+  counter-increment: section;
   margin-top: var(--space-2xl);
-  border-top-color: var(--color-rule);
-  letter-spacing: -0.025em;
-  font-weight: 650;
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--color-rule-heavy);
+  font-size: 1.5rem;
+  font-stretch: 90%;
+  font-weight: 700;
+  letter-spacing: 0.005em;
+  text-transform: uppercase;
+}
+
+.vp-doc h2 {
+  counter-reset: subsection;
+}
+
+.vp-doc h2::before {
+  content: "Sec " counter(section, decimal-leading-zero);
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-family: var(--font-code);
+  font-size: var(--label);
+  font-weight: 500;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  color: var(--color-accent);
 }
 
 .vp-doc h3 {
-  letter-spacing: -0.015em;
+  counter-increment: subsection;
+  margin-top: var(--space-xl);
+  font-size: 1.12rem;
   font-weight: 650;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.vp-doc h3::before {
+  content: counter(section, decimal-leading-zero) "." counter(subsection);
+  margin-right: 0.7em;
+  font-family: var(--font-code);
+  font-weight: 500;
+  color: var(--color-muted);
 }
 
 .vp-doc > p,
 .vp-doc > ul,
 .vp-doc > ol {
-  max-width: 70ch;
+  max-width: 72ch;
 }
 
 .vp-doc a {
@@ -132,9 +273,126 @@ button:focus-visible {
   outline-offset: 3px;
 }
 
+/* ---- procedures: ordered lists are steps -------------------------------- */
+
+.vp-doc ol {
+  counter-reset: step;
+  list-style: none;
+  padding-left: 0;
+}
+
+.vp-doc ol > li {
+  counter-increment: step;
+  position: relative;
+  padding-left: 2.9rem;
+  margin-top: var(--space-sm);
+}
+
+.vp-doc ol > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 0.12em;
+  min-width: 2rem;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--color-rule-heavy);
+  font-family: var(--font-code);
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--color-ink);
+}
+
+.vp-doc ol ol {
+  margin-top: var(--space-xs);
+}
+
+.vp-doc ul {
+  list-style: none;
+  padding-left: 1.35rem;
+}
+
+.vp-doc ul > li {
+  position: relative;
+}
+
+.vp-doc ul > li::before {
+  content: "";
+  position: absolute;
+  left: -1.35rem;
+  top: 0.62em;
+  width: 0.5rem;
+  height: 1px;
+  background: var(--color-rule-heavy);
+}
+
+/* ---- data plates: tables ------------------------------------------------ */
+
+.vp-doc table {
+  display: table;
+  width: 100%;
+  margin: var(--space-lg) 0;
+  border-collapse: collapse;
+  border-top: 2px solid var(--color-ink);
+  border-bottom: 2px solid var(--color-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.vp-doc tr {
+  background: transparent;
+  border: 0;
+}
+
+.vp-doc tr:nth-child(2n) {
+  background: transparent;
+}
+
+.vp-doc th {
+  padding: var(--space-sm) var(--space-md) var(--space-sm) 0;
+  border: 0;
+  border-bottom: 1px solid var(--color-rule-heavy);
+  font-family: var(--font-code);
+  font-size: var(--label);
+  font-weight: 700;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  text-align: left;
+  color: var(--color-muted);
+}
+
+.vp-doc td {
+  padding: var(--space-sm) var(--space-md) var(--space-sm) 0;
+  border: 0;
+  border-bottom: 1px solid var(--color-rule);
+  vertical-align: top;
+}
+
+.vp-doc tr:last-child td {
+  border-bottom: 0;
+}
+
+.vp-doc th:last-child,
+.vp-doc td:last-child {
+  padding-right: 0;
+}
+
+.vp-doc td code {
+  font-size: 0.82em;
+}
+
+@media (max-width: 55rem) {
+  .vp-doc table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+/* ---- code: flat plates, no gloss ---------------------------------------- */
+
 .vp-doc div[class*="language-"] {
-  border: 1px solid var(--color-rule);
-  border-radius: 6px;
+  border: 1px solid var(--color-rule-heavy);
+  border-radius: 2px;
   box-shadow: none;
 }
 
@@ -144,16 +402,161 @@ button:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-.vp-doc table {
-  font-variant-numeric: tabular-nums;
+.vp-doc :not(pre) > code {
+  border: 1px solid var(--color-rule);
+  border-radius: 2px;
+  background: var(--color-code);
+  color: var(--color-ink);
+  padding: 0.1em 0.35em;
 }
 
-.VPNavBarSearch .DocSearch-Button,
-.VPNavBarSearch .VPNavBarSearchButton {
-  border-color: var(--color-rule);
-  border-radius: 6px;
+/* ---- NOTE / CAUTION / WARNING ------------------------------------------- */
+
+.vp-doc .custom-block {
+  border: 1px solid var(--color-rule-heavy);
+  border-left-width: 4px;
+  border-radius: 0;
   background: var(--color-paper-raised);
-  box-shadow: none;
+  padding: var(--space-md) var(--space-lg);
+}
+
+.vp-doc .custom-block .custom-block-title {
+  font-family: var(--font-code);
+  font-size: var(--label);
+  font-weight: 700;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+}
+
+.vp-doc .custom-block p:not(.custom-block-title) {
+  font-size: 0.95rem;
+  color: var(--color-ink);
+}
+
+.vp-doc .custom-block.tip,
+.vp-doc .custom-block.info {
+  border-color: var(--color-rule-heavy);
+}
+
+/* the label sits on its own line above the title, like a printed callout */
+.vp-doc .custom-block .custom-block-title::before {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-weight: 700;
+  color: var(--color-muted);
+}
+
+.vp-doc .custom-block.tip .custom-block-title::before,
+.vp-doc .custom-block.info .custom-block-title::before {
+  content: "Note";
+}
+
+.vp-doc .custom-block.warning,
+.vp-doc .custom-block.danger {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.vp-doc .custom-block.warning .custom-block-title,
+.vp-doc .custom-block.danger .custom-block-title {
+  color: var(--color-accent);
+}
+
+.vp-doc .custom-block.warning .custom-block-title::before {
+  content: "Caution";
+  color: var(--color-accent);
+}
+
+.vp-doc .custom-block.danger .custom-block-title::before {
+  content: "Warning";
+  color: var(--color-accent);
+}
+
+/* ---- the plate block used at the top of a chapter ----------------------- */
+
+.plate {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0;
+  margin: 0 0 var(--space-xl);
+  border: 1px solid var(--color-rule-heavy);
+}
+
+.plate > div {
+  padding: var(--space-sm) var(--space-md);
+  border-right: 1px solid var(--color-rule);
+}
+
+.plate > div:last-child {
+  border-right: 0;
+}
+
+.plate dt,
+.plate dd {
+  margin: 0;
+}
+
+.plate dt {
+  font-family: var(--font-code);
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.plate dd {
+  margin-top: 0.2rem;
+  font-size: 0.92rem;
+  font-weight: 500;
+}
+
+@media (max-width: 40rem) {
+  .plate > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-rule);
+  }
+
+  .plate > div:last-child {
+    border-bottom: 0;
+  }
+}
+
+/* ---- footer of the page ------------------------------------------------- */
+
+.VPDocFooter .edit-link-button,
+.VPLastUpdated,
+.VPFooter .message,
+.VPFooter .copyright {
+  font-family: var(--font-code);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+}
+
+.VPDocFooter .prev-next .desc {
+  font-family: var(--font-code);
+  font-size: var(--label);
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+}
+
+.VPDocFooter .pager-link {
+  border-radius: 0;
+  border-color: var(--color-rule-heavy);
+}
+
+.VPFooter {
+  border-top: 1px solid var(--color-rule-heavy);
+}
+
+/* ---- home page ---------------------------------------------------------- */
+
+.VPButton {
+  border-radius: 2px;
+  font-family: var(--font-code);
+  font-size: var(--label) !important;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
 }
 
 .VPLink,
@@ -177,8 +580,8 @@ button:focus-visible {
 
 @media (min-width: 60rem) {
   .vp-doc h1 + p {
-    max-width: 58ch;
-    font-size: 1.12rem;
+    max-width: 60ch;
+    font-size: 1.1rem;
   }
 }
 

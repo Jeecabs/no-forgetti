@@ -1,5 +1,12 @@
 # Project memory
 
+<div class="plate">
+  <div><dt>Section</dt><dd>Core guide</dd></div>
+  <div><dt>Applies to</dt><dd>Primary and superintendent sessions</dd></div>
+  <div><dt>Storage</dt><dd>Outside the repository</dd></div>
+  <div><dt>Write paths</dt><dd>Direct and automatic review</dd></div>
+</div>
+
 Project memory is a short, durable record for one project. Pi loads the active memory branch before each turn. Future sessions can follow established conventions without rediscovering them.
 
 ::: tip A simple test
