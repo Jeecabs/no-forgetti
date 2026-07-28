@@ -228,13 +228,8 @@ body::before {
   letter-spacing: 0.01em;
 }
 
-/* section register: 01, 01.1, numbered like a handbook rather than a blog */
-.vp-doc {
-  counter-reset: section;
-}
-
+/* the gold double rule opens a section; the heading says which one */
 .vp-doc h2 {
-  counter-increment: section;
   margin-top: var(--space-2xl);
   padding-top: 0.9rem;
   border-top: 3px double var(--color-accent);
@@ -243,36 +238,11 @@ body::before {
   letter-spacing: 0.005em;
 }
 
-.vp-doc h2 {
-  counter-reset: subsection;
-}
-
-.vp-doc h2::before {
-  content: "Sec " counter(section, decimal-leading-zero);
-  display: block;
-  margin-bottom: var(--space-xs);
-  font-family: var(--font-code);
-  font-size: var(--label);
-  font-weight: 500;
-  letter-spacing: var(--track);
-  text-transform: uppercase;
-  color: var(--color-accent);
-}
-
 .vp-doc h3 {
-  counter-increment: subsection;
   margin-top: var(--space-xl);
-  font-size: 1.02rem;
+  font-size: 1.2rem;
   font-weight: 600;
   letter-spacing: 0.005em;
-}
-
-.vp-doc h3::before {
-  content: counter(section, decimal-leading-zero) "." counter(subsection);
-  margin-right: 0.7em;
-  font-family: var(--font-code);
-  font-weight: 500;
-  color: var(--color-muted);
 }
 
 /* narrow prose against full-width data plates: the manual's own convention */
