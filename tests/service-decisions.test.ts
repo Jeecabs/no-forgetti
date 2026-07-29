@@ -111,6 +111,7 @@ test("failed attempts are sanitized and accounted without winning", async (t) =>
     assert.deepEqual(failed.attempt.outcome.provenance?.usage, provenance.usage);
   }
   assert.equal(await store.loadDecision(job.id), undefined);
+  assert.deepEqual(await store.loadReplaySource(job.id), job);
 });
 
 test("concurrent completed attempts are both accounted but exactly one wins", async (t) => {

@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
+import type { ProjectReviewActivity } from "./activity.ts";
 import type { ReviewServiceMonitor } from "./monitor.ts";
 
 export interface MemoryMonitorSummary {
@@ -9,6 +10,7 @@ export interface MemoryMonitorSummary {
   entries: number;
   usedChars: number;
   maxChars: number;
+  reviews?: ProjectReviewActivity[];
 }
 
 type Theme = ExtensionCommandContext["ui"]["theme"];
@@ -57,6 +59,12 @@ function stateSummary(snapshot: ReviewServiceMonitor): string {
   return snapshot.exhausted.length > 0 ? `${state.label} · ${snapshot.exhausted.join(" + ")}` : state.label;
 }
 
+function projectReviewSummary(review: ProjectReviewActivity): string {
+  const attempt = review.attempt > 1 ? ` attempt ${review.attempt}` : "";
+  const pause = review.pauseReason ? ` ${review.pauseReason}` : "";
+  return `${review.phase}${pause}${attempt} ${review.jobId}`;
+}
+
 export function formatReviewServiceMonitorText(
   snapshot: ReviewServiceMonitor,
   memory: MemoryMonitorSummary,
@@ -66,6 +74,7 @@ export function formatReviewServiceMonitorText(
     ? `${snapshot.worker.state}${snapshot.workerFresh ? "" : " (stale)"} · pid ${snapshot.worker.pid} · updated ${age(snapshot.worker.updatedAt, snapshot.observedAt)}`
     : "not running";
   const limits = snapshot.reviewer;
+  const projectReviews = memory.reviews ?? [];
   return [
     "No Forgetti review service",
     `state: ${stateSummary(snapshot)}`,
@@ -81,6 +90,8 @@ export function formatReviewServiceMonitorText(
     ] : []),
     `budget day: ${snapshot.budget.day} UTC`,
     `active memory: ${memory.branch} · ${memory.entries} entries · ${memory.usedChars}/${memory.maxChars} chars`,
+    ...projectReviews.slice(0, 4).map((review) => `project review: ${projectReviewSummary(review)}`),
+    ...(projectReviews.length > 4 ? [`project reviews: ${projectReviews.length - 4} more`] : []),
     `project: ${memory.projectRoot}`,
   ].join("\n");
 }
@@ -107,6 +118,8 @@ export function renderReviewServiceMonitorCard(
   const state = serviceState(snapshot);
   const reviewer = snapshot.reviewer;
   const budget = snapshot.budget;
+  const projectReview = memory.reviews?.at(0);
+  const projectReviewCount = memory.reviews?.length ?? 0;
   const inner = Math.max(8, width - 4);
   const edge = (text: string) => theme.fg("borderMuted", text);
 
@@ -136,6 +149,11 @@ export function renderReviewServiceMonitorCard(
     )),
     line(),
     row("memory", `${memory.branch} · ${memory.entries} entries · ${memory.usedChars.toLocaleString()}/${memory.maxChars.toLocaleString()} chars`),
+    ...(projectReview ? [row(
+      "project job",
+      projectReviewSummary(projectReview).replace(projectReview.jobId, `${projectReview.jobId.slice(0, 18)}…`)
+        + (projectReviewCount > 1 ? ` · ${projectReviewCount - 1} more` : ""),
+    )] : []),
     row("reviewer", reviewer ? `${reviewer.provider}/${reviewer.model} · reasoning ${reviewer.reasoningEffort}` : theme.fg("warning", "not configured")),
     row("worker", snapshot.worker
       ? `${snapshot.worker.state} · pid ${snapshot.worker.pid} · heartbeat ${age(snapshot.worker.updatedAt, snapshot.observedAt)}`

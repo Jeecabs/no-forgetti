@@ -170,7 +170,7 @@ test("external admission feedback reports actual added, changed, and removed con
 
   const inbox = new ReviewFeedbackInbox(store.projectDir);
   await inbox.initialize();
-  await inbox.register(job.id, job.digest);
+  await inbox.register({ jobId: job.id, jobDigest: job.digest });
   const receipt = await new FileMemoryProposalCommitter(agentDir).commit(job, outcome);
   const feedback: ReviewFeedback[] = [];
   assert.equal(await consumeReviewFeedback(inbox, (value) => feedback.push(value)), 1);
@@ -245,6 +245,24 @@ function jobFor(store: ProjectMemoryStore, branch: Awaited<ReturnType<ProjectMem
   });
 }
 
+test("feedback registration accepts matching legacy interest before richer presentation metadata", async (t) => {
+  const { store } = await fixture(t);
+  const branch = await store.loadBranch("main");
+  const job = jobFor(store, branch, "legacy-interest");
+  const inbox = new ReviewFeedbackInbox(store.projectDir);
+  await inbox.initialize();
+  await inbox.register({ jobId: job.id, jobDigest: job.digest });
+  await inbox.register({
+    jobId: job.id,
+    jobDigest: job.digest,
+    branchName: "main",
+    requestedBy: "manual",
+    queuedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  assert.deepEqual(await inbox.listPending(), [{ version: 1, jobId: job.id, jobDigest: job.digest }]);
+});
+
 test("dead-letter feedback publishes only registered interest and is idempotent", async (t) => {
   const { agentDir, store } = await fixture(t);
   const branch = await store.loadBranch("main");
@@ -256,7 +274,7 @@ test("dead-letter feedback publishes only registered interest and is idempotent"
   await committer.failed(job, terminalFailure);
   assert.equal(await consumeReviewFeedback(inbox, () => assert.fail("unregistered job must publish nothing")), 0);
 
-  await inbox.register(job.id, job.digest);
+  await inbox.register({ jobId: job.id, jobDigest: job.digest });
   await committer.failed(job, terminalFailure);
   await committer.failed(job, terminalFailure);
   const feedback: ReviewFeedback[] = [];
@@ -285,7 +303,7 @@ test("dead-letter publication never overwrites an earlier admission publication"
   const committer = new FileMemoryProposalCommitter(agentDir);
   const inbox = new ReviewFeedbackInbox(store.projectDir);
   await inbox.initialize();
-  await inbox.register(job.id, job.digest);
+  await inbox.register({ jobId: job.id, jobDigest: job.digest });
 
   await committer.commit(job, outcome);
   await committer.failed(job, terminalFailure);
@@ -302,8 +320,8 @@ test("aged orphan pending interest is garbage collected while fresh interest sur
   const freshJob = jobFor(store, branch, "fresh-entry");
   const inbox = new ReviewFeedbackInbox(store.projectDir);
   await inbox.initialize();
-  await inbox.register(agedJob.id, agedJob.digest);
-  await inbox.register(freshJob.id, freshJob.digest);
+  await inbox.register({ jobId: agedJob.id, jobDigest: agedJob.digest });
+  await inbox.register({ jobId: freshJob.id, jobDigest: freshJob.digest });
   await utimes(join(inbox.pendingDir, `${agedJob.id}.json`), WEEK_AGO, WEEK_AGO);
 
   assert.equal(await consumeReviewFeedback(inbox, () => assert.fail("nothing is ready for delivery")), 0);
@@ -316,7 +334,7 @@ test("aged pending interest with a ready publication is delivered, not collected
   const job = jobFor(store, branch, "entry-1");
   const inbox = new ReviewFeedbackInbox(store.projectDir);
   await inbox.initialize();
-  await inbox.register(job.id, job.digest);
+  await inbox.register({ jobId: job.id, jobDigest: job.digest });
   await new FileMemoryProposalCommitter(agentDir).failed(job, terminalFailure);
   await utimes(join(inbox.pendingDir, `${job.id}.json`), WEEK_AGO, WEEK_AGO);
 

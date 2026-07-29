@@ -11,6 +11,7 @@ import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
 import type { SkillProposal } from "../src/skill-types.ts";
 import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
+import { ReviewDecisionStore } from "../src/service/decisions.ts";
 import { createReviewOutcome } from "../src/service/protocol.ts";
 import { ReviewSpool } from "../src/service/spool.ts";
 import { ProjectMemoryStore } from "../src/store.ts";
@@ -67,6 +68,8 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
 
   const branch: Array<Record<string, unknown>> = [];
   const notifications: Array<{ message: string; type: string }> = [];
+  const widgets = new Map<string, unknown>();
+  const statuses = new Map<string, string | undefined>();
   const context = {
     cwd: project,
     hasUI: false,
@@ -74,8 +77,8 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
     ui: {
       theme: { fg: (_color: string, text: string) => text },
       notify: (message: string, type: string) => notifications.push({ message, type }),
-      setStatus: () => undefined,
-      setWidget: () => undefined,
+      setStatus: (key: string, value: string | undefined) => statuses.set(key, value),
+      setWidget: (key: string, value: unknown) => widgets.set(key, value),
     },
     waitForIdle: async () => undefined,
     sessionManager: {
@@ -102,13 +105,19 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
       observedAt: "2026-01-01T00:00:00.000Z",
     }),
     createReviewSpool: () => reviewSpool,
+    createRuntimeReporter: () => ({
+      start() {},
+      heartbeat() {},
+      stop() {},
+      async flush() {},
+    }),
     ...overrides,
   });
   t.after(async () => {
     await extension.emit("session_shutdown", {}, context);
     await rm(base, { recursive: true, force: true });
   });
-  return { branch, context, extension, memoryStore, skillStore, reviewSpool, notifications };
+  return { branch, context, extension, memoryStore, skillStore, reviewSpool, notifications, statuses, widgets };
 }
 
 function userEntry(id: string, text: string): Record<string, unknown> {
@@ -483,7 +492,67 @@ test("external review authority durably queues bounded evidence without an in-pr
   assert.equal(claim.job.throughEntryId, "external-user");
   assert.match(claim.job.transcript, /verification uses pnpm check/u);
   assert.equal(claim.job.baseBranchDigest, memoryStore.branchDigest(await memoryStore.loadBranch("main")));
-  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-memory-review-job"), true);
+  const jobEntry = extension.entries.find((entry) => entry.customType === "no-forgetti-memory-review-job");
+  assert.ok(jobEntry);
+  const renderer = extension.entryRenderers.get("no-forgetti-memory-review-job") as (
+    entry: { data: unknown },
+    options: { expanded: boolean },
+    theme: { fg: (color: string, text: string) => string },
+  ) => { render: (width: number) => string[] } | undefined;
+  assert.equal(renderer(jobEntry, { expanded: false }, { fg: (_color, text) => text }), undefined);
+  const expanded = renderer(jobEntry, { expanded: true }, { fg: (_color, text) => text });
+  assert.match(expanded!.render(120).join("\n"), new RegExp(claim.job.id, "u"));
+});
+
+test("external review widget follows the current project job from queue to worker", async (t) => {
+  const externalConfig = {
+    version: 1 as const,
+    mode: "external" as const,
+    evidenceTtlHours: 24,
+    reviewer: {
+      provider: "fake",
+      model: "reviewer",
+      reasoningEffort: "high" as const,
+      maxCallsPerDay: 10,
+      maxTokensPerDay: 10_000,
+      maxCostPerDayUsd: 1,
+    },
+  };
+  const { branch, context, extension, reviewSpool, statuses, widgets } = await fixture(t, {
+    loadServiceConfig: async () => externalConfig,
+    loadServiceMonitor: async () => ({
+      mode: "external",
+      budget: { day: "2026-01-01", calls: 0, tokens: 0, costUsd: 0 },
+      spool: { queued: 1, running: 0, outcomes: 0, deadLetter: 0 },
+      workerFresh: true,
+      workerCompatible: true,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:00.000Z",
+    }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  branch.push(userEntry("widget-user", "Remember that verification uses pnpm check."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  const renderWidget = () => {
+    const factory = widgets.get("no-forgetti") as (
+      tui: { requestRender: () => void },
+      theme: { fg: (color: string, text: string) => string },
+    ) => { render: () => string[]; dispose: () => void };
+    const widget = factory({ requestRender: () => undefined }, { fg: (_color, text) => text });
+    const rendered = widget.render().join("\n");
+    widget.dispose();
+    return rendered;
+  };
+  assert.match(renderWidget(), /memory review queued/u);
+  assert.doesNotMatch(renderWidget(), /review_[0-9a-f]+/u);
+  assert.match(statuses.get("no-forgetti") ?? "", /review:queued/u);
+
+  assert.ok(await reviewSpool.claim({ workerId: "widget-worker", leaseMs: 60_000 }));
+  await extension.emit("before_agent_start", { systemPrompt: "base", prompt: "continue" }, context);
+  assert.match(renderWidget(), /reviewing project memory/u);
+  assert.match(statuses.get("no-forgetti") ?? "", /review:reviewing/u);
 });
 
 test("external review keeps evidence unqueued when the worker memory policy is stale", async (t) => {
@@ -618,6 +687,8 @@ test("external review receipt appends a compact content diff to the next Pi sess
       { kind: "replace", text: "Tests run with pnpm check.", oldText: "Tests run with pnpm test." },
       { kind: "remove", text: "CI runs on Node 18." },
     ],
+    messages: ["Memory replaced.", "Memory removed.", "Memory added."],
+    requestedBy: "manual",
   });
 
   const renderer = receiving.entryRenderers.get("no-forgetti-memory-review") as (
@@ -638,6 +709,73 @@ test("external review receipt appends a compact content diff to the next Pi sess
       && (entry.data as { jobId?: string }).jobId === claim.job.id
   ).length, 1);
   await receiving.emit("session_shutdown", {}, context);
+});
+
+test("manual external no-op reports nothing durable after terminal delivery", async (t) => {
+  const externalConfig = {
+    version: 1 as const,
+    mode: "external" as const,
+    evidenceTtlHours: 24,
+    reviewer: {
+      provider: "fake",
+      model: "reviewer",
+      reasoningEffort: "high" as const,
+      maxCallsPerDay: 10,
+      maxTokensPerDay: 10_000,
+      maxCostPerDayUsd: 1,
+    },
+  };
+  const { branch, context, extension, memoryStore, reviewSpool, notifications } = await fixture(t, {
+    loadServiceConfig: async () => externalConfig,
+    loadServiceMonitor: async () => ({
+      mode: "external",
+      budget: { day: "2026-01-01", calls: 1, tokens: 2, costUsd: 0 },
+      spool: { queued: 0, running: 0, outcomes: 1, deadLetter: 0 },
+      workerFresh: true,
+      workerCompatible: true,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:02.000Z",
+    }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  branch.push(userEntry("noop-user", "Check whether anything durable changed."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  const claim = await reviewSpool.claim({ workerId: "noop-worker", leaseMs: 1_000 });
+  assert.ok(claim);
+  const completedAt = "2026-01-01T00:00:01.000Z";
+  const outcome = createReviewOutcome(claim.job, {
+    status: "completed",
+    completedAt,
+    operations: [],
+    provenance: {
+      provider: "fake",
+      model: "reviewer",
+      api: "fake-api",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt,
+      durationMs: 1_000,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  });
+  const agentDir = join(memoryStore.projectDir, "..", "..");
+  const receipt = await new FileMemoryProposalCommitter(agentDir).commit(claim.job, outcome);
+  assert.equal(receipt.status, "noop");
+  await reviewSpool.finish(claim, outcome);
+  await extension.emit("before_agent_start", { systemPrompt: "base", prompt: "continue" }, context);
+
+  assert.deepEqual(notifications.filter((item) => item.message.includes("nothing durable")), [{
+    message: "Project memory review: nothing durable to save.",
+    type: "info",
+  }]);
 });
 
 test("external review dead-letter surfaces a failure warning in the next Pi session", async (t) => {
@@ -697,9 +835,11 @@ test("external review dead-letter surfaces a failure warning in the next Pi sess
     branch: "main",
     status: "failed",
     changes: [],
+    messages: ["Provider exploded."],
+    requestedBy: "manual",
   });
-  assert.deepEqual(notifications.filter((entry) => entry.message.includes("review failed")), [{
-    message: "Project memory review failed: Provider exploded.",
+  assert.deepEqual(notifications.filter((entry) => entry.message.includes("review stopped")), [{
+    message: "Project memory review stopped: Provider exploded.",
     type: "warning",
   }]);
 
@@ -707,8 +847,11 @@ test("external review dead-letter surfaces a failure warning in the next Pi sess
     entry: { data: unknown },
     options: { expanded: boolean },
     theme: { fg: (color: string, text: string) => string },
-  ) => unknown;
-  assert.equal(renderer(feedback!, { expanded: true }, { fg: (_color, text) => text }), undefined);
+  ) => { render: (width: number) => string[] };
+  const rendered = renderer(feedback!, { expanded: true }, { fg: (_color, text) => text }).render(120).join("\n");
+  assert.match(rendered, /memory review stopped/u);
+  assert.match(rendered, /Provider exploded\./u);
+  assert.match(rendered, /\/memory review/u);
 
   await receiving.emit("before_agent_start", { systemPrompt: "base", prompt: "again" }, context);
   assert.equal(receiving.entries.filter((entry) =>
@@ -716,6 +859,61 @@ test("external review dead-letter surfaces a failure warning in the next Pi sess
       && (entry.data as { jobId?: string }).jobId === claim.job.id
   ).length, 1);
   await receiving.emit("session_shutdown", {}, context);
+});
+
+test("manual retry requeues retained external evidence as a new job generation", async (t) => {
+  const externalConfig = {
+    version: 1 as const,
+    mode: "external" as const,
+    evidenceTtlHours: 24,
+    reviewer: {
+      provider: "fake",
+      model: "reviewer",
+      reasoningEffort: "high" as const,
+      maxCallsPerDay: 10,
+      maxTokensPerDay: 10_000,
+      maxCostPerDayUsd: 1,
+    },
+  };
+  const { branch, context, extension, memoryStore, reviewSpool, notifications } = await fixture(t, {
+    loadServiceConfig: async () => externalConfig,
+    loadServiceMonitor: async () => ({
+      mode: "external",
+      budget: { day: "2026-01-01", calls: 1, tokens: 2, costUsd: 0 },
+      spool: { queued: 0, running: 0, outcomes: 1, deadLetter: 1 },
+      workerFresh: true,
+      workerCompatible: true,
+      exhausted: [],
+      observedAt: "2026-01-01T00:00:02.000Z",
+    }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  branch.push(userEntry("retry-user", "Remember that verification uses pnpm check."));
+  await extension.emit("session_start", {}, context);
+  await extension.command("memory", "review", context);
+
+  const original = await reviewSpool.claim({ workerId: "retry-worker", leaseMs: 60_000 });
+  assert.ok(original);
+  const failure = { code: "invalid_proposal", message: "Proposal exceeded the entry limit.", retryable: false };
+  const decisions = new ReviewDecisionStore(reviewSpool.root);
+  await decisions.recordAttempt("retry-source-attempt", original.job, {
+    status: "failed",
+    completedAt: "2026-01-01T00:00:01.000Z",
+    error: failure,
+  });
+  await reviewSpool.finish(original, createReviewOutcome(original.job, { status: "failed", error: failure }));
+  const agentDir = join(memoryStore.projectDir, "..", "..");
+  await new FileMemoryProposalCommitter(agentDir).failed(original.job, failure);
+  await extension.emit("before_agent_start", { systemPrompt: "base", prompt: "continue" }, context);
+
+  await extension.command("memory", `review retry ${original.job.id}`, context);
+  const replay = await reviewSpool.claim({ workerId: "retry-worker", leaseMs: 60_000 });
+  assert.ok(replay);
+  assert.equal(replay.job.generation, 1);
+  assert.notEqual(replay.job.id, original.job.id);
+  assert.equal(replay.job.transcript, original.job.transcript);
+  assert.equal(replay.job.baseBranchDigest, memoryStore.branchDigest(await memoryStore.loadBranch("main")));
+  assert.equal(notifications.some((item) => item.message.includes("requeued")), true);
 });
 
 test("memory review appends a change entry with resolved entry IDs", async (t) => {

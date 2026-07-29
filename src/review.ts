@@ -4,7 +4,7 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 import { memoryCharCount } from "./context.ts";
 import { memoryPolicy } from "./memory-policy.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "./skill-native.ts";
-import { safeContextText } from "./security.ts";
+import { safeContextText, validateMemoryText } from "./security.ts";
 import { isRecord } from "./state-validation.ts";
 import {
   DEFAULT_MAX_CHARS,
@@ -246,6 +246,18 @@ export function parseReviewPlan(raw: string): ReviewPlan {
   return { operations: operations.map(parseReviewOperation) };
 }
 
+/** Enforces store-level text invariants before a proposal can be persisted. */
+export function validateReviewPlan(
+  plan: ReviewPlan,
+  maxEntryChars = DEFAULT_MAX_ENTRY_CHARS,
+): ReviewPlan {
+  return {
+    operations: plan.operations.map((operation) => "content" in operation
+      ? { ...operation, content: validateMemoryText(operation.content, maxEntryChars) }
+      : { ...operation }),
+  };
+}
+
 interface ProjectedEntry {
   id: string;
   text: string;
@@ -382,6 +394,7 @@ export function buildReviewPrompt(
     "Unassessed legacy entries behave as normal until conservatively assessed. Newer assessment metadata is better calibrated, but newer facts do not automatically outrank older facts.",
     `HARD LIMIT: ${maxChars} characters. WORKING TARGET: ${refinementTarget} characters. Current usage: ${usedChars} characters.`,
     `Reviews below the working target must finish at or below ${refinementTarget} characters. Hard-limit headroom is reserved for foreground writes and imperfect proposals. Never exceed the hard limit.`,
+    `Each add, replacement, or merge content must be at most ${DEFAULT_MAX_ENTRY_CHARS} characters. Split distinct facts across entries; do not truncate facts.`,
     ...maintenanceGuidance({
       refinementRequired,
       availableBeforeTarget,
@@ -451,5 +464,5 @@ export async function requestReviewPlan(
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
     .join("\n");
-  return parseReviewPlan(raw);
+  return validateReviewPlan(parseReviewPlan(raw));
 }

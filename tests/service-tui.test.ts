@@ -5,7 +5,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import type { ReviewServiceMonitor } from "../src/service/monitor.ts";
-import { type MemoryMonitorSummary, renderReviewServiceMonitorCard } from "../src/service/tui.ts";
+import { formatReviewServiceMonitorText, type MemoryMonitorSummary, renderReviewServiceMonitorCard } from "../src/service/tui.ts";
 
 // Pi wraps every rendered line in colour, so the card must stay width-exact with
 // escape codes present: a line wider than the overlay crashes the TUI renderer.
@@ -86,6 +86,21 @@ test("monitor card renders width-exact lines at every terminal width", () => {
       }
     }
   }
+});
+
+test("monitor includes current-project review phase and debug identity", () => {
+  const reviewId = `review_${"a".repeat(40)}`;
+  const activeMemory: MemoryMonitorSummary = {
+    ...memory,
+    reviews: [{ jobId: reviewId, phase: "retrying", attempt: 2, retryAt: observedAt }],
+  };
+  const text = formatReviewServiceMonitorText(base, activeMemory);
+  assert.match(text, new RegExp(`project review: retrying attempt 2 ${reviewId}`, "u"));
+  const card = renderReviewServiceMonitorCard({ theme, snapshot: base, memory: activeMemory, width: 78 })
+    .join("\n")
+    .replaceAll(/\u001B\[[\d;]*m/gu, "");
+  assert.match(card, /project job/u);
+  assert.match(card, /retrying attempt 2 review_/u);
 });
 
 test("monitor card surfaces exhausted limits and stale workers", () => {

@@ -3,10 +3,10 @@ import { join } from "node:path";
 
 import { syncDirectoryStrict } from "../atomic-file.ts";
 import { withFileLock } from "../file-lock.ts";
-import { isErrno, isRecord } from "../state-validation.ts";
+import { exactKeys, isErrno, isRecord, requireIsoTimestamp } from "../state-validation.ts";
 import type { MemoryBranch, ReviewAdmissionResult } from "../types.ts";
 import { createOrCompareJsonFile, PublicationConflictError, readBoundedPrivateJson } from "./admission-artifacts.ts";
-import type { ReviewFailure, ReviewJob, ReviewMemoryBranch } from "./protocol.ts";
+import { sanitizeReviewText, type ReviewFailure, type ReviewJob, type ReviewMemoryBranch } from "./protocol.ts";
 
 const MAX_PENDING_FEEDBACK = 1_024;
 const MAX_PENDING_BYTES = 1_024;
@@ -19,10 +19,23 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const BRANCH_NAME = /^[a-z][a-z0-9_-]{0,63}$/u;
 const ADMISSION_STATUSES = new Set(["applied", "noop", "stale", "rejected", "failed"]);
 
-interface PendingFeedback {
+export type ReviewRequestOrigin = "automatic" | "manual";
+
+export interface PendingReviewFeedback {
   version: 1;
   jobId: string;
   jobDigest: string;
+  branchName?: string;
+  requestedBy?: ReviewRequestOrigin;
+  queuedAt?: string;
+}
+
+export interface RegisterReviewFeedbackRequest {
+  jobId: string;
+  jobDigest: string;
+  branchName?: string;
+  requestedBy?: ReviewRequestOrigin;
+  queuedAt?: string;
 }
 
 export type ReviewFeedbackChange =
@@ -39,6 +52,7 @@ export interface ReviewFeedback {
   status: ReviewAdmissionResult["status"] | "failed";
   messages: string[];
   changes: ReviewFeedbackChange[];
+  requestedBy?: ReviewRequestOrigin;
 }
 
 function checkedIdentity(value: unknown, pattern: RegExp, label: string): string {
@@ -57,10 +71,12 @@ function checkedText(value: unknown, label: string): string {
 }
 
 function checkedMessages(value: unknown): string[] {
-  if (!Array.isArray(value) || value.some((message) => typeof message !== "string")) {
-    throw new Error("Invalid No Forgetti feedback messages.");
-  }
-  return [...value] as string[];
+  if (!Array.isArray(value) || value.length > 32) throw new Error("Invalid No Forgetti feedback messages.");
+  return value.map((message) => {
+    const text = checkedText(message, "message");
+    if (sanitizeReviewText(text) !== text) throw new Error("No Forgetti feedback message is not sanitized.");
+    return text;
+  });
 }
 
 function parseFeedbackChange(value: unknown): ReviewFeedbackChange {
@@ -76,21 +92,37 @@ function parseFeedbackChanges(value: unknown): ReviewFeedbackChange[] {
   return value.map(parseFeedbackChange);
 }
 
-function parsePending(value: unknown): PendingFeedback {
+function requestedBy(value: unknown): ReviewRequestOrigin | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "automatic" && value !== "manual") throw new Error("Invalid No Forgetti feedback request origin.");
+  return value;
+}
+
+function parsePending(value: unknown): PendingReviewFeedback {
   if (!isRecord(value) || value.version !== 1) throw new Error("Invalid No Forgetti pending feedback record.");
+  exactKeys(value, ["version", "jobId", "jobDigest"], ["branchName", "requestedBy", "queuedAt"]);
   return {
     version: 1,
     jobId: checkedIdentity(value.jobId, JOB_ID, "job id"),
     jobDigest: checkedIdentity(value.jobDigest, DIGEST, "job digest"),
+    ...(value.branchName === undefined ? {} : { branchName: checkedIdentity(value.branchName, BRANCH_NAME, "branch name") }),
+    ...(value.requestedBy === undefined ? {} : { requestedBy: requestedBy(value.requestedBy) }),
+    ...(value.queuedAt === undefined ? {} : { queuedAt: requireIsoTimestamp(value.queuedAt, "feedback queue time") }),
   };
 }
 
-function parseReady(value: unknown, pending: PendingFeedback): ReviewFeedback {
+function parseReady(value: unknown, pending: PendingReviewFeedback): ReviewFeedback {
   if (!isRecord(value) || value.version !== 1) throw new Error("Invalid No Forgetti ready feedback record.");
+  exactKeys(
+    value,
+    ["version", "jobId", "jobDigest", "branchName", "status", "messages", "changes"],
+    ["requestedBy"],
+  );
   const jobId = checkedIdentity(value.jobId, JOB_ID, "job id");
   const jobDigest = checkedIdentity(value.jobDigest, DIGEST, "job digest");
   if (jobId !== pending.jobId || jobDigest !== pending.jobDigest) throw new Error("No Forgetti feedback identity mismatch.");
   if (!ADMISSION_STATUSES.has(String(value.status))) throw new Error("Invalid No Forgetti feedback status.");
+  const origin = requestedBy(value.requestedBy) ?? pending.requestedBy;
   return {
     version: 1,
     jobId,
@@ -99,6 +131,7 @@ function parseReady(value: unknown, pending: PendingFeedback): ReviewFeedback {
     status: value.status as ReviewFeedback["status"],
     messages: checkedMessages(value.messages),
     changes: parseFeedbackChanges(value.changes),
+    ...(origin ? { requestedBy: origin } : {}),
   };
 }
 
@@ -147,13 +180,42 @@ export class ReviewFeedbackInbox {
     ]);
   }
 
-  async register(jobId: string, jobDigest: string): Promise<void> {
-    const pending: PendingFeedback = {
+  async register(request: RegisterReviewFeedbackRequest): Promise<void> {
+    const pending = parsePending({
       version: 1,
-      jobId: checkedIdentity(jobId, JOB_ID, "job id"),
-      jobDigest: checkedIdentity(jobDigest, DIGEST, "job digest"),
-    };
-    await createOrCompareJsonFile(join(this.pendingDir, `${jobId}.json`), pending, MAX_PENDING_BYTES);
+      jobId: request.jobId,
+      jobDigest: request.jobDigest,
+      ...(request.branchName ? { branchName: request.branchName } : {}),
+      ...(request.requestedBy ? { requestedBy: request.requestedBy } : {}),
+      ...(request.queuedAt ? { queuedAt: request.queuedAt } : {}),
+    });
+    const path = join(this.pendingDir, `${pending.jobId}.json`);
+    try {
+      await createOrCompareJsonFile(path, pending, MAX_PENDING_BYTES);
+    } catch (error) {
+      if (!(error instanceof PublicationConflictError)) throw error;
+      const existing = parsePending(await readBoundedPrivateJson(path, MAX_PENDING_BYTES));
+      if (existing.jobId !== pending.jobId || existing.jobDigest !== pending.jobDigest) throw error;
+      // Existing interest remains authoritative. Legacy records may not carry
+      // presentation metadata, but replacing them would race terminal delivery.
+    }
+  }
+
+  async listPending(): Promise<PendingReviewFeedback[]> {
+    const names = (await readdir(this.pendingDir)).filter((name) => name.endsWith(".json")).sort();
+    if (names.length > MAX_PENDING_FEEDBACK) throw new Error("Too many pending No Forgetti feedback records.");
+    const pending = await Promise.all(names.map(async (name) => {
+      const jobId = checkedIdentity(name.slice(0, -".json".length), JOB_ID, "filename");
+      try {
+        const record = parsePending(await readBoundedPrivateJson(join(this.pendingDir, name), MAX_PENDING_BYTES));
+        if (record.jobId !== jobId) throw new Error("No Forgetti pending feedback filename does not match its record.");
+        return record;
+      } catch (error) {
+        if (isErrno(error, "ENOENT")) return undefined;
+        throw error;
+      }
+    }));
+    return pending.filter((record): record is PendingReviewFeedback => Boolean(record));
   }
 
   /** Drops interest in a job that never reached the durable queue. */
@@ -168,6 +230,24 @@ export class ReviewFeedbackInbox {
   }
 }
 
+async function registeredFeedback(
+  inbox: ReviewFeedbackInbox,
+  job: ReviewJob,
+): Promise<PendingReviewFeedback | undefined> {
+  let pending: PendingReviewFeedback;
+  try {
+    pending = parsePending(await readBoundedPrivateJson(
+      join(inbox.pendingDir, `${job.id}.json`),
+      MAX_PENDING_BYTES,
+    ));
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return undefined;
+    throw error;
+  }
+  if (pending.jobDigest !== job.digest) throw new Error("No Forgetti pending feedback does not match its review job.");
+  return pending;
+}
+
 /** Publishes the exact admitted diff only when Pi registered interest in the job. */
 export async function publishReviewFeedback(
   projectDir: string,
@@ -175,14 +255,8 @@ export async function publishReviewFeedback(
   result: ReviewAdmissionResult,
 ): Promise<void> {
   const inbox = new ReviewFeedbackInbox(projectDir);
-  let pending: PendingFeedback;
-  try {
-    pending = parsePending(await readBoundedPrivateJson(join(inbox.pendingDir, `${job.id}.json`), MAX_PENDING_BYTES));
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return;
-    throw error;
-  }
-  if (pending.jobDigest !== job.digest) throw new Error("No Forgetti pending feedback does not match admitted review job.");
+  const pending = await registeredFeedback(inbox, job);
+  if (!pending) return;
   const feedback: ReviewFeedback = {
     version: 1,
     jobId: job.id,
@@ -191,6 +265,7 @@ export async function publishReviewFeedback(
     status: result.status,
     messages: result.messages,
     changes: result.status === "applied" ? feedbackChanges(job.branch, result.branch) : [],
+    ...(pending.requestedBy ? { requestedBy: pending.requestedBy } : {}),
   };
   await createOrCompareJsonFile(join(inbox.readyDir, `${job.id}.json`), feedback, MAX_READY_BYTES);
 }
@@ -202,14 +277,8 @@ export async function publishReviewFailure(
   failure: ReviewFailure,
 ): Promise<void> {
   const inbox = new ReviewFeedbackInbox(projectDir);
-  let pending: PendingFeedback;
-  try {
-    pending = parsePending(await readBoundedPrivateJson(join(inbox.pendingDir, `${job.id}.json`), MAX_PENDING_BYTES));
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return;
-    throw error;
-  }
-  if (pending.jobDigest !== job.digest) throw new Error("No Forgetti pending feedback does not match failed review job.");
+  const pending = await registeredFeedback(inbox, job);
+  if (!pending) return;
   const feedback: ReviewFeedback = {
     version: 1,
     jobId: job.id,
@@ -218,6 +287,7 @@ export async function publishReviewFailure(
     status: "failed",
     messages: [failure.message],
     changes: [],
+    ...(pending.requestedBy ? { requestedBy: pending.requestedBy } : {}),
   };
   try {
     await createOrCompareJsonFile(join(inbox.readyDir, `${job.id}.json`), feedback, MAX_READY_BYTES);

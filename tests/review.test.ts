@@ -3,7 +3,13 @@ import test from "node:test";
 
 import { formatMemoryContext } from "../src/context.ts";
 import { scoreMemorySignal } from "../src/heuristics.ts";
-import { buildReviewEvidenceWindow, buildReviewPrompt, buildReviewTranscript, parseReviewPlan } from "../src/review.ts";
+import {
+  buildReviewEvidenceWindow,
+  buildReviewPrompt,
+  buildReviewTranscript,
+  parseReviewPlan,
+  validateReviewPlan,
+} from "../src/review.ts";
 import { validateMemoryText } from "../src/security.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import type { MemoryBranch } from "../src/types.ts";
@@ -55,6 +61,7 @@ test("review prompt exposes hard capacity and an earlier refinement target", () 
   assert.match(prompt, /created 2026-01-01T00:00:00.000Z; updated 2026-01-01T00:00:00.000Z/u);
   assert.match(prompt, /Reviews below the working target must finish at or below 4500 characters/u);
   assert.match(prompt, /Hard-limit headroom is reserved for foreground writes/u);
+  assert.match(prompt, /Each add, replacement, or merge content must be at most 800 characters/u);
   assert.match(prompt, /Target existing entries by entryId, never by text/u);
   assert.match(prompt, /high: forgetting likely causes user correction or expensive rediscovery/u);
 });
@@ -171,6 +178,13 @@ test("rejects malformed review output", () => {
     /requires entryId/u,
   );
   assert.throws(() => parseReviewPlan('{"operations":[{"action":"add","content":"new"}]}'), /valid importance/u);
+});
+
+test("rejects oversized review entries before admission", () => {
+  const plan = parseReviewPlan(JSON.stringify({
+    operations: [{ action: "add", content: "x".repeat(801), importance: "normal" }],
+  }));
+  assert.throws(() => validateReviewPlan(plan), /exceeds 800 characters/u);
 });
 
 test("formats memory as bounded non-authoritative project context", () => {

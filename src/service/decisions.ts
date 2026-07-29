@@ -318,6 +318,42 @@ export class ReviewDecisionStore {
     return this.withJobLock(jobId, () => this.readDecisionIfExists(jobId));
   }
 
+  /** Loads the immutable evidence envelope retained by either a selected or failed provider attempt. */
+  async loadReplaySource(jobIdValue: string): Promise<ReviewJob | undefined> {
+    const jobId = requireJobId(jobIdValue);
+    return this.withJobLock(jobId, async () => {
+      const decision = await this.readDecisionIfExists(jobId);
+      if (decision) return decision.job;
+      let entries: Dirent[];
+      try {
+        entries = await boundedEntries(this.attemptDirectory(jobId));
+      } catch (error) {
+        if (isErrno(error, "ENOENT")) return undefined;
+        throw error;
+      }
+      let source: ReviewJob | undefined;
+      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+        if (TEMPORARY.test(entry.name)) continue;
+        const path = join(this.attemptDirectory(jobId), entry.name);
+        if (!entry.isFile() || !entry.name.endsWith(".json")) {
+          throw new Error(`Unexpected review provider-result entry: ${path}`);
+        }
+        const attemptId = requireAttemptId(entry.name.slice(0, -5));
+        const attempt = parseReviewAttemptCheckpoint(
+          await readBoundedPrivateJson(path, MAX_REVIEW_ATTEMPT_CHECKPOINT_BYTES),
+        );
+        if (attempt.job.id !== jobId || attempt.attemptId !== attemptId) {
+          throw new Error("Review provider-result filename does not match its job or attempt.");
+        }
+        if (source && source.digest !== attempt.job.digest) {
+          throw new ReviewDecisionConflictError(`Conflicting replay evidence for review job '${jobId}'.`);
+        }
+        source = attempt.job;
+      }
+      return source;
+    });
+  }
+
   /** Purges old authority only for jobs the caller has established are terminal. */
   async purgeTerminalBefore(cutoff: Date, protectedJobIds: Iterable<string>): Promise<number> {
     if (!(cutoff instanceof Date) || !Number.isFinite(cutoff.getTime())) {

@@ -26,6 +26,7 @@ const MAX_RUNNING_RECORD_BYTES = MAX_REVIEW_JOB_BYTES + 4_096;
 const MAX_OUTCOME_RECORD_BYTES = MAX_REVIEW_OUTCOME_BYTES + 1_024;
 const MAX_DEAD_LETTER_BYTES = MAX_REVIEW_JOB_BYTES + 2_048;
 const MAX_DIRECTORY_FILES = 10_000;
+const MAX_ACTIVITY_JOBS = 1_024;
 const MIN_LEASE_MS = 1;
 const MAX_LEASE_MS = 24 * 60 * 60 * 1_000;
 const WORKER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -71,6 +72,20 @@ export interface RecoveryResult {
   quarantined: number;
   cleaned: number;
 }
+
+export type FailedReviewOutcome = Extract<ReviewOutcome, { status: "failed" }>;
+
+export type ReviewSpoolActivity =
+  | { jobId: string; state: "missing" }
+  | { jobId: string; state: "queued"; attempt: number; availableAt?: string }
+  | { jobId: string; state: "running"; attempt: number; claimedAt: string }
+  | {
+    jobId: string;
+    state: "completed";
+    attempt: number;
+    completedAt: string;
+    outcomeStatus: ReviewOutcome["status"];
+  };
 
 export interface ReviewSpoolOptions {
   ledger?: ReviewLedger;
@@ -379,6 +394,64 @@ export class ReviewSpool {
   async getOutcome(jobId: string): Promise<ReviewOutcome | undefined> {
     if (!/^review_[0-9a-f]{40}$/u.test(jobId)) throw new Error("Invalid review job id.");
     return this.lock(async () => (await this.readOutcomeIfPresent(jobId))?.outcome);
+  }
+
+  /** Read-only semantic projection for UI progress. It never repairs or quarantines spool state. */
+  async inspect(jobIds: readonly string[]): Promise<ReviewSpoolActivity[]> {
+    if (jobIds.length > MAX_ACTIVITY_JOBS || new Set(jobIds).size !== jobIds.length) {
+      throw new Error("Invalid review activity job list.");
+    }
+    for (const jobId of jobIds) {
+      if (!/^review_[0-9a-f]{40}$/u.test(jobId)) throw new Error("Invalid review activity job id.");
+    }
+    return this.lock(async () => Promise.all(jobIds.map(async (jobId): Promise<ReviewSpoolActivity> => {
+      const outcome = await this.readOutcomeIfPresent(jobId);
+      if (outcome) {
+        return {
+          jobId,
+          state: "completed",
+          attempt: outcome.attempt,
+          completedAt: outcome.outcome.completedAt,
+          outcomeStatus: outcome.outcome.status,
+        };
+      }
+      const [queued, running] = await Promise.all([
+        this.readQueueIfPresent(jobId),
+        this.readRunningIfPresent(jobId),
+      ]);
+      if (queued && (!running || queued.nextAttempt > running.attempt)) {
+        return {
+          jobId,
+          state: "queued",
+          attempt: queued.nextAttempt,
+          ...(queued.availableAt ? { availableAt: queued.availableAt } : {}),
+        };
+      }
+      if (running) {
+        return { jobId, state: "running", attempt: running.attempt, claimedAt: running.claimedAt };
+      }
+      if (queued) {
+        return {
+          jobId,
+          state: "queued",
+          attempt: queued.nextAttempt,
+          ...(queued.availableAt ? { availableAt: queued.availableAt } : {}),
+        };
+      }
+      return { jobId, state: "missing" };
+    })));
+  }
+
+  async failedOutcomes(): Promise<FailedReviewOutcome[]> {
+    return this.lock(async () => {
+      const failed: FailedReviewOutcome[] = [];
+      for (const name of await this.recordNames(this.outcomesDir)) {
+        const record = await this.readOutcome(join(this.outcomesDir, name));
+        if (name !== `${record.outcome.jobId}.json`) throw new Error("Review outcome filename does not match job id.");
+        if (record.outcome.status === "failed") failed.push(record.outcome);
+      }
+      return failed;
+    });
   }
 
   async purgeTerminalBefore(cutoff: Date): Promise<number> {

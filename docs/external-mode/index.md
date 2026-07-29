@@ -15,7 +15,7 @@ In external mode, responsibility splits:
 3. **The worker reviews.** A user-scoped process claims the job, reserves budget, and calls the configured model without coding tools.
 4. **The worker checkpoints.** Provider results and the elected proposal are persisted before any project effect.
 5. **The project store admits.** The proposal is revalidated and commits only if the captured branch digest still matches current memory.
-6. **Pi reports.** An open Pi receives the applied content diff on its monitor tick; otherwise the next project session displays it.
+6. **Pi reports.** An open Pi shows project-local progress and receives the terminal result. Otherwise, the next project session displays the result.
 
 [![External mode durability and authority flow](/external-mode-explainer.svg)](/external-mode-explainer.svg)
 
@@ -48,6 +48,7 @@ External mode is designed to survive common local failures:
 - A worker crash releases its lease for later recovery.
 - A mid-admission crash rolls the frozen intent forward; it never rolls canonical memory backward.
 - A stale proposal fails closed rather than overwriting newer memory.
+- A terminal failure retains its evidence for `/memory review retry` until the configured evidence timeout.
 
 It does **not** guarantee provider exactly-once execution. A crash after dispatch can leave an attempt `unknown`; retry may duplicate provider cost. No Forgetti retains conservative budget exposure and prevents duplicate memory effects.
 

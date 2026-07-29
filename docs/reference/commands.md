@@ -10,6 +10,7 @@
 | `/memory fork <name>` | Clone the active branch and select the copy in this Pi session |
 | `/memory use <name>` | Select an existing branch in this Pi session |
 | `/memory review` | Request memory review after the turn settles |
+| `/memory review retry [job-id]` | Requeue retained evidence from the latest failed external review |
 | `/memory undo` | Safely invert the latest eligible automatic review |
 
 ## Project skills
@@ -41,6 +42,14 @@ remove(oldText)
 ```
 
 For `replace` and `remove`, `oldText` must be a unique substring of one existing entry. Importance can be `high`, `normal`, or `low` and measures the cost of forgetting.
+
+## Doctor CLI
+
+```text
+no-forgetti doctor [--json] [--agent-dir <path>] [--projects-root <path>]
+```
+
+The doctor checks the installed release, the global package source, project overrides, live Pi runtimes, and the external worker. It exits with status 1 if the machine has a stale or mixed installation.
 
 ## Worker CLI
 

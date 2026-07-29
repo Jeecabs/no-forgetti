@@ -76,6 +76,7 @@ No Forgetti never starts a daemon during package installation.
 /memory fork <name>
 /memory use <name>
 /memory review
+/memory review retry
 /memory undo
 
 /project-skills
@@ -89,6 +90,8 @@ No Forgetti never starts a daemon during package installation.
 /project-skills reject <name>
 /project-skills review
 ```
+
+Use `no-forgetti doctor` after an external-mode update. It checks the installed release, live Pi runtimes, and the worker. Add `--projects-root <path>` to scan Git roots for local overrides.
 
 See the [command reference](docs/reference/commands.md) for behavior and worker CLI options.
 

@@ -9,12 +9,26 @@ import { formatMemoryContext, memoryCharCount } from "./context.ts";
 import { scoreMemorySignal, scoreSkillSignal } from "./heuristics.ts";
 import { resolveProjectRoot } from "./project.ts";
 import { isNonPrimaryAgent } from "./runtime.ts";
+import {
+  RuntimeStatusReporter,
+  type RuntimeReporter,
+  type RuntimeStatusReporterOptions,
+} from "./runtime-status.ts";
 import { safeContextText } from "./security.ts";
 import { buildReviewEvidenceWindow, requestReviewPlan } from "./review.ts";
+import {
+  ProjectReviewActivityReader,
+  type ProjectReviewActivitySnapshot,
+} from "./service/activity.ts";
 import { DEFAULT_SERVICE_CONFIG, loadServiceConfig, type ServiceConfig } from "./service/config.ts";
-import { consumeReviewFeedback, ReviewFeedbackInbox } from "./service/feedback.ts";
+import {
+  consumeReviewFeedback,
+  ReviewFeedbackInbox,
+  type ReviewRequestOrigin,
+} from "./service/feedback.ts";
+import { ReviewDecisionStore } from "./service/decisions.ts";
 import { readReviewServiceMonitor, type ReviewServiceMonitor } from "./service/monitor.ts";
-import { createReviewJob } from "./service/protocol.ts";
+import { createReviewJob, replayReviewJob, type ReviewJob } from "./service/protocol.ts";
 import { ReviewSpool } from "./service/spool.ts";
 import { formatReviewServiceMonitorText, showReviewServiceMonitor, type MemoryMonitorSummary } from "./service/tui.ts";
 import { PROJECT_SKILL_USE_ENTRY, projectSkillNameFromInvocation, projectSkillNameFromReadPath } from "./skill-native.ts";
@@ -37,6 +51,7 @@ import {
   DEFAULT_REVIEW_INTERVAL,
   DEFAULT_REVIEW_SIGNAL_THRESHOLD,
   MAIN_MEMORY,
+  MEMORY_POLICY_VERSION,
   type MemoryAction,
   type MemoryBranch,
   type MemoryImportance,
@@ -44,6 +59,9 @@ import {
   type ReviewClaim,
   type ReviewOperation,
 } from "./types.ts";
+import { EXTENSION_VERSION } from "./version.ts";
+
+export { EXTENSION_VERSION } from "./version.ts";
 
 const STATUS_KEY = "no-forgetti";
 const WIDGET_KEY = "no-forgetti";
@@ -70,12 +88,10 @@ function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used
 
 const TOOL_NAME = "project_memory";
 const REVIEW_TIMEOUT_MS = 120_000;
-const SERVICE_MONITOR_POLL_MS = 15_000;
+const SERVICE_MONITOR_IDLE_POLL_MS = 15_000;
+const SERVICE_MONITOR_ACTIVE_POLL_MS = 1_000;
 const REVIEW_ABORT_LIFECYCLE = "lifecycle";
 const REVIEW_ABORT_TIMEOUT = "timeout";
-/** Stamped into durable provenance; tests/manifest.test.ts pins it to package.json. */
-export const EXTENSION_VERSION = "0.3.0";
-
 export interface ExtensionDependencies {
   isNonPrimaryAgent: typeof isNonPrimaryAgent;
   createMemoryStore: (projectRoot: string) => ProjectMemoryStore;
@@ -85,6 +101,7 @@ export interface ExtensionDependencies {
   loadServiceConfig: typeof loadServiceConfig;
   loadServiceMonitor: typeof readReviewServiceMonitor;
   createReviewSpool: () => ReviewSpool;
+  createRuntimeReporter: (options: RuntimeStatusReporterOptions) => RuntimeReporter;
   reviewTimeoutMs: number;
   writeCommandOutput: (text: string) => void;
 }
@@ -98,6 +115,7 @@ const DEFAULT_DEPENDENCIES: ExtensionDependencies = {
   loadServiceConfig,
   loadServiceMonitor: readReviewServiceMonitor,
   createReviewSpool: () => new ReviewSpool(join(getAgentDir(), "no-forgetti", "review-spool")),
+  createRuntimeReporter: (options) => new RuntimeStatusReporter(options),
   reviewTimeoutMs: REVIEW_TIMEOUT_MS,
   writeCommandOutput: (text) => process.stdout.write(`${text}\n`),
 };
@@ -346,14 +364,21 @@ export function activateProjectMemoryExtension(
   let observedNativeSkillUses = new Set<string>();
   let serviceConfig: ServiceConfig = DEFAULT_SERVICE_CONFIG;
   let reviewSpool: ReviewSpool | undefined;
+  let reviewDecisionStore: ReviewDecisionStore | undefined;
+  let runtimeReporter: RuntimeReporter | undefined;
   let serviceMonitor: ReviewServiceMonitor | undefined;
   let serviceMonitorTimer: ReturnType<typeof setInterval> | undefined;
   let announcedBudgetLimit: string | undefined;
   let serviceMonitorErrorAnnounced = false;
   let reviewFeedbackInbox: ReviewFeedbackInbox | undefined;
+  let reviewActivityReader: ProjectReviewActivityReader | undefined;
+  let projectReviewActivity: ProjectReviewActivitySnapshot | undefined;
+  let embeddedReviewRunning = false;
   let deliveredExternalReviews = new Set<string>();
   let externalFeedbackPromise: Promise<void> | undefined;
   let externalFeedbackErrorAnnounced = false;
+  let reviewActivityErrorAnnounced = false;
+  let serviceMonitorPollEpoch = 0;
 
   function presentCommandOutput(
     ctx: ExtensionCommandContext,
@@ -394,10 +419,56 @@ export function activateProjectMemoryExtension(
     skillReviewCursorId = throughEntryId;
   }
 
-  let widgetShown: "review" | "pending" | undefined;
+  let widgetShown: string | undefined;
+
+  function elapsedReviewTime(startedAt: string | undefined): string {
+    if (!startedAt) return "";
+    const elapsed = Math.max(0, Date.now() - new Date(startedAt).getTime());
+    if (!Number.isFinite(elapsed)) return "";
+    const seconds = Math.floor(elapsed / 1_000);
+    return seconds > 0 ? ` ${seconds}s` : "";
+  }
+
+  function externalReviewWidgetText(): { text: string; spinning: boolean; warning: boolean } | undefined {
+    const activity = projectReviewActivity?.jobs.at(0);
+    if (!activity) return undefined;
+    if (activity.phase === "reviewing") {
+      return { text: `reviewing project memory…${elapsedReviewTime(activity.startedAt)}`, spinning: true, warning: false };
+    }
+    if (activity.phase === "retrying") {
+      return { text: `retrying memory review attempt ${activity.attempt}`, spinning: true, warning: false };
+    }
+    if (activity.phase === "finishing") {
+      return activity.outcomeStatus === "failed"
+        ? { text: "delivering memory review failure…", spinning: true, warning: true }
+        : { text: "applying project memory…", spinning: true, warning: false };
+    }
+    if (activity.phase === "paused") {
+      const reason = activity.pauseReason === "update"
+        ? "worker update required"
+        : activity.pauseReason === "budget"
+          ? "review budget exhausted"
+          : "worker offline, review saved";
+      return { text: `memory review paused: ${reason}`, spinning: false, warning: true };
+    }
+    return { text: "memory review queued", spinning: true, warning: false };
+  }
 
   function refreshWidget(ctx: ExtensionContext): void {
-    const key = skillReviewRunning ? "review" : pendingSkillCount > 0 ? "pending" : undefined;
+    const external = externalReviewWidgetText();
+    const memorySpinning = embeddedReviewRunning || external?.spinning === true;
+    const key = embeddedReviewRunning || external || skillReviewRunning || pendingSkillCount > 0
+      ? JSON.stringify({
+        embeddedReviewRunning,
+        externalPhase: projectReviewActivity?.jobs.at(0)?.phase,
+        externalAttempt: projectReviewActivity?.jobs.at(0)?.attempt,
+        externalPause: projectReviewActivity?.jobs.at(0)?.pauseReason,
+        externalOutcome: projectReviewActivity?.jobs.at(0)?.outcomeStatus,
+        externalJobs: projectReviewActivity?.jobs.length ?? 0,
+        skillReviewRunning,
+        pendingSkillCount,
+      })
+      : undefined;
     if (key === widgetShown) return;
     widgetShown = key;
     if (!key) {
@@ -406,24 +477,33 @@ export function activateProjectMemoryExtension(
     }
     ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
       let frame = 0;
-      const timer =
-        key === "review"
-          ? setInterval(() => {
-              frame = (frame + 1) % SPINNER_FRAMES.length;
-              tui.requestRender();
-            }, 100)
-          : undefined;
+      const timer = skillReviewRunning || memorySpinning
+        ? setInterval(() => {
+            frame = (frame + 1) % SPINNER_FRAMES.length;
+            tui.requestRender();
+          }, 100)
+        : undefined;
       return {
         invalidate() {},
-        // Reads live closure state, so count changes render without re-setting the widget.
         render() {
           const rail = theme.fg("dim", "│ ");
           const lines = [theme.fg("dim", "╭ no-forgetti")];
+          if (embeddedReviewRunning) {
+            lines.push(`${rail}${theme.fg("accent", SPINNER_FRAMES[frame] ?? "⠋")} ${theme.fg("muted", "reviewing project memory…")}`);
+          } else {
+            const review = externalReviewWidgetText();
+            if (review) {
+              const glyph = review.spinning ? SPINNER_FRAMES[frame] ?? "⠋" : "!";
+              lines.push(`${rail}${theme.fg(review.warning ? "warning" : "accent", glyph)} ${theme.fg("muted", review.text)}`);
+              const remaining = (projectReviewActivity?.jobs.length ?? 1) - 1;
+              if (remaining > 0) lines.push(`${rail}${theme.fg("muted", `${remaining} more review${remaining === 1 ? "" : "s"} queued`)}`);
+            }
+          }
           if (skillReviewRunning) {
             lines.push(`${rail}${theme.fg("accent", SPINNER_FRAMES[frame] ?? "⠋")} ${theme.fg("muted", "reviewing skill proposals…")}`);
           }
           if (pendingSkillCount > 0) {
-            lines.push(`${rail}${theme.fg("muted", `pending:${pendingSkillCount} · /project-skills pending`)}`);
+            lines.push(`${rail}${theme.fg("muted", `pending:${pendingSkillCount} /project-skills pending`)}`);
           }
           return lines;
         },
@@ -434,30 +514,41 @@ export function activateProjectMemoryExtension(
     });
   }
 
+  function reviewStatusSegment(t: ExtensionContext["ui"]["theme"]): string | undefined {
+    if (serviceConfig.mode === "embedded") {
+      return embeddedReviewRunning ? t.fg("accent", "review:reviewing") : undefined;
+    }
+    if (serviceMonitor?.exhausted.length) {
+      return t.fg("error", `review:limit-${serviceMonitor.exhausted.join("+")}`);
+    }
+    if (serviceMonitor?.workerCompatible === false) return t.fg("warning", "review:update");
+    if (serviceMonitor && !serviceMonitor.workerFresh) return t.fg("warning", "review:offline");
+    if (!serviceMonitor) return t.fg("warning", "review:monitor-error");
+    const activity = projectReviewActivity?.jobs.at(0);
+    return activity ? t.fg("accent", `review:${activity.phase}`) : "review:on";
+  }
+
+  function memoryReviewIsActive(): boolean {
+    if (embeddedReviewRunning) return true;
+    const activity = projectReviewActivity?.jobs.at(0);
+    return Boolean(activity && activity.phase !== "paused");
+  }
+
   function refreshStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
     refreshWidget(ctx);
     if (!store || !frozenBranch) return;
     const t = ctx.ui.theme;
-    const entries = frozenBranch.entries.length;
-    const segs: string[] = [];
-    if (activeSkillCount > 0) segs.push(`skills:${activeSkillCount}`);
-    if (pendingSkillCount > 0) segs.push(`pending:${pendingSkillCount}`);
-    if (serviceConfig.mode !== "embedded") {
-      if (serviceMonitor?.exhausted.length) segs.push(t.fg("error", `review:limit-${serviceMonitor.exhausted.join("+")}`));
-      else if (serviceMonitor?.workerCompatible === false) segs.push(t.fg("warning", "review:update"));
-      else if (serviceMonitor && !serviceMonitor.workerFresh) segs.push(t.fg("warning", "review:offline"));
-      else if (!serviceMonitor) segs.push(t.fg("warning", "review:monitor-error"));
-      else if (serviceMonitor.spool.queued) segs.push(t.fg("accent", `review:q${serviceMonitor.spool.queued}`));
-      else segs.push("review:on");
-    }
-    if (entries === 0 && segs.length === 0 && !skillReviewRunning) {
-      // ponytail: nothing to say — give the footer row back
+    const segs = [
+      ...(activeSkillCount > 0 ? [`skills:${activeSkillCount}`] : []),
+      ...(pendingSkillCount > 0 ? [`pending:${pendingSkillCount}`] : []),
+      ...([reviewStatusSegment(t)].filter((segment): segment is string => Boolean(segment))),
+    ];
+    if (frozenBranch.entries.length === 0 && segs.length === 0 && !skillReviewRunning) {
       ctx.ui.setStatus(STATUS_KEY, undefined);
       return;
     }
-    // Bar already communicates memory presence/capacity; avoid repeating it as text.
-    const stateColor: StateColor = skillReviewRunning ? "accent" : "muted";
+    const stateColor: StateColor = skillReviewRunning || memoryReviewIsActive() ? "accent" : "muted";
     const bar = capacityBar(t, stateColor, memoryCharCount(frozenBranch), store.maxChars);
     ctx.ui.setStatus(STATUS_KEY, `${bar} ${t.fg("muted", segs.join(" "))}`.trimEnd());
   }
@@ -492,6 +583,29 @@ export function activateProjectMemoryExtension(
     refreshStatus(ctx);
   }
 
+  async function refreshProjectReviewActivity(ctx: ExtensionContext): Promise<void> {
+    const reader = reviewActivityReader;
+    if (serviceConfig.mode !== "external" || !reader) {
+      projectReviewActivity = undefined;
+      refreshStatus(ctx);
+      return;
+    }
+    try {
+      projectReviewActivity = await reader.snapshot(serviceMonitor ?? {
+        workerFresh: false,
+        exhausted: [],
+      });
+      reviewActivityErrorAnnounced = false;
+    } catch (error) {
+      projectReviewActivity = undefined;
+      if (!reviewActivityErrorAnnounced && ctx.hasUI) {
+        reviewActivityErrorAnnounced = true;
+        ctx.ui.notify(`No Forgetti review activity unavailable: ${errorMessage(error)}`, "warning");
+      }
+    }
+    refreshStatus(ctx);
+  }
+
   async function reconcileExternalReviewFeedback(ctx: ExtensionContext): Promise<void> {
     const memoryStore = store;
     const inbox = reviewFeedbackInbox;
@@ -507,24 +621,31 @@ export function activateProjectMemoryExtension(
             text: safeContextText(change.text),
             ...(change.kind === "replace" ? { oldText: safeContextText(change.oldText) } : {}),
           }));
+          const messages = feedback.messages.slice(0, 4).map((message) => safeContextText(message));
           pi.appendEntry(MEMORY_REVIEW_ENTRY, {
             projectKey: memoryStore.projectKey,
             jobId: feedback.jobId,
             branch: feedback.branchName,
             status: feedback.status,
             changes,
+            messages,
+            ...(feedback.requestedBy ? { requestedBy: feedback.requestedBy } : {}),
           });
           deliveredExternalReviews.add(feedback.jobId);
           updatedActiveBranch ||= feedback.status === "applied" && feedback.branchName === activeName;
-          // Embedded review surfaces a rejected batch as a warning; a silently
-          // dropped external batch would look like memory simply never changed.
-          if ((feedback.status === "stale" || feedback.status === "rejected" || feedback.status === "failed") && ctx.hasUI) {
-            ctx.ui.notify(`Project memory review failed: ${feedback.messages.at(0) ?? feedback.status}`, "warning");
+          if (feedback.status === "noop" && feedback.requestedBy === "manual" && ctx.hasUI) {
+            ctx.ui.notify("Project memory review: nothing durable to save.", "info");
+          } else if (feedback.status === "stale" && ctx.hasUI) {
+            ctx.ui.notify(`Project memory changed before review applied: ${messages.at(0) ?? "review is stale"}`, "warning");
+          } else if (feedback.status === "rejected" && ctx.hasUI) {
+            ctx.ui.notify(`Project memory review rejected: ${messages.at(0) ?? "proposal was rejected"}`, "warning");
+          } else if (feedback.status === "failed" && ctx.hasUI) {
+            ctx.ui.notify(`Project memory review stopped: ${messages.at(0) ?? "worker failed"}`, "warning");
           }
         });
         if (updatedActiveBranch) frozenBranch = await memoryStore.loadBranch(activeName);
         externalFeedbackErrorAnnounced = false;
-        refreshStatus(ctx);
+        await refreshProjectReviewActivity(ctx);
       } catch (error) {
         if (!externalFeedbackErrorAnnounced && ctx.hasUI) {
           externalFeedbackErrorAnnounced = true;
@@ -538,14 +659,36 @@ export function activateProjectMemoryExtension(
   }
 
   function startServiceMonitorPolling(ctx: ExtensionContext): void {
-    if (serviceMonitorTimer) clearInterval(serviceMonitorTimer);
+    if (serviceMonitorTimer) clearTimeout(serviceMonitorTimer);
     serviceMonitorTimer = undefined;
+    const epoch = ++serviceMonitorPollEpoch;
     if (serviceConfig.mode === "embedded") return;
-    serviceMonitorTimer = setInterval(() => void (async () => {
-      await refreshServiceMonitor(ctx, true);
-      await reconcileExternalReviewFeedback(ctx);
-    })(), SERVICE_MONITOR_POLL_MS);
-    serviceMonitorTimer.unref?.();
+    const schedule = () => {
+      if (epoch !== serviceMonitorPollEpoch) return;
+      const delay = projectReviewActivity?.jobs.length
+        ? SERVICE_MONITOR_ACTIVE_POLL_MS
+        : SERVICE_MONITOR_IDLE_POLL_MS;
+      serviceMonitorTimer = setTimeout(() => void (async () => {
+        serviceMonitorTimer = undefined;
+        await refreshServiceMonitor(ctx, true);
+        await reconcileExternalReviewFeedback(ctx);
+        await refreshProjectReviewActivity(ctx);
+        schedule();
+      })(), delay);
+      serviceMonitorTimer.unref?.();
+    };
+    schedule();
+  }
+
+  async function stopBackgroundMonitoring(): Promise<void> {
+    if (runtimeReporter) {
+      runtimeReporter.stop();
+      await runtimeReporter.flush().catch(() => undefined);
+      runtimeReporter = undefined;
+    }
+    if (serviceMonitorTimer) clearTimeout(serviceMonitorTimer);
+    serviceMonitorTimer = undefined;
+    serviceMonitorPollEpoch += 1;
   }
 
   function memoryMonitorSummary(memoryStore: ProjectMemoryStore, branch: MemoryBranch): MemoryMonitorSummary {
@@ -555,12 +698,12 @@ export function activateProjectMemoryExtension(
       entries: branch.entries.length,
       usedChars: memoryCharCount(branch),
       maxChars: memoryStore.maxChars,
+      ...(projectReviewActivity?.jobs.length ? { reviews: projectReviewActivity.jobs } : {}),
     };
   }
 
   async function loadSessionMemory(ctx: ExtensionContext): Promise<void> {
-    if (serviceMonitorTimer) clearInterval(serviceMonitorTimer);
-    serviceMonitorTimer = undefined;
+    await stopBackgroundMonitoring();
     serviceMonitor = undefined;
     observedNativeSkillUses = new Set();
     store = undefined;
@@ -572,10 +715,15 @@ export function activateProjectMemoryExtension(
     knownUserEntryIds = new Set();
     lastAgentRunSuccessful = false;
     reviewFeedbackInbox = undefined;
+    reviewActivityReader = undefined;
+    projectReviewActivity = undefined;
+    embeddedReviewRunning = false;
     deliveredExternalReviews = new Set();
     externalFeedbackErrorAnnounced = false;
+    reviewActivityErrorAnnounced = false;
     serviceConfig = DEFAULT_SERVICE_CONFIG;
     reviewSpool = undefined;
+    reviewDecisionStore = undefined;
     try {
       serviceConfig = await dependencies.loadServiceConfig();
     } catch (error) {
@@ -586,8 +734,10 @@ export function activateProjectMemoryExtension(
         reviewSpool = dependencies.createReviewSpool();
         await reviewSpool.initialize();
         await reviewSpool.recover();
+        reviewDecisionStore = new ReviewDecisionStore(reviewSpool.root);
       } catch (error) {
         reviewSpool = undefined;
+        reviewDecisionStore = undefined;
         if (ctx.hasUI) ctx.ui.notify(
           `No Forgetti ${serviceConfig.mode} review degraded; durable spool unavailable: ${errorMessage(error)}`,
           "warning",
@@ -608,6 +758,24 @@ export function activateProjectMemoryExtension(
       return;
     }
     store = nextStore;
+    try {
+      runtimeReporter = dependencies.createRuntimeReporter({
+        agentDir: getAgentDir(),
+        identity: `extension:${process.pid}:${ctx.sessionManager.getSessionId()}`,
+        kind: "extension",
+        releaseVersion: EXTENSION_VERSION,
+        memoryPolicyVersion: MEMORY_POLICY_VERSION,
+        projectRoot,
+        projectKey: nextStore.projectKey,
+      });
+      runtimeReporter.start();
+      await runtimeReporter.flush();
+    } catch (error) {
+      runtimeReporter?.stop();
+      await runtimeReporter?.flush().catch(() => undefined);
+      runtimeReporter = undefined;
+      if (ctx.hasUI) ctx.ui.notify(`No Forgetti runtime status unavailable: ${errorMessage(error)}`, "warning");
+    }
     const nextSkillStore = dependencies.createSkillStore(projectRoot, nextStore.projectDir);
     try {
       await nextSkillStore.initialize();
@@ -658,8 +826,15 @@ export function activateProjectMemoryExtension(
       try {
         reviewFeedbackInbox = new ReviewFeedbackInbox(nextStore.projectDir);
         await reviewFeedbackInbox.initialize();
+        if (reviewSpool) {
+          reviewActivityReader = new ProjectReviewActivityReader({
+            inbox: reviewFeedbackInbox,
+            spool: reviewSpool,
+          });
+        }
       } catch (error) {
         reviewFeedbackInbox = undefined;
+        reviewActivityReader = undefined;
         if (ctx.hasUI) ctx.ui.notify(`No Forgetti memory feedback unavailable: ${errorMessage(error)}`, "warning");
       }
     }
@@ -677,6 +852,7 @@ export function activateProjectMemoryExtension(
     observedNativeSkillUses = new Set();
     await refreshServiceMonitor(ctx, true);
     await reconcileExternalReviewFeedback(ctx);
+    await refreshProjectReviewActivity(ctx);
     startServiceMonitorPolling(ctx);
     refreshStatus(ctx);
   }
@@ -791,15 +967,12 @@ export function activateProjectMemoryExtension(
     return skillReviewPromise;
   }
 
-  async function enqueueReviewJob(
-    ctx: ExtensionContext,
-    branch: MemoryBranch,
-    transcript: string,
-    throughEntryId: string,
-  ): Promise<void> {
-    // Do not hand durable evidence to a worker whose admission policy predates
-    // this extension. The review claim remains failed (and therefore retryable),
-    // while its session evidence cursor stays before the unpersisted job.
+  async function enqueuePreparedReviewJob(request: {
+    ctx: ExtensionContext;
+    job: ReviewJob;
+    requestedBy: ReviewRequestOrigin;
+  }): Promise<void> {
+    const { ctx, job, requestedBy } = request;
     await refreshServiceMonitor(ctx);
     if (serviceMonitor?.workerCompatible === false) {
       throw new Error("No Forgetti review worker restart required: its memory policy is out of date.");
@@ -807,23 +980,18 @@ export function activateProjectMemoryExtension(
     const spool = reviewSpool;
     if (!spool) throw new Error("External review spool is unavailable.");
     const memoryStore = requireStore();
-    const job = createReviewJob({
-      projectKey: memoryStore.projectKey,
-      sessionId: ctx.sessionManager.getSessionId(),
-      throughEntryId,
-      transcript,
-      branch,
-      baseBranchDigest: memoryStore.branchDigest(branch),
-      maxChars: memoryStore.maxChars,
-    });
-    // Interest must be durable before the job is claimable, or a worker can
-    // admit and publish its diff before Pi has anywhere to receive it.
+    if (job.projectKey !== memoryStore.projectKey) throw new Error("Review job belongs to another project.");
     const inbox = serviceConfig.mode === "external" ? reviewFeedbackInbox : undefined;
-    try {
-      await inbox?.register(job.id, job.digest);
-    } catch (error) {
-      if (ctx.hasUI) ctx.ui.notify(`No Forgetti could not register memory feedback: ${errorMessage(error)}`, "warning");
+    if (serviceConfig.mode === "external" && !inbox) {
+      throw new Error("External review feedback mailbox is unavailable.");
     }
+    await inbox?.register({
+      jobId: job.id,
+      jobDigest: job.digest,
+      branchName: job.branch.name,
+      requestedBy,
+      queuedAt: new Date().toISOString(),
+    });
     let enqueue: Awaited<ReturnType<typeof spool.enqueue>>;
     try {
       enqueue = await spool.enqueue(job);
@@ -841,11 +1009,72 @@ export function activateProjectMemoryExtension(
       jobId: job.id,
       jobDigest: job.digest,
       mode: serviceConfig.mode,
-      throughEntryId,
+      throughEntryId: job.throughEntryId,
       status: enqueue,
+      requestedBy,
+      ...(job.generation === undefined ? {} : { generation: job.generation }),
       producer: { extensionVersion: EXTENSION_VERSION, piVersion: PI_VERSION },
     });
     await refreshServiceMonitor(ctx);
+    await refreshProjectReviewActivity(ctx);
+  }
+
+  async function enqueueReviewJob(request: {
+    ctx: ExtensionContext;
+    branch: MemoryBranch;
+    transcript: string;
+    throughEntryId: string;
+    requestedBy: ReviewRequestOrigin;
+  }): Promise<void> {
+    const { ctx, branch, transcript, throughEntryId, requestedBy } = request;
+    const memoryStore = requireStore();
+    const job = createReviewJob({
+      projectKey: memoryStore.projectKey,
+      sessionId: ctx.sessionManager.getSessionId(),
+      throughEntryId,
+      transcript,
+      branch,
+      baseBranchDigest: memoryStore.branchDigest(branch),
+      maxChars: memoryStore.maxChars,
+    });
+    await enqueuePreparedReviewJob({ ctx, job, requestedBy });
+  }
+
+  function latestRetryableReviewJobId(ctx: ExtensionContext): string | undefined {
+    const memoryStore = requireStore();
+    const entries = ctx.sessionManager.getBranch();
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries.at(index);
+      if (entry?.type !== "custom" || entry.customType !== MEMORY_REVIEW_ENTRY) continue;
+      const data: unknown = entry.data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+      const state = data as { projectKey?: unknown; jobId?: unknown; status?: unknown };
+      if (state.projectKey !== memoryStore.projectKey
+        || typeof state.jobId !== "string"
+        || (state.status !== "stale" && state.status !== "rejected" && state.status !== "failed")) continue;
+      return state.jobId;
+    }
+    return undefined;
+  }
+
+  async function retryExternalReview(ctx: ExtensionCommandContext, requestedJobId?: string): Promise<void> {
+    if (serviceConfig.mode !== "external") throw new Error("Review replay requires external mode.");
+    const decisions = reviewDecisionStore;
+    if (!decisions) throw new Error("External review evidence store is unavailable.");
+    const jobId = requestedJobId || latestRetryableReviewJobId(ctx);
+    if (!jobId) throw new Error("No failed external memory review is available to retry.");
+    const source = await decisions.loadReplaySource(jobId);
+    if (!source) throw new Error("Review evidence has expired or is unavailable.");
+    const memoryStore = requireStore();
+    if (source.projectKey !== memoryStore.projectKey) throw new Error("Review evidence belongs to another project.");
+    const branch = await memoryStore.loadBranch(source.branch.name);
+    const replay = replayReviewJob(source, {
+      branch,
+      baseBranchDigest: memoryStore.branchDigest(branch),
+      maxChars: memoryStore.maxChars,
+    });
+    await enqueuePreparedReviewJob({ ctx, job: replay, requestedBy: "manual" });
+    ctx.ui.notify("Project memory review requeued from retained evidence.", "info");
   }
 
   async function runReview(ctx: ExtensionContext, force: boolean): Promise<void> {
@@ -883,7 +1112,13 @@ export function activateProjectMemoryExtension(
             // Shadow mode must degrade to the embedded review rather than fail
             // the whole review when no bounded evidence can be enqueued.
             if (!evidence) throw new Error("No bounded completed evidence is available to enqueue.");
-            await enqueueReviewJob(ctx, branch, evidence.transcript, evidence.throughEntryId);
+            await enqueueReviewJob({
+              ctx,
+              branch,
+              transcript: evidence.transcript,
+              throughEntryId: evidence.throughEntryId,
+              requestedBy: force ? "manual" : "automatic",
+            });
           } catch (error) {
             if (serviceConfig.mode === "external") throw error;
             if (ctx.hasUI) ctx.ui.notify(`Project memory shadow enqueue failed: ${errorMessage(error)}`, "warning");
@@ -891,10 +1126,11 @@ export function activateProjectMemoryExtension(
           if (serviceConfig.mode === "external" && evidence) {
             appendReviewCursor(reviewBranchName, evidence.throughEntryId, "queued");
             success = true;
-            if (ctx.hasUI) ctx.ui.notify("Project memory review queued for the No Forgetti service.", "info");
             return;
           }
         }
+        embeddedReviewRunning = true;
+        refreshStatus(ctx);
         reviewTimeout = setTimeout(() => controller.abort(), dependencies.reviewTimeoutMs);
         const plan = await dependencies.requestReviewPlan(ctx, {
           branch,
@@ -932,6 +1168,8 @@ export function activateProjectMemoryExtension(
       } finally {
         if (reviewTimeout) clearTimeout(reviewTimeout);
         if (claimed) await memoryStore.finishReviewClaim(reviewBranchName, claimed, success).catch(() => undefined);
+        embeddedReviewRunning = false;
+        refreshStatus(ctx);
         if (reviewController === controller) reviewController = undefined;
         reviewPromise = undefined;
       }
@@ -1252,7 +1490,7 @@ export function activateProjectMemoryExtension(
   });
 
   pi.registerCommand("memory", {
-    description: "Project memory. Usage: /memory status|show|branches|fork|use|review|undo",
+    description: "Project memory. Usage: /memory status|show|branches|fork|use|review [retry]|undo",
     getArgumentCompletions: async (prefix) => {
       const base = [
         { value: "status", label: "status", description: "Show project memory status" },
@@ -1261,6 +1499,7 @@ export function activateProjectMemoryExtension(
         { value: "fork ", label: "fork <name>", description: "Explicitly clone active memory and switch this session" },
         { value: "use ", label: "use <name>", description: "Switch this session to an existing memory branch" },
         { value: "review", label: "review", description: "Run self-learning memory refinement now" },
+        { value: "review retry", label: "review retry", description: "Requeue retained evidence from the latest failed external review" },
         { value: "undo", label: "undo", description: "Undo the last automatic memory review" },
       ];
       if (prefix.startsWith("use ") && store) {
@@ -1279,10 +1518,11 @@ export function activateProjectMemoryExtension(
 
       if (subcommand === "status") {
         const live = await memoryStore.loadBranch(activeName);
-        const memory = memoryMonitorSummary(memoryStore, live);
         try {
           const monitor = await dependencies.loadServiceMonitor();
           serviceMonitor = monitor;
+          await refreshProjectReviewActivity(ctx);
+          const memory = memoryMonitorSummary(memoryStore, live);
           if (ctx.mode === "tui") {
             await showReviewServiceMonitor(ctx, monitor, memory, dependencies.loadServiceMonitor);
           } else {
@@ -1354,6 +1594,15 @@ export function activateProjectMemoryExtension(
 
       if (subcommand === "review") {
         await ctx.waitForIdle();
+        const [reviewAction, jobId, ...extra] = rest;
+        if (reviewAction === "retry" && extra.length === 0) {
+          await retryExternalReview(ctx, jobId);
+          return;
+        }
+        if (reviewAction !== undefined) {
+          ctx.ui.notify("Usage: /memory review [retry [job-id]]", "warning");
+          return;
+        }
         await runReview(ctx, true);
         return;
       }
@@ -1368,7 +1617,7 @@ export function activateProjectMemoryExtension(
         return;
       }
 
-      ctx.ui.notify("Usage: /memory status|show|branches|fork|use|review|undo", "warning");
+      ctx.ui.notify("Usage: /memory status|show|branches|fork|use|review [retry]|undo", "warning");
     },
   });
 
@@ -1428,27 +1677,49 @@ export function activateProjectMemoryExtension(
     }
   }
 
-  pi.registerEntryRenderer<{ jobId?: string; mode?: string; status?: string }>(MEMORY_REVIEW_JOB_ENTRY, (entry, _options, theme) => {
+  pi.registerEntryRenderer<{ jobId?: string; mode?: string; status?: string }>(MEMORY_REVIEW_JOB_ENTRY, (entry, { expanded }, theme) => {
+    if (!expanded) return undefined;
     const jobId = typeof entry.data?.jobId === "string" ? entry.data.jobId : "unknown";
     const mode = entry.data?.mode === "external" ? "external" : "shadow";
     const status = typeof entry.data?.status === "string" ? entry.data.status : "queued";
-    return new Text(
-      theme.fg("dim", `No Forgetti review ${status} · ${mode} · ${jobId.slice(0, 18)}…`),
-      1,
-      0,
-    );
+    return new Text(theme.fg("dim", `No Forgetti review ${status} ${mode} ${jobId}`), 1, 0);
   });
 
-  pi.registerEntryRenderer<{ branch: string; changes: MemoryReviewChange[] }>(MEMORY_REVIEW_ENTRY, (entry, { expanded }, theme) => {
+  pi.registerEntryRenderer<{
+    branch: string;
+    status?: string;
+    changes: MemoryReviewChange[];
+    messages?: string[];
+    requestedBy?: ReviewRequestOrigin;
+  }>(MEMORY_REVIEW_ENTRY, (entry, { expanded }, theme) => {
     const changes = Array.isArray(entry.data?.changes)
       ? entry.data.changes.filter((change): change is MemoryReviewChange =>
           Boolean(change) && typeof change.text === "string" && Object.hasOwn(REVIEW_GLYPHS, change.kind))
       : [];
-    if (changes.length === 0) return undefined;
     const branchSuffix = typeof entry.data?.branch === "string" && entry.data.branch !== MAIN_MEMORY
       ? ` (${entry.data.branch})`
       : "";
     const rail = theme.fg("dim", "│ ");
+    if (changes.length === 0) {
+      const status = entry.data?.status;
+      const label = status === "stale"
+        ? "memory review stale"
+        : status === "rejected"
+          ? "memory review rejected"
+          : status === "failed"
+            ? "memory review stopped"
+            : undefined;
+      if (!label) return undefined;
+      const messages = Array.isArray(entry.data?.messages)
+        ? entry.data.messages.filter((message): message is string => typeof message === "string")
+        : [];
+      const lines = [theme.fg("dim", `╭ no-forgetti ${label}${branchSuffix}  /memory review retry`)];
+      for (const message of messages.slice(0, expanded ? 4 : 1)) {
+        const text = expanded ? message.trim() : clipReviewLine(message);
+        for (const line of text.split("\n")) lines.push(`${rail}${theme.fg("muted", line)}`);
+      }
+      return new Text(lines.join("\n"), 1, 0);
+    }
     const lines = [theme.fg("dim", `╭ no-forgetti memory updated${branchSuffix}  /memory undo`)];
     for (const change of changes) {
       const glyph = theme.fg(
@@ -1567,8 +1838,7 @@ export function activateProjectMemoryExtension(
   });
 
   pi.on("session_shutdown", async () => {
-    if (serviceMonitorTimer) clearInterval(serviceMonitorTimer);
-    serviceMonitorTimer = undefined;
+    await stopBackgroundMonitoring();
     observedNativeSkillUses.clear();
     pendingUserInputs = [];
     await settleLifecycleWork();

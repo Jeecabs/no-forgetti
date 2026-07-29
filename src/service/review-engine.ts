@@ -1,5 +1,5 @@
 import { reviewCapacityViolation } from "../memory-policy.ts";
-import { buildReviewPrompt, parseReviewPlan, projectedReviewChars } from "../review.ts";
+import { buildReviewPrompt, parseReviewPlan, projectedReviewChars, validateReviewPlan } from "../review.ts";
 import { DEFAULT_MAX_CHARS, type ReviewPlan } from "../types.ts";
 import { createReviewOutcome, parseReviewJob, type ReviewJob } from "./protocol.ts";
 import type { ModelRunHooks, ModelRunner, ReviewModelProvenance } from "./model-runner.ts";
@@ -99,6 +99,7 @@ export class ReviewEngine {
     }
 
     try {
+      plan = validateReviewPlan(plan);
       const beforeChars = checked.branch.entries.reduce((total, entry) => total + entry.text.length, 0);
       const afterChars = projectedReviewChars(checked.branch, plan.operations);
       const capacityViolation = reviewCapacityViolation({ beforeChars, afterChars, maxChars: checked.maxChars });

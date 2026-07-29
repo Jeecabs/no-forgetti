@@ -16,6 +16,7 @@ The monitor reports:
 - daily calls, tokens, and cost
 - budget exhaustion and offline warnings
 - active project branch and memory capacity
+- current-project review phase, attempt, and job ID
 
 An external worker publishes a heartbeat every 10 seconds. A newly started worker may take one monitor tick to appear.
 
@@ -24,25 +25,37 @@ An external worker publishes a heartbeat every 10 seconds. A newly started worke
 A healthy job usually moves through:
 
 ```text
-queued → running → completed
+queued → reviewing → applying → completed
 ```
 
-A transient failure can return it for a bounded retry. A terminal failure moves it to dead-letter. A completed provider call can still produce:
+A transient failure returns the job for a bounded retry. The project widget shows this retry without adding transcript entries.
 
-- `applied`: one or more validated memory operations committed;
-- `unchanged`: the reviewer proposed no change;
-- `stale`: current memory no longer matched the captured digest; or
-- `rejected`: validation or admission refused the proposal.
+A completed provider call can produce these admission results:
 
-`unchanged`, `stale`, and a safe rejection are not worker crashes. In particular, stale admission is how foreground writes win over delayed review.
+- `applied`: The store committed one or more validated memory operations.
+- `noop`: The reviewer made no durable change.
+- `stale`: Current memory did not match the captured digest.
+- `rejected`: Validation or admission refused the proposal.
+
+A terminal worker failure moves the job to dead-letter. Pi writes a durable failure card with `/memory review retry`. This command uses retained evidence and current memory to create a new job generation.
+
+A no-op, a stale result, and a safe rejection are not worker crashes. A stale result lets a foreground write win over delayed review.
 
 ## Updates and configuration changes
 
 After updating No Forgetti:
 
-1. reload or restart Pi so the extension uses the new code;
-2. restart the external worker; and
-3. open `/memory status` to confirm the heartbeat is compatible.
+1. Stop the external worker.
+2. Install one pinned global No Forgetti release.
+3. Start the external worker.
+4. Run `/reload` in each live Pi process.
+5. Run the doctor command.
+
+```bash
+"$NODE_BIN" "$WORKER_BIN" doctor --agent-dir "$AGENT_DIR" --projects-root /path/to/projects
+```
+
+The doctor fails if a live Pi process or worker uses another release. It also fails if a scanned project has a local No Forgetti override.
 
 The heartbeat carries the worker’s memory-policy version and capacity. When `/memory status` shows `restart required`, new evidence remains unqueued and its cursor does not advance. Already queued candidates remain durable until a compatible worker starts.
 
@@ -128,7 +141,15 @@ Do not start several duplicate workers to “unstick” a queue. One healthy wor
 
 ### A review finished but memory did not change
 
-The outcome may be `unchanged`, stale, rejected, or a valid partial no-op. External UI feedback is based on the actual post-validation content diff, not the model’s proposed operations, so no applied diff means Pi should not display an applied-change card.
+The outcome may be a no-op, stale, rejected, or a valid partial no-op. External UI feedback uses the actual post-validation content diff. Pi does not show an applied-change card when there is no applied diff.
+
+If Pi shows a durable failure card, run:
+
+```text
+/memory review retry
+```
+
+Use `/memory review retry <job-id>` when more than one failed review is present. Retained evidence expires with `evidenceTtlHours`.
 
 ## Disable external mode
 
@@ -151,6 +172,7 @@ At minimum, external state can include:
 - `review-spool/`
 - `review-budget.json*`
 - `review-ledger.sqlite*`
+- `runtimes/`
 - per-project `service/` records
 - active review-admission intents
 

@@ -2,7 +2,7 @@ export const STORE_VERSION = 1;
 export const MAIN_MEMORY = "main";
 export const DEFAULT_MAX_CHARS = 6_000;
 /** Bump whenever worker admission semantics or memory capacity policy changes. */
-export const MEMORY_POLICY_VERSION = 1;
+export const MEMORY_POLICY_VERSION = 2;
 export const MEMORY_REFINEMENT_TARGET_RATIO = 0.75;
 /** Preferred post-maintenance size; not a destructive admission boundary. */
 export const MEMORY_MAINTENANCE_GOAL_RATIO = 2 / 3;
