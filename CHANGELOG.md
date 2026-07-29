@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 - 2026-07-29
+
+- Stop treating retained feedback interest without an authoritative spool job as queued review work. This prevents an old terminal review from leaving a permanent spinner after its outcome expires.
+
 ## 0.4.1 - 2026-07-29
 
 - Install the Pi runtime dependency in managed Git checkouts so the standalone external-review worker starts after a clean `pi install`.

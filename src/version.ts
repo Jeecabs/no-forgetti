@@ -1,2 +1,2 @@
 /** Stamped into durable provenance and runtime fleet status. */
-export const EXTENSION_VERSION = "0.4.1";
+export const EXTENSION_VERSION = "0.4.2";

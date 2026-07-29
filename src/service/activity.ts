@@ -110,11 +110,12 @@ export class ProjectReviewActivityReader {
     const spool = await this.spool.inspect(pending.map((record) => record.jobId));
     const spoolByJob = new Map(spool.map((record) => [record.jobId, record]));
     const paused = pauseReason(monitor);
-    const jobs = pending.map((record) => projectActivity(
-      record,
-      spoolByJob.get(record.jobId) ?? { jobId: record.jobId, state: "missing" },
-      paused,
-    ));
+    const jobs = pending.flatMap((record) => {
+      const activity = spoolByJob.get(record.jobId);
+      // Feedback interest is not queue authority. Missing jobs are retained
+      // delivery orphans, not active work, and must never spin indefinitely.
+      return !activity || activity.state === "missing" ? [] : [projectActivity(record, activity, paused)];
+    });
     jobs.sort((left, right) => PHASE_PRIORITY[left.phase] - PHASE_PRIORITY[right.phase]
       || (left.queuedAt ?? "").localeCompare(right.queuedAt ?? "")
       || left.jobId.localeCompare(right.jobId));

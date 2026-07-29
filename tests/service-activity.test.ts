@@ -75,19 +75,22 @@ test("projects project-local review progress from pending interest and authorita
   });
   const reader = new ProjectReviewActivityReader({ inbox, spool, now: () => clock });
 
+  // Feedback interest is not queue authority. A missing spool job can be a
+  // retained delivery orphan after its terminal outcome ages out.
   assert.deepEqual(await reader.snapshot(monitor()), {
     observedAt: now.toISOString(),
-    jobs: [{
-      jobId: reviewJob.id,
-      branchName: "main",
-      requestedBy: "manual",
-      queuedAt: now.toISOString(),
-      phase: "queued",
-      attempt: 1,
-    }],
+    jobs: [],
   });
 
   await spool.enqueue(reviewJob);
+  assert.deepEqual((await reader.snapshot(monitor())).jobs.at(0), {
+    jobId: reviewJob.id,
+    branchName: "main",
+    requestedBy: "manual",
+    queuedAt: now.toISOString(),
+    phase: "queued",
+    attempt: 1,
+  });
   const claim = await spool.claim({ workerId: "activity-worker", leaseMs: 60_000 });
   assert.ok(claim);
   assert.equal((await reader.snapshot(monitor())).jobs.at(0)?.phase, "reviewing");
