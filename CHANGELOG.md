@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 - 2026-07-29
+
+- Install the Pi runtime dependency in managed Git checkouts so the standalone external-review worker starts after a clean `pi install`.
+
 ## 0.4.0 - 2026-07-29
 
 - Apply reviewer project-skill patches automatically with a one-line receipt, and replace the approval queue for them with `/project-skills undo <name>`, which shows a rendered diff and refuses once the skill has changed again. Archives still require explicit approval.

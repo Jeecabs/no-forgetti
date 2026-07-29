@@ -1,6 +1,6 @@
 {
   "name": "no-forgetti",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "license": "MIT",
   "author": "Lachlan Jacobs",
@@ -56,6 +56,9 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.82.1"
+  },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
@@ -66,7 +69,6 @@
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.82.1",
     "@earendil-works/pi-ai": "^0.82.1",
-    "@earendil-works/pi-coding-agent": "^0.82.1",
     "@earendil-works/pi-tui": "^0.82.1",
     "@types/node": "^24.3.0",
     "typebox": "1.1.38",
