@@ -10,6 +10,7 @@ import {
   encodeReviewOutcome,
   MAX_REVIEW_JOB_BYTES,
   MAX_REVIEW_TRANSCRIPT_CHARS,
+  replayReviewJob,
   reviewSessionKey,
 } from "../src/service/protocol.ts";
 import type { MemoryBranch } from "../src/types.ts";
@@ -84,6 +85,74 @@ test("job id stays stable while digest detects changed contents for same coverag
   assert.notEqual(changed.digest, first.digest);
 });
 
+test("new jobs enforce canonical entry size while legacy v1 job snapshots remain readable", () => {
+  const legacyJob = {
+    version: 1 as const,
+    kind: "memory-review" as const,
+    projectKey: "a".repeat(24),
+    sessionKey: "3fa70395d4ca9249d2fcd6967c0bf95d",
+    throughEntryId: "message-legacy",
+    transcript: "USER: legacy",
+    branch: {
+      version: 1 as const,
+      name: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z",
+      entries: [{
+        id: "entry-1",
+        text: "x".repeat(801),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        importance: "normal" as const,
+      }],
+    },
+    baseBranchDigest: "e126a87cdbc1fb54d07a69740a9d233fa5c3aa705ee0624c4a60cd4a5e411ff9",
+    maxChars: 4_000,
+    id: "review_2a049bc8c735c700eebbc88d853a1ced74871114",
+    digest: "82822a29517a07ad7f7abe8bef599bbadf4a4fda6e7e3200a0f26f98f88a586f",
+  };
+
+  assert.deepEqual(decodeReviewJob(JSON.stringify(legacyJob)), legacyJob);
+  assert.throws(() => createReviewJob({
+    projectKey: legacyJob.projectKey,
+    sessionId: "legacy-session",
+    throughEntryId: legacyJob.throughEntryId,
+    transcript: legacyJob.transcript,
+    branch: legacyJob.branch,
+    maxChars: legacyJob.maxChars,
+  }), /review memory text/u);
+});
+
+test("replay creates a distinct generation while preserving durable evidence identity", () => {
+  const original = job();
+  const currentBranch: MemoryBranch = {
+    ...branch,
+    updatedAt: "2026-01-04T00:00:00.000Z",
+    entries: [],
+  };
+  const first = replayReviewJob(original, {
+    branch: currentBranch,
+    maxChars: 6_000,
+  });
+  const second = replayReviewJob(first, {
+    branch: currentBranch,
+    maxChars: 6_000,
+  });
+
+  assert.equal(first.generation, 1);
+  assert.equal(second.generation, 2);
+  assert.notEqual(first.id, original.id);
+  assert.notEqual(second.id, first.id);
+  assert.equal(first.sessionKey, original.sessionKey);
+  assert.equal(first.throughEntryId, original.throughEntryId);
+  assert.equal(first.transcript, original.transcript);
+  assert.deepEqual(decodeReviewJob(encodeReviewJob(first)), first);
+  assert.throws(() => replayReviewJob(first, {
+    branch: { ...currentBranch, name: "other" },
+    maxChars: 6_000,
+  }), /cannot change its memory branch/u);
+});
+
 test("review outcomes round-trip through strict bounded schema", () => {
   const reviewJob = job();
   const outcome = createReviewOutcome(reviewJob, {
@@ -100,6 +169,28 @@ test("review outcomes round-trip through strict bounded schema", () => {
     error: { code: "provider_error", message: "API_KEY=another-long-secret-value", retryable: true },
   });
   assert.match(failed.status === "failed" ? failed.error.message : "", /\[REDACTED\]/u);
+
+  assert.throws(() => createReviewOutcome(reviewJob, {
+    status: "completed",
+    completedAt: "2026-01-03T00:00:00.000Z",
+    operations: [{ action: "add", content: "x".repeat(801), importance: "normal" }],
+    provenance: provenance(),
+  }), /review operation content/u);
+});
+
+test("decodes legacy v1 outcomes whose operations predate the 800-character write limit", () => {
+  const reviewJob = job();
+  const legacyOutcome = {
+    version: 1,
+    jobId: reviewJob.id,
+    jobDigest: reviewJob.digest,
+    status: "completed",
+    completedAt: "2026-01-03T00:00:00.000Z",
+    operations: [{ action: "add", content: "x".repeat(1_403), importance: "normal" }],
+    provenance: provenance(),
+  };
+
+  assert.deepEqual(decodeReviewOutcome(JSON.stringify(legacyOutcome)), legacyOutcome);
 });
 
 test("rejects malformed, tampered, unknown-field, and oversized envelopes before use", () => {

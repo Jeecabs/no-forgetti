@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 
 import { exactKeys, isRecord } from "../state-validation.ts";
 import { memoryBranchDigest } from "../store.ts";
-import type { MemoryBranch, MemoryImportance, MemoryWriteOrigin, ReviewOperation } from "../types.ts";
+import {
+  DEFAULT_MAX_ENTRY_CHARS,
+  type MemoryBranch,
+  type MemoryImportance,
+  type MemoryWriteOrigin,
+  type ReviewOperation,
+} from "../types.ts";
 
 export const REVIEW_PROTOCOL_VERSION = 1 as const;
 export const MAX_REVIEW_JOB_BYTES = 128 * 1024;
@@ -10,6 +16,7 @@ export const MAX_REVIEW_OUTCOME_BYTES = 16 * 1024;
 export const MAX_REVIEW_TRANSCRIPT_CHARS = 32_000;
 export const MAX_REVIEW_MEMORY_ENTRIES = 512;
 export const MAX_REVIEW_MEMORY_CHARS = 64_000;
+const MAX_REVIEW_GENERATION = 10_000;
 
 const PROJECT_KEY = /^[0-9a-f]{16,64}$/u;
 const SESSION_KEY = /^[0-9a-f]{32}$/u;
@@ -19,6 +26,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const BRANCH_NAME = /^[a-z][a-z0-9_-]{0,63}$/u;
 const ERROR_CODE = /^[a-z][a-z0-9_-]{0,63}$/u;
 const FORBIDDEN_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/gu;
+const LEGACY_MAX_REVIEW_TEXT_CHARS = 4_000;
 const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/giu, "[REDACTED PRIVATE KEY]"],
   [/\b(?:sk|ghp|github_pat|xox[baprs])-[-A-Za-z0-9_]{12,}\b/gu, "[REDACTED TOKEN]"],
@@ -60,6 +68,7 @@ export interface ReviewJob {
   branch: ReviewMemoryBranch;
   baseBranchDigest: string;
   maxChars: number;
+  generation?: number;
 }
 
 export interface ReviewJobRequest {
@@ -67,6 +76,12 @@ export interface ReviewJobRequest {
   sessionId: string;
   throughEntryId: string;
   transcript: string;
+  branch: MemoryBranch | ReviewMemoryBranch;
+  baseBranchDigest?: string;
+  maxChars: number;
+}
+
+export interface ReplayReviewJobRequest {
   branch: MemoryBranch | ReviewMemoryBranch;
   baseBranchDigest?: string;
   maxChars: number;
@@ -206,7 +221,11 @@ function sanitizeEntry(value: unknown, sanitize: boolean): ReviewMemoryEntry {
   exactKeys(value, ["id", "text", "createdAt", "updatedAt", "importance"], [
     ...(sanitize ? ["sourceSessionId"] : []), "createdBy", "updatedBy", "importanceAssessedAt",
   ]);
-  const originalText = checkedString(value.text, "review memory text", 4_000);
+  const originalText = checkedString(
+    value.text,
+    "review memory text",
+    sanitize ? DEFAULT_MAX_ENTRY_CHARS : LEGACY_MAX_REVIEW_TEXT_CHARS,
+  );
   const text = sanitizeReviewText(originalText);
   if (!sanitize && text !== originalText) throw new Error("Review memory text is not sanitized.");
   const entry: ReviewMemoryEntry = {
@@ -248,7 +267,9 @@ function sanitizeBranch(value: unknown, sanitize: boolean): ReviewMemoryBranch {
   return branch;
 }
 
-function jobIdentity(job: Pick<ReviewJob, "projectKey" | "sessionKey" | "throughEntryId" | "branch">): string {
+function jobIdentity(
+  job: Pick<ReviewJob, "projectKey" | "sessionKey" | "throughEntryId" | "branch" | "generation">,
+): string {
   return `review_${sha256(canonicalize({
     version: REVIEW_PROTOCOL_VERSION,
     kind: "memory-review",
@@ -256,6 +277,7 @@ function jobIdentity(job: Pick<ReviewJob, "projectKey" | "sessionKey" | "through
     sessionKey: job.sessionKey,
     branchName: job.branch.name,
     throughEntryId: job.throughEntryId,
+    ...(job.generation === undefined ? {} : { generation: job.generation }),
   })).slice(0, 40)}`;
 }
 
@@ -294,11 +316,41 @@ export function createReviewJob(request: ReviewJobRequest): ReviewJob {
   return job;
 }
 
+export function replayReviewJob(value: ReviewJob, request: ReplayReviewJobRequest): ReviewJob {
+  const source = parseReviewJob(value);
+  const branch = sanitizeBranch(request.branch, true);
+  if (branch.name !== source.branch.name) throw new Error("Review replay cannot change its memory branch.");
+  const baseBranchDigest = request.baseBranchDigest === undefined
+    ? memoryBranchDigest(request.branch as MemoryBranch)
+    : checkedString(request.baseBranchDigest, "review base branch digest", 64, DIGEST);
+  const maxChars = checkedPositiveInteger(request.maxChars, "review memory capacity", MAX_REVIEW_MEMORY_CHARS);
+  const generation = checkedPositiveInteger(
+    (source.generation ?? 0) + 1,
+    "review generation",
+    MAX_REVIEW_GENERATION,
+  );
+  const core: Omit<ReviewJob, "id" | "digest"> = {
+    version: REVIEW_PROTOCOL_VERSION,
+    kind: "memory-review",
+    projectKey: source.projectKey,
+    sessionKey: source.sessionKey,
+    throughEntryId: source.throughEntryId,
+    transcript: source.transcript,
+    branch,
+    baseBranchDigest,
+    maxChars,
+    generation,
+  };
+  const replay: ReviewJob = { ...core, id: jobIdentity(core), digest: jobDigest(core) };
+  encodeReviewJob(replay);
+  return replay;
+}
+
 export function parseReviewJob(value: unknown): ReviewJob {
   if (!isRecord(value)) throw new Error("Invalid review job envelope.");
   exactKeys(value, [
     "version", "kind", "id", "digest", "projectKey", "sessionKey", "throughEntryId", "transcript", "branch", "baseBranchDigest", "maxChars",
-  ]);
+  ], ["generation"]);
   if (value.version !== REVIEW_PROTOCOL_VERSION || value.kind !== "memory-review") throw new Error("Unsupported review job version or kind.");
   const transcript = checkedString(value.transcript, "review transcript", MAX_REVIEW_TRANSCRIPT_CHARS);
   if (sanitizeReviewText(transcript) !== transcript) throw new Error("Review transcript is not sanitized.");
@@ -312,6 +364,9 @@ export function parseReviewJob(value: unknown): ReviewJob {
     branch: sanitizeBranch(value.branch, false),
     baseBranchDigest: checkedString(value.baseBranchDigest, "review base branch digest", 64, DIGEST),
     maxChars: checkedPositiveInteger(value.maxChars, "review memory capacity", MAX_REVIEW_MEMORY_CHARS),
+    ...(value.generation === undefined ? {} : {
+      generation: checkedPositiveInteger(value.generation, "review generation", MAX_REVIEW_GENERATION),
+    }),
   };
   const id = checkedString(value.id, "review job id", 47, JOB_ID);
   const digest = checkedString(value.digest, "review job digest", 64, DIGEST);
@@ -335,18 +390,18 @@ function requiredOperationString(value: Record<string, unknown>, key: string, ma
   return checkedString(value[key], `review operation ${key}`, maxChars, key === "entryId" ? SAFE_ID : undefined);
 }
 
-function parseOperation(value: unknown): ReviewOperation {
+function parseOperation(value: unknown, maxContentChars = LEGACY_MAX_REVIEW_TEXT_CHARS): ReviewOperation {
   if (!isRecord(value) || typeof value.action !== "string") throw new Error("Invalid review operation.");
   switch (value.action) {
     case "add":
       exactKeys(value, ["action", "content", "importance"]);
-      return { action: "add", content: sanitizeOperationText(value.content), importance: parseImportance(value.importance) };
+      return { action: "add", content: sanitizeOperationText(value.content, maxContentChars), importance: parseImportance(value.importance) };
     case "replace":
       exactKeys(value, ["action", "entryId", "content", "importance"]);
       return {
         action: "replace",
         entryId: requiredOperationString(value, "entryId", 256),
-        content: sanitizeOperationText(value.content),
+        content: sanitizeOperationText(value.content, maxContentChars),
         importance: parseImportance(value.importance),
       };
     case "remove":
@@ -357,7 +412,12 @@ function parseOperation(value: unknown): ReviewOperation {
       if (!Array.isArray(value.entryIds) || value.entryIds.length < 2 || value.entryIds.length > 16) throw new Error("Invalid review merge entry ids.");
       const entryIds = value.entryIds.map((entryId) => checkedString(entryId, "review merge entry id", 256, SAFE_ID));
       if (new Set(entryIds).size !== entryIds.length) throw new Error("Duplicate review merge entry id.");
-      return { action: "merge", entryIds, content: sanitizeOperationText(value.content), importance: parseImportance(value.importance) };
+      return {
+        action: "merge",
+        entryIds,
+        content: sanitizeOperationText(value.content, maxContentChars),
+        importance: parseImportance(value.importance),
+      };
     }
     case "assess":
       exactKeys(value, ["action", "entryId", "importance"]);
@@ -371,8 +431,8 @@ function parseOperation(value: unknown): ReviewOperation {
   }
 }
 
-function sanitizeOperationText(value: unknown): string {
-  const text = checkedString(value, "review operation content", 4_000);
+function sanitizeOperationText(value: unknown, maxChars: number): string {
+  const text = checkedString(value, "review operation content", maxChars);
   if (sanitizeReviewText(text) !== text) throw new Error("Review operation content is not sanitized.");
   return text;
 }
@@ -447,7 +507,7 @@ export function createReviewOutcome(job: Pick<ReviewJob, "id" | "digest">, resul
       jobDigest: job.digest,
       status: "completed",
       completedAt,
-      operations: result.operations,
+      operations: result.operations.map((operation) => parseOperation(operation, DEFAULT_MAX_ENTRY_CHARS)),
       provenance: result.provenance,
     }
     : {
@@ -479,7 +539,12 @@ export function parseReviewOutcome(value: unknown): ReviewOutcome {
     if (!Array.isArray(value.operations) || value.operations.length > 4) throw new Error("Invalid review outcome operations.");
     const provenance = parseProvenance(value.provenance);
     if (provenance.completedAt !== common.completedAt) throw new Error("Review outcome and model completion timestamps differ.");
-    outcome = { ...common, status: "completed", operations: value.operations.map(parseOperation), provenance };
+    outcome = {
+      ...common,
+      status: "completed",
+      operations: value.operations.map((operation) => parseOperation(operation)),
+      provenance,
+    };
   } else if (value.status === "failed") {
     exactKeys(value, ["version", "jobId", "jobDigest", "status", "completedAt", "error"], ["provenance"]);
     const provenance = value.provenance === undefined ? undefined : parseProvenance(value.provenance);

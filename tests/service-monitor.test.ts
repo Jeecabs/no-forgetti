@@ -7,6 +7,7 @@ import test from "node:test";
 import { FileReviewAttemptAccounting } from "../src/service/accounting.ts";
 import { readReviewServiceMonitor, ReviewWorkerStatusReporter } from "../src/service/monitor.ts";
 import { formatReviewServiceMonitorText } from "../src/service/tui.ts";
+import { MEMORY_POLICY_VERSION } from "../src/types.ts";
 
 async function fixture() {
   const agentDir = await mkdtemp(join(tmpdir(), "no-forgetti-monitor-"));
@@ -54,7 +55,7 @@ test("service monitor exposes queue, worker heartbeat, and exhausted dimensions"
   assert.equal(monitor.workerFresh, true);
   assert.equal(monitor.workerCompatible, true);
   assert.equal(monitor.worker?.state, "working");
-  assert.equal(monitor.worker?.memoryPolicyVersion, 1);
+  assert.equal(monitor.worker?.memoryPolicyVersion, MEMORY_POLICY_VERSION);
   assert.equal(monitor.worker?.maxMemoryChars, 6_000);
   assert.equal(monitor.worker?.attempt, 2);
   assert.deepEqual(monitor.spool, { queued: 1, running: 0, outcomes: 1, deadLetter: 0 });

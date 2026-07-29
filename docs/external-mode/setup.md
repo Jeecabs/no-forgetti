@@ -154,7 +154,7 @@ An empty run does **not** call the provider. To test the complete path:
 4. Run the one-off command again.
 5. Reopen `/memory status` and inspect the resulting completed, retry, or dead-letter state.
 
-A valid review may make no memory change; `unchanged` is a successful outcome.
+A valid review can make no memory change. A `noop` result is successful.
 
 ## 8. Register the long-running worker
 
@@ -164,3 +164,11 @@ Once the one-off run succeeds, continue with:
 - [Run on Linux](./linux.md)
 
 Register exactly one normal worker unless you are deliberately testing contention behavior. Use a stable `--worker-id` for each registered process.
+
+After the worker starts, run the machine check:
+
+```bash
+"$NODE_BIN" "$WORKER_BIN" doctor --agent-dir "$AGENT_DIR" --projects-root /path/to/projects
+```
+
+The command exits with status 1 until each live Pi process reloads the installed release.

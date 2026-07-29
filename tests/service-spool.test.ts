@@ -116,6 +116,52 @@ test("expired claim recovery requeues with a new fenced attempt", async () => {
   assert.equal(permission((await stat(join(spool.outcomesDir, `${job.id}.json`))).mode), 0o600);
 });
 
+test("inspect projects one job through queued, running, retry, and terminal states", async () => {
+  let time = Date.parse("2026-02-01T00:00:00.000Z");
+  const spool = await temporarySpool({ now: () => new Date(time) });
+  const job = reviewJob();
+
+  assert.deepEqual(await spool.inspect([job.id]), [{ jobId: job.id, state: "missing" }]);
+  await spool.enqueue(job);
+  assert.deepEqual(await spool.inspect([job.id]), [{ jobId: job.id, state: "queued", attempt: 1 }]);
+
+  const first = await spool.claim({ workerId: "worker-1", leaseMs: 60_000 });
+  assert.ok(first);
+  assert.deepEqual(await spool.inspect([job.id]), [{
+    jobId: job.id,
+    state: "running",
+    attempt: 1,
+    claimedAt: "2026-02-01T00:00:00.000Z",
+  }]);
+
+  await spool.defer(first, { delayMs: 5_000 });
+  assert.deepEqual(await spool.inspect([job.id]), [{
+    jobId: job.id,
+    state: "queued",
+    attempt: 2,
+    availableAt: "2026-02-01T00:00:05.000Z",
+  }]);
+
+  time += 5_000;
+  const second = await spool.claim({ workerId: "worker-2", leaseMs: 60_000 });
+  assert.ok(second);
+  const completedAt = "2026-02-01T00:01:00.000Z";
+  const outcome = createReviewOutcome(job, {
+    status: "completed",
+    completedAt,
+    operations: [],
+    provenance: provenance(completedAt),
+  });
+  await spool.finish(second, outcome);
+  assert.deepEqual(await spool.inspect([job.id]), [{
+    jobId: job.id,
+    state: "completed",
+    attempt: 2,
+    completedAt,
+    outcomeStatus: "completed",
+  }]);
+});
+
 test("defer releases a live claim for an immediate fenced retry", async () => {
   const spool = await temporarySpool();
   const job = reviewJob();
@@ -172,6 +218,33 @@ test("recovery completes a crashed delayed defer without losing timing or fencin
   assert.ok(second);
   assert.equal(second.attempt, 2);
   assert.notEqual(second.leaseToken, first.leaseToken);
+});
+
+test("recovery preserves legacy v1 outcomes with oversized rejected operations", async () => {
+  const spool = await temporarySpool();
+  await spool.initialize();
+  const job = reviewJob();
+  const completedAt = "2026-02-01T00:01:00.000Z";
+  const legacyOutcome = {
+    version: 1 as const,
+    jobId: job.id,
+    jobDigest: job.digest,
+    status: "completed" as const,
+    completedAt,
+    operations: [{ action: "add" as const, content: "x".repeat(1_403), importance: "normal" as const }],
+    provenance: provenance(completedAt),
+  };
+  await writeFile(join(spool.outcomesDir, `${job.id}.json`), JSON.stringify({
+    version: 1,
+    attempt: 1,
+    workerId: "legacy-worker",
+    leaseToken: "1".repeat(32),
+    outcome: legacyOutcome,
+  }), { encoding: "utf8", mode: 0o600 });
+
+  assert.deepEqual(await spool.recover(), { requeued: 0, quarantined: 0, cleaned: 0 });
+  assert.deepEqual(await spool.getOutcome(job.id), legacyOutcome);
+  assert.deepEqual(await readdir(spool.deadLetterDir), []);
 });
 
 test("recovery dead-letters malformed and oversized spool records", async () => {

@@ -32,7 +32,9 @@ Review service
 
 The extension remains the Pi lifecycle adapter. The service never edits Pi JSONL. Existing memory JSON remains canonical during the mixed-version release. SQLite is observational shadow state, not authority for queue ownership, provider attempts, budgets, decisions, or memory.
 
-External UI feedback uses a project-local durable mailbox. The extension registers accepted external jobs before returning to Pi. Successful admission publishes a private, bounded event containing the actual post-validation content diff before its compact receipt. An open Pi consumes ready feedback during service polling; otherwise the next project session consumes it at startup. Consumption appends the same custom transcript entry used by embedded review, then removes the pending and ready files. The card shows `+` added content, `~` replacement content with its prior value when expanded, and `-` removed content. Proposed operations never drive the card because admission may reject, stale, or partially no-op them.
+External UI feedback uses a project-local durable mailbox. The extension registers accepted external jobs before it returns to Pi. Successful admission publishes a private, bounded event with the actual post-validation content diff. The worker repairs missing terminal-failure events from durable outcomes and retained job evidence.
+
+The extension derives live progress from pending mailbox interest and authoritative spool state. It does not persist a second progress event stream. An open Pi consumes terminal feedback during service polling. Otherwise, the next project session consumes it at startup. The transcript card uses the same custom entry as embedded review. A failed job retains its sanitized evidence for a new-generation replay through `/memory review retry`.
 
 ## Authority modes and rollout
 
@@ -119,7 +121,9 @@ Initial authoritative review preserves the existing evidence boundary:
 - no user bash
 - no auth, provider headers, or diagnostics
 
-Evidence and durable checkpoints use private files and directories. Evidence expires after configured terminal-job TTL. Logs contain IDs, sizes, digests, outcomes, usage, and cost, never evidence or credentials. Result/decision checkpoints and admission intents embed sanitized jobs and proposals, so they inherit the same sensitivity and retention obligations.
+Evidence and durable checkpoints use private files and directories. Evidence expires after the configured terminal-job TTL. Logs contain IDs, sizes, digests, outcomes, usage, and cost. They never contain evidence or credentials. Result and decision checkpoints embed sanitized jobs and proposals, so they have the same retention requirements.
+
+Private runtime heartbeat files contain the release, memory-policy version, process ID, and project root. The doctor compares them with live Pi processes and the worker. These files do not contain review evidence.
 
 ## Append-graph trajectory track
 

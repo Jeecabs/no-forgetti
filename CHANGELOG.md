@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-07-29
 
 - Apply reviewer project-skill patches automatically with a one-line receipt, and replace the approval queue for them with `/project-skills undo <name>`, which shows a rendered diff and refuses once the skill has changed again. Archives still require explicit approval.
 - Drop the confirmation step from `/project-skills edit`; the editor saves straight through and the notify names the undo command.
 - Address pending proposals by skill name (`/project-skills approve verification`); proposal ids still resolve, and argument completions are now fuzzy-matched rather than prefix-matched.
 - Set a 6,000-character hard limit, a 4,500-character review target, and a lossless 4,000-character maintenance goal.
 - Give low-headroom reviewers an exact budget. Reject invalid proposals before admission so bounded retries retain their evidence.
+- Enforce the 800-character entry limit in reviewer guidance and new proposal construction before admission. Keep legacy protocol-v1 outcomes and decisions readable during recovery and retention.
+- Show project-local external review progress for queued, reviewing, retrying, paused, and applying jobs without adding progress noise to the transcript.
+- Render durable external failure cards, preserve manual no-op feedback, and add `/memory review retry` with retained-evidence job generations.
+- Add `no-forgetti doctor` and runtime heartbeats to detect unpinned installs, project overrides, stale Pi processes, mixed releases, and incompatible workers.
 - Fence external review on worker memory-policy provenance. Preserve unqueued evidence when a worker needs restart.
 - Honor stricter capacity from older producers during admission.
 - Safely no-op capacity-violating review proposals instead of surfacing a repeating failure.

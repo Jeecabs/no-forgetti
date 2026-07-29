@@ -1,9 +1,13 @@
 import { readFile, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+import { formatDoctorReport, inspectNoForgettiInstallation, type DoctorOptions, type DoctorReport } from "../doctor.ts";
+import { RuntimeStatusReporter } from "../runtime-status.ts";
+import { MEMORY_POLICY_VERSION } from "../types.ts";
+import { EXTENSION_VERSION } from "../version.ts";
 import { FileReviewAttemptAccounting } from "./accounting.ts";
 import { FileMemoryProposalCommitter } from "./admission.ts";
 import { loadServiceConfig, type ReviewerProfile } from "./config.ts";
@@ -14,6 +18,7 @@ import {
   type ReviewDrainResult,
 } from "./daemon.ts";
 import { ReviewDecisionStore } from "./decisions.ts";
+import { repairFailedReviewFeedback } from "./feedback-repair.ts";
 import { PiModelRunner } from "./model-runner.ts";
 import { ReviewWorkerStatusReporter } from "./monitor.ts";
 import { ReviewEngine } from "./review-engine.ts";
@@ -31,6 +36,17 @@ Options:
   -h, --help             Show this help.
 `;
 
+export const DOCTOR_CLI_USAGE = `Usage: no-forgetti doctor [options]
+
+Options:
+  --json                  Emit a machine-readable report.
+  --agent-dir <path>      Pi agent directory (default: PI_CODING_AGENT_DIR or ~/.pi/agent).
+  --projects-root <path>  Scan Git roots below this directory for local overrides.
+  -h, --help              Show this help.
+`;
+
+export const CLI_USAGE = `${REVIEW_CLI_USAGE}\n${DOCTOR_CLI_USAGE}`;
+
 export interface ReviewCliArgs {
   command: "review";
   once: boolean;
@@ -41,6 +57,16 @@ export interface ReviewCliArgs {
   pollMs?: number;
   maxAttempts?: number;
 }
+
+export interface DoctorCliArgs {
+  command: "doctor";
+  help: boolean;
+  json: boolean;
+  agentDir?: string;
+  projectsRoot?: string;
+}
+
+export type CliArgs = ReviewCliArgs | DoctorCliArgs;
 
 export interface ReviewCliDaemon {
   drain(signal?: AbortSignal): Promise<ReviewDrainResult>;
@@ -57,6 +83,8 @@ export interface ReviewCliDependencies {
   stdout?: Pick<NodeJS.WriteStream, "write">;
   stderr?: Pick<NodeJS.WriteStream, "write">;
   createRuntime?: (args: ReviewCliArgs, onEvent: (event: ReviewDaemonEvent) => void) => Promise<ReviewCliRuntime>;
+  inspectInstallation?: (options: DoctorOptions) => Promise<DoctorReport>;
+  packageRoot?: string;
 }
 
 function optionValue(argv: readonly string[], index: number, flag: string): string {
@@ -73,7 +101,7 @@ function positiveInteger(value: string, flag: string): number {
 }
 
 export function parseReviewCliArgs(argv: readonly string[]): ReviewCliArgs {
-  if (argv.length === 0 || argv[0] !== "review") throw new Error("Expected 'review' command.");
+  if (argv.length === 0 || argv.at(0) !== "review") throw new Error("Expected 'review' command.");
   const parsed: ReviewCliArgs = { command: "review", once: false, help: false };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -90,6 +118,26 @@ export function parseReviewCliArgs(argv: readonly string[]): ReviewCliArgs {
     throw new Error("--worker-id contains unsupported characters.");
   }
   return parsed;
+}
+
+function parseDoctorCliArgs(argv: readonly string[]): DoctorCliArgs {
+  if (argv.at(0) !== "doctor") throw new Error("Expected 'doctor' command.");
+  const parsed: DoctorCliArgs = { command: "doctor", help: false, json: false };
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === "--json") parsed.json = true;
+    else if (arg === "-h" || arg === "--help") parsed.help = true;
+    else if (arg === "--agent-dir") parsed.agentDir = optionValue(argv, index++, arg);
+    else if (arg === "--projects-root") parsed.projectsRoot = optionValue(argv, index++, arg);
+    else throw new Error(`Unknown doctor option: ${arg}`);
+  }
+  return parsed;
+}
+
+export function parseCliArgs(argv: readonly string[]): CliArgs {
+  if (argv.at(0) === "review") return parseReviewCliArgs(argv);
+  if (argv.at(0) === "doctor") return parseDoctorCliArgs(argv);
+  throw new Error("Expected 'review' or 'doctor' command.");
 }
 
 function publicEvent(event: ReviewDaemonEvent): unknown {
@@ -127,8 +175,14 @@ async function createDefaultRuntime(
   const spool = new ReviewSpool(join(serviceRoot, "review-spool"), { ledger });
   const attemptAccounting = new FileReviewAttemptAccounting(spool.root);
   const decisionStore = new ReviewDecisionStore(spool.root);
+  const committer = config.mode === "external" ? new FileMemoryProposalCommitter(agentDir) : undefined;
   await Promise.all([spool.initialize(), attemptAccounting.initialize()]);
   await spool.recover();
+  const repairFeedback = async () => {
+    if (!committer) return;
+    await repairFailedReviewFeedback({ spool, decisions: decisionStore, committer });
+  };
+  await repairFeedback();
   const importLegacyBudget = async (): Promise<void> => {
     if (!attemptAccounting.importLegacyDailyBudget) return;
     try {
@@ -200,9 +254,13 @@ async function createDefaultRuntime(
   const engine = new ReviewEngine(new PiModelRunner(config.reviewer, { agentDir }));
   const workerId = args.workerId ?? defaultReviewWorkerId();
   const reporter = new ReviewWorkerStatusReporter(agentDir, workerId);
-  reporter.start();
-  const heartbeat = setInterval(() => reporter.heartbeat(), 10_000);
-  heartbeat.unref?.();
+  const runtimeReporter = new RuntimeStatusReporter({
+    agentDir,
+    identity: `worker:${workerId}`,
+    kind: "worker",
+    releaseVersion: EXTENSION_VERSION,
+    memoryPolicyVersion: MEMORY_POLICY_VERSION,
+  });
   const daemon = new ReviewDaemon({
     spool,
     engine,
@@ -220,40 +278,64 @@ async function createDefaultRuntime(
     },
     maintenance: purgeExpired,
     maintenanceIntervalMs: Math.max(60_000, Math.min(60 * 60_000, Math.floor(retentionMs / 4))),
-    ...(config.mode === "external" ? { committer: new FileMemoryProposalCommitter(agentDir) } : {}),
+    ...(committer ? { committer } : {}),
   });
+  reporter.start();
+  runtimeReporter.start();
+  const heartbeat = setInterval(() => reporter.heartbeat(), 10_000);
+  heartbeat.unref?.();
+  let feedbackRepairPending = Promise.resolve();
+  const feedbackRepairTimer = setInterval(() => {
+    feedbackRepairPending = feedbackRepairPending
+      .catch(() => undefined)
+      .then(repairFeedback);
+  }, 60_000);
+  feedbackRepairTimer.unref?.();
   return {
     daemon,
     async dispose() {
       clearInterval(heartbeat);
+      clearInterval(feedbackRepairTimer);
       reporter.stop();
-      await reporter.flush();
+      runtimeReporter.stop();
+      await Promise.all([reporter.flush(), runtimeReporter.flush(), feedbackRepairPending.catch(() => undefined)]);
       ledger.close();
     },
   };
 }
 
-export async function runServiceCli(
-  argv: readonly string[] = process.argv.slice(2),
-  dependencies: ReviewCliDependencies = {},
-): Promise<number> {
-  const stdout = dependencies.stdout ?? process.stdout;
-  const stderr = dependencies.stderr ?? process.stderr;
-  let args: ReviewCliArgs;
-  try {
-    args = parseReviewCliArgs(argv);
-  } catch (error) {
-    stderr.write(`${error instanceof Error ? error.message : String(error)}\n${REVIEW_CLI_USAGE}`);
-    return 2;
-  }
-  if (args.help) {
-    stdout.write(REVIEW_CLI_USAGE);
-    return 0;
-  }
+type CliWriter = Pick<NodeJS.WriteStream, "write">;
 
-  const onEvent = (event: ReviewDaemonEvent) => {
-    stdout.write(`${JSON.stringify(publicEvent(event))}\n`);
-  };
+async function runDoctorCommand(
+  args: DoctorCliArgs,
+  dependencies: ReviewCliDependencies,
+  stdout: CliWriter,
+  stderr: CliWriter,
+): Promise<number> {
+  try {
+    const agentDir = resolve(args.agentDir ?? getAgentDir());
+    const report = await (dependencies.inspectInstallation ?? inspectNoForgettiInstallation)({
+      agentDir,
+      packageRoot: resolve(dependencies.packageRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "../..")),
+      ...(args.projectsRoot ? { projectsRoot: resolve(args.projectsRoot) } : {}),
+      expectedReleaseVersion: EXTENSION_VERSION,
+      expectedMemoryPolicyVersion: MEMORY_POLICY_VERSION,
+    });
+    stdout.write(`${args.json ? JSON.stringify(report, null, 2) : formatDoctorReport(report)}\n`);
+    return report.healthy ? 0 : 1;
+  } catch (error) {
+    stderr.write(`No Forgetti doctor failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+async function runReviewCommand(
+  args: ReviewCliArgs,
+  dependencies: ReviewCliDependencies,
+  stdout: CliWriter,
+  stderr: CliWriter,
+): Promise<number> {
+  const onEvent = (event: ReviewDaemonEvent) => stdout.write(`${JSON.stringify(publicEvent(event))}\n`);
   let runtime: ReviewCliRuntime | undefined;
   const controller = new AbortController();
   const shutdown = () => {
@@ -279,6 +361,28 @@ export async function runServiceCli(
     process.removeListener("SIGTERM", shutdown);
     await runtime?.dispose();
   }
+}
+
+export async function runServiceCli(
+  argv: readonly string[] = process.argv.slice(2),
+  dependencies: ReviewCliDependencies = {},
+): Promise<number> {
+  const stdout = dependencies.stdout ?? process.stdout;
+  const stderr = dependencies.stderr ?? process.stderr;
+  let parsed: CliArgs;
+  try {
+    parsed = parseCliArgs(argv);
+  } catch (error) {
+    stderr.write(`${error instanceof Error ? error.message : String(error)}\n${CLI_USAGE}`);
+    return 2;
+  }
+  if (parsed.help) {
+    stdout.write(parsed.command === "doctor" ? DOCTOR_CLI_USAGE : REVIEW_CLI_USAGE);
+    return 0;
+  }
+  return parsed.command === "doctor"
+    ? runDoctorCommand(parsed, dependencies, stdout, stderr)
+    : runReviewCommand(parsed, dependencies, stdout, stderr);
 }
 
 const entryPath = process.argv[1];
