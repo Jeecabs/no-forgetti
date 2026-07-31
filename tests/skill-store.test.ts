@@ -7,6 +7,7 @@ import test from "node:test";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
 
 import { ProjectSkillStore } from "../src/skill-store.ts";
+import { MAX_SKILL_DESCRIPTION_CHARS } from "../src/skill-types.ts";
 
 async function fixture(options: { now?: () => Date } = {}) {
   const base = await mkdtemp(join(tmpdir(), "pi-project-skills-"));
@@ -19,6 +20,7 @@ async function fixture(options: { now?: () => Date } = {}) {
 }
 
 const skillBody = "# Verification\n\n## Procedure\n\n1. Run the canonical check. Completion criterion: the command exits successfully.";
+const overlongDescription = `${"x".repeat(MAX_SKILL_DESCRIPTION_CHARS)}.`;
 
 test("stores native Pi skill packages outside the repository", async (t) => {
   const { base, project, store } = await fixture();
@@ -51,6 +53,23 @@ test("stores native Pi skill packages outside the repository", async (t) => {
   }]);
   assert.equal(native.diagnostics.length, 0);
   await assert.rejects(stat(join(project, "SKILL.md")));
+});
+
+test("model-facing descriptions may encode genuine branches beyond 60 characters", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const description = "Release audit runs when preparing a release or diagnosing a failed deployment.";
+  assert.ok(description.length > 60);
+
+  const submission = await store.submitProposal([{
+    action: "create",
+    name: "release-audit",
+    description,
+    content: skillBody,
+  }], "session-1");
+
+  assert.equal(submission.result?.changed, true);
+  assert.equal((await store.loadSkill("release-audit")).description, description);
 });
 
 test("generated skill creates and patches auto-approve while archives remain pending", async (t) => {
@@ -105,6 +124,51 @@ test("a patch whose oldText no longer matches stays pending instead of throwing"
   assert.equal(stale.result, undefined);
   assert.equal((await store.loadSkill("verification")).content, skillBody);
   assert.deepEqual((await store.listPending()).map((proposal) => proposal.id), [stale.proposal.id]);
+});
+
+test("an invalid generated description patch is discarded instead of left pending", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await store.submitProposal([{
+    action: "create",
+    name: "verification",
+    description: "Run the canonical project verification.",
+    content: skillBody,
+  }], "session-1");
+
+  const invalid = await store.submitProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "Run the canonical project verification.",
+    newText: overlongDescription,
+  }], "session-1");
+
+  assert.equal(invalid.staged, false);
+  assert.equal(invalid.result?.changed, false);
+  assert.match(invalid.result?.message ?? "", /discarded invalid project skill proposal/iu);
+  assert.equal((await store.loadSkill("verification")).description, "Run the canonical project verification.");
+  assert.equal((await store.listPending()).length, 0);
+});
+
+test("malformed pending proposals are quarantined instead of poisoning the queue", async (t) => {
+  const { base, store } = await fixture();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const filename = "20260101000000-deadbeef.json";
+  await writeFile(join(store.pendingDir, filename), JSON.stringify({
+    version: 1,
+    id: "20260101000000-deadbeef",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    operations: [{
+      action: "create",
+      name: "invalid-release-check",
+      description: overlongDescription,
+      content: skillBody,
+    }],
+  }));
+
+  assert.deepEqual(await store.listPending(), []);
+  await assert.rejects(stat(join(store.pendingDir, filename)), { code: "ENOENT" });
+  assert.equal((await stat(join(store.pendingDir, ".invalid", filename))).isFile(), true);
 });
 
 test("undo reverts the last patch once and refuses after any later change", async (t) => {
@@ -622,10 +686,10 @@ test("rejects unsafe skill content and invalid descriptions", async (t) => {
     store.stageProposal([{
       action: "create",
       name: "unsafe",
-      description: "This description is intentionally much longer than sixty characters and must fail.",
+      description: overlongDescription,
       content: skillBody,
     }]),
-    /60 characters/u,
+    new RegExp(`${MAX_SKILL_DESCRIPTION_CHARS} characters`, "u"),
   );
   await assert.rejects(
     store.stageProposal([{

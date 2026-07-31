@@ -261,6 +261,7 @@ export class ProjectSkillStore {
   readonly skillsDir: string;
   readonly archiveDir: string;
   readonly pendingDir: string;
+  readonly invalidPendingDir: string;
   readonly revisionsDir: string;
   readonly reviewPath: string;
   readonly activityPath: string;
@@ -274,6 +275,7 @@ export class ProjectSkillStore {
     this.skillsDir = join(this.projectDir, "skills");
     this.archiveDir = join(this.skillsDir, ".archive");
     this.pendingDir = join(this.projectDir, "skill-pending");
+    this.invalidPendingDir = join(this.pendingDir, ".invalid");
     this.revisionsDir = join(this.projectDir, "skill-revisions");
     this.reviewPath = join(this.projectDir, "skill-review.json");
     this.activityPath = join(this.projectDir, "skill-activity.json");
@@ -287,6 +289,7 @@ export class ProjectSkillStore {
     await mkdir(this.skillsDir, { recursive: true, mode: 0o700 });
     await mkdir(this.archiveDir, { recursive: true, mode: 0o700 });
     await mkdir(this.pendingDir, { recursive: true, mode: 0o700 });
+    await mkdir(this.invalidPendingDir, { recursive: true, mode: 0o700 });
     await mkdir(this.revisionsDir, { recursive: true, mode: 0o700 });
     await this.withLock(async () => {
       if (!await this.exists(this.reviewPath)) {
@@ -468,6 +471,26 @@ export class ProjectSkillStore {
     return { proposal, staged: !existingIds.has(proposal.id) };
   }
 
+  async submitReviewProposal(request: {
+    operations: SkillOperation[];
+    sourceSessionId?: string;
+  }): Promise<
+    | { discarded: true; message: string }
+    | { discarded: false; proposal: SkillProposal; staged: boolean; result?: SkillMutationResult }
+  > {
+    const { operations, sourceSessionId } = request;
+    try {
+      this.validateOperations(operations);
+    } catch {
+      return { discarded: true, message: "Discarded invalid project skill proposal." };
+    }
+    const submission = await this.submitProposal(operations, sourceSessionId, "background_review");
+    if (submission.result && !submission.result.changed) {
+      return { discarded: true, message: submission.result.message };
+    }
+    return { discarded: false, ...submission };
+  }
+
   /** Rendered diff source for the last recorded change to `name`, newest revision first. */
   async lastChange(name: string): Promise<{ before: string; current: string } | undefined> {
     const current = await this.loadStoredSkill(name);
@@ -545,12 +568,30 @@ export class ProjectSkillStore {
     const proposals: SkillProposal[] = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const value = await this.readJson(join(this.pendingDir, entry.name));
-      if (!isRecord(value) || value.version !== SKILL_STORE_VERSION || !Array.isArray(value.operations)) continue;
-      const filenameId = validateProposalId(entry.name.slice(0, -5));
-      proposals.push(this.parseProposal(value, filenameId));
+      const proposal = await this.loadPendingProposal(entry.name);
+      if (proposal) proposals.push(proposal);
     }
     return proposals.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  private async loadPendingProposal(filename: string): Promise<SkillProposal | undefined> {
+    const path = join(this.pendingDir, filename);
+    try {
+      const value = await this.readJson(path);
+      if (!isRecord(value)) throw new Error("Invalid skill proposal.");
+      return this.parseProposal(value, validateProposalId(filename.slice(0, -5)));
+    } catch (error) {
+      if (!isErrno(error, "ENOENT")) await this.quarantinePendingProposal(path, filename);
+      return undefined;
+    }
+  }
+
+  private async quarantinePendingProposal(path: string, filename: string): Promise<void> {
+    try {
+      await rename(path, join(this.invalidPendingDir, filename));
+    } catch (error) {
+      if (!isErrno(error, "ENOENT")) throw error;
+    }
   }
 
   async pendingIndex(): Promise<string> {
@@ -591,9 +632,18 @@ export class ProjectSkillStore {
           return { changed: false, message: `Skill '${skill.name}' is no longer stale; discarded retention proposal.` };
         }
       }
-      const result = await this.applyOperation(operation, origin, safeId);
-      if (result.changed) await unlink(path);
-      return result;
+      try {
+        const result = await this.applyOperation(operation, origin, safeId);
+        if (result.changed) await unlink(path);
+        return result;
+      } catch (error) {
+        if (operation.action !== "patch" || !await this.invalidPatchResult(operation)) throw error;
+        await unlink(path);
+        return {
+          changed: false,
+          message: `Discarded invalid project skill proposal '${operation.name}'.`,
+        };
+      }
     });
   }
 
@@ -694,8 +744,7 @@ export class ProjectSkillStore {
     retentionSession?: number,
     retentionAfterSessions?: number,
   ): SkillProposal {
-    if (operations.length > 1) throw new Error("A self-forming skill review may stage one operation at a time.");
-    const normalized = operations.map((operation) => this.validateOperation(operation));
+    const normalized = this.validateOperations(operations);
     return {
       version: SKILL_STORE_VERSION,
       id: this.newProposalId(),
@@ -706,6 +755,11 @@ export class ProjectSkillStore {
       ...(retentionAfterSessions !== undefined ? { retentionAfterSessions } : {}),
       operations: normalized,
     };
+  }
+
+  private validateOperations(operations: SkillOperation[]): SkillOperation[] {
+    if (operations.length > 1) throw new Error("A self-forming skill review may stage one operation at a time.");
+    return operations.map((operation) => this.validateOperation(operation));
   }
 
   private validateOperation(operation: SkillOperation): SkillOperation {
@@ -736,6 +790,24 @@ export class ProjectSkillStore {
     }
     if (operation.action === "archive") return { ...operation, ...metadata, action: "archive", name };
     throw new Error("Unknown skill operation.");
+  }
+
+  private async invalidPatchResult(operation: SkillOperation): Promise<boolean> {
+    const existing = await this.loadStoredSkill(operation.name);
+    const oldText = operation.oldText!;
+    const descriptionMatches = countOccurrences(existing.description, oldText);
+    const contentMatches = countOccurrences(existing.content, oldText);
+    if (descriptionMatches + contentMatches !== 1) return false;
+    try {
+      if (descriptionMatches === 1) {
+        validateSkillDescription(existing.description.replace(oldText, operation.newText!));
+      } else {
+        validateSkillContent(existing.content.replace(oldText, operation.newText!));
+      }
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   private async applyOperation(operation: SkillOperation, origin: SkillWriteOrigin, proposalId: string): Promise<SkillMutationResult> {

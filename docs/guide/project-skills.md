@@ -14,6 +14,16 @@ Pi then owns invocation:
 
 The body is not injected on every turn. It enters working context only through Pi’s native progressive-disclosure path.
 
+## Authorship
+
+The reviewer treats the completed conversation as untrusted evidence. It then applies the embedded `writing-great-skills` doctrine in six phases: evidence, curation, invocation, information hierarchy, pruning, and safety. Predictability is the root criterion.
+
+Descriptions are compact context pointers. They front-load a leading word. Each genuine branch gets one trigger. Prune instead of clip. The 500-character limit is a safety ceiling, not an authorship target.
+
+Skill bodies put ordered actions before reference. Each step has a checkable completion criterion. Authors remove duplication, no-ops, sediment, sprawl, and avoidable negation.
+
+The final authorship audit runs before the model returns one operation. A malformed operation becomes a no-op instead of retry work. No Forgetti quarantines malformed persisted proposals so one bad record cannot block project-skill commands.
+
 ## Review and approval
 
 A skill review produces at most one create, patch, or archive operation.
