@@ -597,6 +597,19 @@ export class ProjectSkillStore {
     });
   }
 
+  /** Archives an active skill after an explicit foreground confirmation. */
+  async archiveSkill(name: string, origin: SkillWriteOrigin = "foreground"): Promise<SkillMutationResult> {
+    const skillName = validateSkillName(name);
+    return this.withLock(async () => {
+      const result = await this.applyOperation({ action: "archive", name: skillName }, origin, this.newProposalId());
+      for (const proposal of await this.listPending()) {
+        if (proposal.operations.at(0)?.name !== skillName) continue;
+        await unlink(join(this.pendingDir, `${proposal.id}.json`));
+      }
+      return result;
+    });
+  }
+
   async rejectProposal(id: string): Promise<void> {
     const safeId = validateProposalId(id);
     await this.withLock(async () => {

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Approve every pending project-skill proposal with one confirmation through `/project-skills approve all`.
+- Delete an open skill from the project-skill viewer while retaining an archived copy.
+
 ## 0.4.2 - 2026-07-29
 
 - Stop treating retained feedback interest without an authoritative spool job as queued review work. This prevents an old terminal review from leaving a permanent spinner after its outcome expires.

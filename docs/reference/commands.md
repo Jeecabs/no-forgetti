@@ -22,9 +22,11 @@
 | `/project-skills stats` | Show recall frequency and inactivity |
 | `/project-skills read <name>` | Read a skill package |
 | `/project-skills edit <name>` | Edit a skill and snapshot a revision |
+| `/project-skills delete <name>` | Remove a skill from discovery and keep an archived copy |
 | `/project-skills undo <name>` | Preview and revert the latest eligible skill revision |
 | `/project-skills pending` | List pending proposals |
 | `/project-skills approve <name>` | Approve a pending archive or compatible legacy proposal |
+| `/project-skills approve all` | Confirm once, then approve every pending proposal |
 | `/project-skills reject <name>` | Reject a pending proposal |
 | `/project-skills review` | Request project-skill review after the turn settles |
 

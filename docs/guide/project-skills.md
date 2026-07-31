@@ -39,14 +39,16 @@ Run `/project-skills` without arguments to open the interactive browser, or use 
 /project-skills stats
 /project-skills read <name>
 /project-skills edit <name>
+/project-skills delete <name>
 /project-skills undo <name>
 /project-skills pending
 /project-skills approve <name>
+/project-skills approve all
 /project-skills reject <name>
 /project-skills review
 ```
 
-Validated creates and archives become visible to Pi after `/reload` or in the next session.
+Validated creates and archives become visible to Pi after `/reload` or in the next session. The viewer also supports `d` to delete the open skill after confirmation. Deletion removes the skill from discovery and keeps an archived copy.
 
 ## Usage and retention
 
