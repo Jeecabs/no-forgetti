@@ -1,3 +1,5 @@
+import { MAX_SKILL_DESCRIPTION_CHARS } from "./skill-types.ts";
+
 // Embedded `writing-great-skills` doctrine and glossary for the skill-maker.
 // ENVIRONMENT adapts it to No Forgetti: every generated skill is one
 // self-contained SKILL.md exposed through Pi's native skill discovery. The
@@ -9,7 +11,7 @@ const ENVIRONMENT = `HOW SKILLS WORK HERE — read the doctrine below through th
 - No Forgetti publishes active packages through Pi's native skill discovery. Pi keeps each description in the system prompt; the model invokes a matching skill by reading SKILL.md, and users can invoke it with /skill:<name>.
 - Every generated project skill is model-invoked. Do not emit disable-model-invocation or invocation routing instructions.
 - Return the SKILL.md body only. Do not write frontmatter (---), a name line, or "see GLOSSARY.md"/references pointers; the store adds frontmatter and cannot resolve pointers.
-- The description is one sentence, <=60 characters, ending in a period; make its trigger conditions specific enough for native Pi discovery.
+- The description is one sentence ending in a period. Treat it as a compact context pointer: front-load its leading word and include one distinct trigger per real branch. Prune every word; ${MAX_SKILL_DESCRIPTION_CHARS} characters is a safety ceiling, not an authorship target.
 Apply everything below — leading words, completion criteria, the information hierarchy within that one file, pruning, and the failure modes — to that single file.`;
 
 const RITE = `A skill exists to wrangle determinism out of a stochastic system. Predictability — the agent taking the same process every run, not producing the same output — is the root virtue; every lever below serves it.

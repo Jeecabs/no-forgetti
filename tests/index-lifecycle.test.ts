@@ -9,7 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { activateProjectMemoryExtension, resolvePendingRef, type ExtensionDependencies } from "../src/index.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
-import type { SkillProposal } from "../src/skill-types.ts";
+import { MAX_SKILL_DESCRIPTION_CHARS, type SkillProposal } from "../src/skill-types.ts";
 import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
 import { ReviewDecisionStore } from "../src/service/decisions.ts";
 import { createReviewOutcome } from "../src/service/protocol.ts";
@@ -125,6 +125,7 @@ function userEntry(id: string, text: string): Record<string, unknown> {
 }
 
 const assistantMessage = { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" };
+const overlongSkillDescription = `${"x".repeat(MAX_SKILL_DESCRIPTION_CHARS)}.`;
 
 test("registers lifecycle hooks and disables itself for companion agents", async () => {
   const primary = new FakeExtension();
@@ -181,6 +182,50 @@ test("skill review automatically adds validated creates", async (t) => {
 
   assert.equal((await skillStore.loadSkill("release-check")).state, "active");
   assert.equal((await skillStore.listPending()).length, 0);
+});
+
+test("skill review discards an invalid resulting description without leaving approval work", async (t) => {
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    requestSkillReviewPlan: async () => ({ operations: [{
+      action: "patch",
+      name: "verification",
+      oldText: "Run the canonical project verification.",
+      newText: overlongSkillDescription,
+    }] }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  await extension.command("project-skills", "review", context);
+
+  assert.equal((await skillStore.loadSkill("verification")).description, "Run the canonical project verification.");
+  assert.equal((await skillStore.listPending()).length, 0);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Discarded invalid project skill proposal 'verification'.",
+    type: "warning",
+  });
+});
+
+test("malformed generated creates settle as a no-op instead of retrying", async (t) => {
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    requestSkillReviewPlan: async () => ({ operations: [{
+      action: "create",
+      name: "release-check",
+      description: overlongSkillDescription,
+      content: "# Release check\n\n## Steps\n\n1. Run release checks. Done when: all checks pass.",
+    }] }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  await extension.command("project-skills", "review", context);
+
+  await assert.rejects(skillStore.loadSkill("release-check"), { code: "ENOENT" });
+  assert.equal((await skillStore.listPending()).length, 0);
+  const reviewState = JSON.parse(await readFile(skillStore.reviewPath, "utf8")) as { consecutiveFailures: number };
+  assert.equal(reviewState.consecutiveFailures, 0);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Discarded invalid project skill proposal.",
+    type: "warning",
+  });
 });
 
 test("approve-all confirms once and applies every pending project skill proposal", async (t) => {

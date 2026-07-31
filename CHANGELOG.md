@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Author project skills through an explicit `writing-great-skills` evidence, curation, hierarchy, and pruning audit. Replace the 60-character description target with a 500-character safety ceiling.
+- Settle malformed generated skills as no-ops and quarantine invalid persisted proposals so they cannot block project-skill commands.
+
 ## 0.4.3 - 2026-07-31
 
 - Approve every pending project-skill proposal with one confirmation through `/project-skills approve-all`. The dedicated subcommand avoids the skill-name autocomplete path.

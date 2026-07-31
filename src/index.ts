@@ -910,9 +910,15 @@ export function activateProjectMemoryExtension(
         commitStarted = true;
         if (plan.operations.length > 0) {
           const operation = plan.operations.at(0)!;
-          const submission = await projectSkills.submitProposal(plan.operations, ctx.sessionManager.getSessionId());
-          if (submission.result) {
-            if (operation.action === "create" && submission.result.changed) activeSkillCount += 1;
+          const submission = await projectSkills.submitReviewProposal({
+            operations: plan.operations,
+            sourceSessionId: ctx.sessionManager.getSessionId(),
+          });
+          if (submission.discarded) {
+            pendingSkillCount = (await projectSkills.listPending()).length;
+            if (ctx.hasUI) ctx.ui.notify(submission.message, "warning");
+          } else if (submission.result) {
+            if (operation.action === "create") activeSkillCount += 1;
             if (ctx.hasUI) {
               const reason = operation.reason ? ` ${operation.reason}` : "";
               ctx.ui.notify(

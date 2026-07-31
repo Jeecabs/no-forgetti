@@ -2,7 +2,7 @@ export const SKILL_STORE_VERSION = 1;
 export const DEFAULT_SKILL_REVIEW_INTERVAL = 10;
 export const DEFAULT_SKILL_REVIEW_SIGNAL_THRESHOLD = 4;
 export const DEFAULT_SKILL_RETENTION_SESSIONS = 20;
-export const MAX_SKILL_DESCRIPTION_CHARS = 60;
+export const MAX_SKILL_DESCRIPTION_CHARS = 500;
 export const MAX_SKILL_CONTENT_CHARS = 32_000;
 
 export type SkillWriteOrigin = "foreground" | "background_review";
