@@ -1407,7 +1407,7 @@ export function activateProjectMemoryExtension(
   });
 
   pi.registerCommand("project-skills", {
-    description: "Browse and manage project skills. Usage: /project-skills list|stats|read|edit|delete|undo|pending|approve|reject|review",
+    description: "Browse and manage project skills. Usage: /project-skills list|stats|read|edit|delete|undo|pending|approve|approve-all|reject|review",
     getArgumentCompletions: async (prefix) => {
       const commands = [
         { value: "list", label: "list", description: "List project skills" },
@@ -1419,7 +1419,7 @@ export function activateProjectMemoryExtension(
         { value: "pending", label: "pending", description: "List pending proposals" },
         { value: "pending ", label: "pending <name>", description: "Inspect a pending proposal" },
         { value: "approve ", label: "approve <name>", description: "Approve a proposal" },
-        { value: "approve all", label: "approve all", description: "Approve every pending proposal" },
+        { value: "approve-all", label: "approve-all", description: "Approve every pending proposal" },
         { value: "reject ", label: "reject <name>", description: "Reject a proposal" },
         { value: "review", label: "review", description: "Run skill review now" },
       ];
@@ -1436,19 +1436,14 @@ export function activateProjectMemoryExtension(
       if (["pending ", "approve ", "reject "].some((verb) => normalized.startsWith(verb))) {
         if (!skillStore) return null;
         const pending = await skillStore.listPending();
-        const items = [
-          ...(action === "approve"
-            ? [{ value: "approve all", label: "all", description: "Approve every pending proposal" }]
-            : []),
-          ...pending.map((proposal) => {
-            const operation = proposal.operations.at(0);
-            return {
-              value: `${action} ${operation?.name ?? proposal.id}`,
-              label: operation?.name ?? proposal.id,
-              description: `${operation?.action ?? "empty"}${operation?.reason ? ` · ${operation.reason}` : ""}`,
-            };
-          }),
-        ];
+        const items = pending.map((proposal) => {
+          const operation = proposal.operations.at(0);
+          return {
+            value: `${action} ${operation?.name ?? proposal.id}`,
+            label: operation?.name ?? proposal.id,
+            description: `${operation?.action ?? "empty"}${operation?.reason ? ` · ${operation.reason}` : ""}`,
+          };
+        });
         const filtered = fuzzyFilter(items, normalized, (item) => item.value);
         return filtered.length ? filtered : null;
       }
@@ -1528,8 +1523,13 @@ export function activateProjectMemoryExtension(
         );
         return;
       }
+      if (subcommand === "approve-all") {
+        if (value) return ctx.ui.notify("Usage: /project-skills approve-all", "warning");
+        await approveAllPendingSkills(ctx);
+        return;
+      }
       if (subcommand === "approve") {
-        if (!value) return ctx.ui.notify("Usage: /project-skills approve <name|all>", "warning");
+        if (!value) return ctx.ui.notify("Usage: /project-skills approve <name>", "warning");
         if (value === "all" || value === "--all") {
           await approveAllPendingSkills(ctx);
           return;
@@ -1577,7 +1577,7 @@ export function activateProjectMemoryExtension(
         await runSkillReview(ctx, true);
         return;
       }
-      ctx.ui.notify("Usage: /project-skills list|stats|read <name>|edit <name>|delete <name>|undo <name>|pending [name]|approve <name|all>|reject <name>|review", "warning");
+      ctx.ui.notify("Usage: /project-skills list|stats|read <name>|edit <name>|delete <name>|undo <name>|pending [name]|approve <name>|approve-all|reject <name>|review", "warning");
     },
   });
 

@@ -43,7 +43,7 @@ Run `/project-skills` without arguments to open the interactive browser, or use 
 /project-skills undo <name>
 /project-skills pending
 /project-skills approve <name>
-/project-skills approve all
+/project-skills approve-all
 /project-skills reject <name>
 /project-skills review
 ```
