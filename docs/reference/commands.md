@@ -26,7 +26,7 @@
 | `/project-skills undo <name>` | Preview and revert the latest eligible skill revision |
 | `/project-skills pending` | List pending proposals |
 | `/project-skills approve <name>` | Approve a pending archive or compatible legacy proposal |
-| `/project-skills approve all` | Confirm once, then approve every pending proposal |
+| `/project-skills approve-all` | Confirm once, then approve every pending proposal |
 | `/project-skills reject <name>` | Reject a pending proposal |
 | `/project-skills review` | Request project-skill review after the turn settles |
 

@@ -183,7 +183,7 @@ test("skill review automatically adds validated creates", async (t) => {
   assert.equal((await skillStore.listPending()).length, 0);
 });
 
-test("approve all confirms once and applies every pending project skill proposal", async (t) => {
+test("approve-all confirms once and applies every pending project skill proposal", async (t) => {
   const { context, extension, skillStore, notifications } = await fixture(t);
   await extension.emit("session_start", {}, context);
   const second = await skillStore.stageProposal([{
@@ -204,7 +204,7 @@ test("approve all confirms once and applies every pending project skill proposal
       return true;
     },
   });
-  await extension.command("project-skills", "approve all", context);
+  await extension.command("project-skills", "approve-all", context);
 
   assert.equal(confirmations.length, 1);
   assert.match(confirmations[0]!.title, /Approve all 2 pending/u);

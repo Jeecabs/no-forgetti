@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 - 2026-07-31
 
-- Approve every pending project-skill proposal with one confirmation through `/project-skills approve all`.
+- Approve every pending project-skill proposal with one confirmation through `/project-skills approve-all`. The dedicated subcommand avoids the skill-name autocomplete path.
 - Delete an open skill from the project-skill viewer while retaining an archived copy.
 
 ## 0.4.2 - 2026-07-29
