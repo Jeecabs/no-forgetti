@@ -84,9 +84,11 @@ No Forgetti never starts a daemon during package installation.
 /project-skills stats
 /project-skills read <name>
 /project-skills edit <name>
+/project-skills delete <name>
 /project-skills undo <name>
 /project-skills pending
 /project-skills approve <name>
+/project-skills approve all
 /project-skills reject <name>
 /project-skills review
 ```

@@ -19,7 +19,7 @@ import {
 
 import type { ProjectSkill } from "./skill-types.ts";
 
-export type SkillViewerAction = "back" | "close" | "edit" | "next" | "previous";
+export type SkillViewerAction = "back" | "close" | "delete" | "edit" | "next" | "previous";
 export type SkillPickerAction = { action: "open" | "edit"; name: string };
 
 function usageSummary(skill: ProjectSkill): string {
@@ -131,6 +131,7 @@ class SkillViewer {
     const cancel = this.keybindings.matches(data, "tui.select.cancel");
     if (this.canGoBack && (cancel || matchesKey(data, Key.left) || data === "b")) return "back";
     if (cancel) return "close";
+    if (data === "d") return "delete";
     if (data === "e") return "edit";
     if (this.canGoBack && data === "[") return "previous";
     if (this.canGoBack && data === "]") return "next";
@@ -166,7 +167,7 @@ class SkillViewer {
     const position = this.renderedBody.length > pageSize
       ? `${this.scrollOffset + 1}-${this.scrollOffset + visible.length}/${this.renderedBody.length}`
       : `${this.renderedBody.length} lines`;
-    const help = `${this.canGoBack ? "b back   [ previous   ] next   " : ""}↑↓ scroll   pgup/pgdn page   e edit   esc close`;
+    const help = `${this.canGoBack ? "b back   [ previous   ] next   " : ""}↑↓ scroll   pgup/pgdn page   e edit   d delete   esc close`;
 
     return [
       this.theme.fg("borderAccent", "─".repeat(Math.max(0, width))),

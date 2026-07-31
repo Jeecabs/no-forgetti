@@ -1207,6 +1207,74 @@ export function activateProjectMemoryExtension(
     return result.changed;
   }
 
+  async function deleteProjectSkill(name: string, ctx: ExtensionCommandContext): Promise<boolean> {
+    if (!ctx.hasUI) throw new Error("Project skill deletion requires an interactive UI.");
+    const projectSkills = requireSkillStore();
+    const skill = await projectSkills.loadSkill(name);
+    const confirmed = await ctx.ui.confirm(
+      `Delete project skill '${skill.name}'?`,
+      "This removes it from Pi discovery and keeps an archived copy in the external project store.",
+    );
+    if (!confirmed) return false;
+    await ctx.waitForIdle();
+    await skillReviewPromise?.catch(() => undefined);
+    const result = await projectSkills.archiveSkill(skill.name, "foreground");
+    activeSkillCount = (await projectSkills.listSkills()).length;
+    pendingSkillCount = (await projectSkills.listPending()).length;
+    refreshStatus(ctx);
+    ctx.ui.notify(result.message, result.changed ? "info" : "warning");
+    return result.changed;
+  }
+
+  async function approveAllPendingSkills(ctx: ExtensionCommandContext): Promise<void> {
+    if (!ctx.hasUI) throw new Error("Project skill approval requires an interactive UI.");
+    const projectSkills = requireSkillStore();
+    const pending = await projectSkills.listPending();
+    if (pending.length === 0) {
+      ctx.ui.notify("No pending project skill proposals.", "info");
+      return;
+    }
+    const summary = pending.map((proposal) => {
+      const operation = proposal.operations.at(0);
+      return `${operation?.action ?? "empty"} ${operation?.name ?? proposal.id}`;
+    }).join("\n");
+    const confirmed = await ctx.ui.confirm(
+      `Approve all ${pending.length} pending project skill proposals?`,
+      summary,
+    );
+    if (!confirmed) return;
+    await ctx.waitForIdle();
+    const failures: string[] = [];
+    let approved = 0;
+    let discarded = 0;
+    for (const proposal of pending) {
+      const operation = proposal.operations.at(0);
+      try {
+        const result = await projectSkills.approveProposal(proposal.id);
+        if (result.changed) approved += 1;
+        else discarded += 1;
+      } catch (error) {
+        failures.push(`${operation?.name ?? proposal.id}: ${errorMessage(error)}`);
+      }
+    }
+    activeSkillCount = (await projectSkills.listSkills()).length;
+    pendingSkillCount = (await projectSkills.listPending()).length;
+    refreshStatus(ctx);
+    if (failures.length > 0) {
+      ctx.ui.notify(
+        `Approved ${approved} of ${pending.length} pending project skill proposals; ${pendingSkillCount} remain pending. ${failures.join("; ")}`,
+        "warning",
+      );
+      return;
+    }
+    ctx.ui.notify(
+      discarded > 0
+        ? `Processed all ${pending.length} pending project skill proposals: ${approved} approved, ${discarded} discarded.`
+        : `Approved all ${approved} pending project skill proposals.`,
+      "info",
+    );
+  }
+
   async function browseProjectSkills(ctx: ExtensionCommandContext): Promise<void> {
     const projectSkills = requireSkillStore();
     if (ctx.mode !== "tui") {
@@ -1232,6 +1300,13 @@ export function activateProjectMemoryExtension(
         const action = await showSkillViewer(ctx, skill, true, (text) => presentCommandOutput(ctx, text));
         if (action === "close") return;
         if (action === "back") break;
+        if (action === "delete") {
+          if (await deleteProjectSkill(selected, ctx)) {
+            selected = undefined;
+            break;
+          }
+          continue;
+        }
         if (action === "edit") {
           await editProjectSkill(selected, ctx);
           continue;
@@ -1332,24 +1407,26 @@ export function activateProjectMemoryExtension(
   });
 
   pi.registerCommand("project-skills", {
-    description: "Browse and manage project skills. Usage: /project-skills list|stats|read|edit|undo|pending|approve|reject|review",
+    description: "Browse and manage project skills. Usage: /project-skills list|stats|read|edit|delete|undo|pending|approve|reject|review",
     getArgumentCompletions: async (prefix) => {
       const commands = [
         { value: "list", label: "list", description: "List project skills" },
         { value: "stats", label: "stats", description: "Show skill recall and retention stats" },
         { value: "read ", label: "read <name>", description: "Read a project skill" },
         { value: "edit ", label: "edit <name>", description: "Edit a project skill" },
+        { value: "delete ", label: "delete <name>", description: "Archive a project skill" },
         { value: "undo ", label: "undo <name>", description: "Revert the last change to a project skill" },
         { value: "pending", label: "pending", description: "List pending proposals" },
         { value: "pending ", label: "pending <name>", description: "Inspect a pending proposal" },
         { value: "approve ", label: "approve <name>", description: "Approve a proposal" },
+        { value: "approve all", label: "approve all", description: "Approve every pending proposal" },
         { value: "reject ", label: "reject <name>", description: "Reject a proposal" },
         { value: "review", label: "review", description: "Run skill review now" },
       ];
       const normalized = prefix.toLowerCase();
       const [action = ""] = normalized.split(" ");
       // Pi fuzzy-filters command names but passes argument suggestions through untouched.
-      if (["read ", "edit ", "undo "].some((verb) => normalized.startsWith(verb))) {
+      if (["read ", "edit ", "delete ", "undo "].some((verb) => normalized.startsWith(verb))) {
         if (!skillStore) return null;
         const skills = await skillStore.listSkills();
         const items = skills.map((skill) => ({ value: `${action} ${skill.name}`, label: skill.name, description: skill.description }));
@@ -1359,14 +1436,19 @@ export function activateProjectMemoryExtension(
       if (["pending ", "approve ", "reject "].some((verb) => normalized.startsWith(verb))) {
         if (!skillStore) return null;
         const pending = await skillStore.listPending();
-        const items = pending.map((proposal) => {
-          const operation = proposal.operations.at(0);
-          return {
-            value: `${action} ${operation?.name ?? proposal.id}`,
-            label: operation?.name ?? proposal.id,
-            description: `${operation?.action ?? "empty"}${operation?.reason ? ` · ${operation.reason}` : ""}`,
-          };
-        });
+        const items = [
+          ...(action === "approve"
+            ? [{ value: "approve all", label: "all", description: "Approve every pending proposal" }]
+            : []),
+          ...pending.map((proposal) => {
+            const operation = proposal.operations.at(0);
+            return {
+              value: `${action} ${operation?.name ?? proposal.id}`,
+              label: operation?.name ?? proposal.id,
+              description: `${operation?.action ?? "empty"}${operation?.reason ? ` · ${operation.reason}` : ""}`,
+            };
+          }),
+        ];
         const filtered = fuzzyFilter(items, normalized, (item) => item.value);
         return filtered.length ? filtered : null;
       }
@@ -1400,12 +1482,18 @@ export function activateProjectMemoryExtension(
         }
         const skill = await projectSkills.viewSkill(value);
         const action = await showSkillViewer(ctx, skill, false, (text) => presentCommandOutput(ctx, text));
+        if (action === "delete") await deleteProjectSkill(skill.name, ctx);
         if (action === "edit") await editProjectSkill(skill.name, ctx);
         return;
       }
       if (subcommand === "edit") {
         if (!value) return ctx.ui.notify("Usage: /project-skills edit <name>", "warning");
         await editProjectSkill(value, ctx);
+        return;
+      }
+      if (subcommand === "delete") {
+        if (!value) return ctx.ui.notify("Usage: /project-skills delete <name>", "warning");
+        await deleteProjectSkill(value, ctx);
         return;
       }
       if (subcommand === "undo") {
@@ -1441,7 +1529,11 @@ export function activateProjectMemoryExtension(
         return;
       }
       if (subcommand === "approve") {
-        if (!value) return ctx.ui.notify("Usage: /project-skills approve <name>", "warning");
+        if (!value) return ctx.ui.notify("Usage: /project-skills approve <name|all>", "warning");
+        if (value === "all" || value === "--all") {
+          await approveAllPendingSkills(ctx);
+          return;
+        }
         if (!ctx.hasUI) throw new Error("Project skill approval requires an interactive UI.");
         const proposal = findPending(await projectSkills.listPending(), value);
         if (!proposal) return;
@@ -1485,7 +1577,7 @@ export function activateProjectMemoryExtension(
         await runSkillReview(ctx, true);
         return;
       }
-      ctx.ui.notify("Usage: /project-skills list|stats|read <name>|edit <name>|undo <name>|pending [name]|approve <name>|reject <name>|review", "warning");
+      ctx.ui.notify("Usage: /project-skills list|stats|read <name>|edit <name>|delete <name>|undo <name>|pending [name]|approve <name|all>|reject <name>|review", "warning");
     },
   });
 

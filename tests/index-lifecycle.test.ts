@@ -183,6 +183,58 @@ test("skill review automatically adds validated creates", async (t) => {
   assert.equal((await skillStore.listPending()).length, 0);
 });
 
+test("approve all confirms once and applies every pending project skill proposal", async (t) => {
+  const { context, extension, skillStore, notifications } = await fixture(t);
+  await extension.emit("session_start", {}, context);
+  const second = await skillStore.stageProposal([{
+    action: "create",
+    name: "release-check",
+    description: "Verify a project release.",
+    content: "# Release check\n\n## Procedure\n\n1. Run release checks. Completion criterion: all checks pass.",
+  }], "setup-session");
+  await skillStore.approveProposal(second.id);
+  await skillStore.stageProposal([{ action: "archive", name: "verification" }], "setup-session");
+  await skillStore.stageProposal([{ action: "archive", name: "release-check" }], "setup-session");
+
+  const confirmations: Array<{ title: string; detail: string }> = [];
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  Object.assign(context.ui, {
+    confirm: async (title: string, detail: string) => {
+      confirmations.push({ title, detail });
+      return true;
+    },
+  });
+  await extension.command("project-skills", "approve all", context);
+
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0]!.title, /Approve all 2 pending/u);
+  assert.match(confirmations[0]!.detail, /archive verification/u);
+  assert.match(confirmations[0]!.detail, /archive release-check/u);
+  assert.equal((await skillStore.listPending()).length, 0);
+  assert.equal((await skillStore.listSkills()).length, 0);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Approved all 2 pending project skill proposals.",
+    type: "info",
+  });
+});
+
+test("project skill deletion archives the skill and clears its pending proposals", async (t) => {
+  const { context, extension, skillStore, notifications } = await fixture(t);
+  await extension.emit("session_start", {}, context);
+  await skillStore.stageProposal([{ action: "archive", name: "verification" }], "setup-session");
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  Object.assign(context.ui, { confirm: async () => true });
+
+  await extension.command("project-skills", "delete verification", context);
+
+  assert.equal((await skillStore.listSkills()).length, 0);
+  assert.equal((await skillStore.listPending()).length, 0);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Archived project skill 'verification'.",
+    type: "info",
+  });
+});
+
 test("skill review reports timeout accurately and records retry backoff", async (t) => {
   const { context, extension, skillStore, notifications } = await fixture(t, {
     reviewTimeoutMs: 5,
