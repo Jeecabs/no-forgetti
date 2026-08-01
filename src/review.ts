@@ -15,11 +15,26 @@ import {
   type ReviewPlan,
 } from "./types.ts";
 
-export const MAX_TRANSCRIPT_CHARS = 32_000;
-export const MAX_TRANSCRIPT_USER_TURNS = 12;
+const MAX_TRANSCRIPT_CHARS = 32_000;
+const MAX_TRANSCRIPT_USER_TURNS = 12;
 
 function stripSkillScaffolding(text: string): string {
-  return text.replace(/<skill\b[^>]*>[\s\S]*?<\/skill>\s*/giu, "").trim();
+  const tags = text.match(/<\/?skill\b[^>]*>/giu) ?? [];
+  let open = false;
+  for (const tag of tags) {
+    const closing = /^<\//u.test(tag);
+    if (closing === open) {
+      open = !closing;
+      continue;
+    }
+    throw new Error("Review evidence contains unmatched skill scaffolding.");
+  }
+  if (open) throw new Error("Review evidence contains unmatched skill scaffolding.");
+  const stripped = text.replace(/<skill\b[^>]*>[\s\S]*?<\/skill>\s*/giu, "");
+  if (/<\/?skill\b/iu.test(stripped)) {
+    throw new Error("Review evidence contains unmatched skill scaffolding.");
+  }
+  return stripped.trim();
 }
 
 function textContent(content: unknown): string {
@@ -36,18 +51,31 @@ function textContent(content: unknown): string {
   return parts.join("\n");
 }
 
+export type ReviewEvidenceCursorStatus = "from-start" | "resolved" | "missing-recent-fallback";
+
 export interface ReviewEvidenceWindow {
   transcript: string;
   throughEntryId?: string;
   includedEntryIds: string[];
+  eligibleUserEntryIds: string[];
   truncated: boolean;
   userTurns: number;
+  cursorStatus: ReviewEvidenceCursorStatus;
+  sanitizationCount: number;
+}
+
+export interface ReviewEvidenceWindowOptions {
+  /** Applied to each complete projected section before turn and character bounds. */
+  sanitizeText?: (text: string) => string;
+  /** Counts redactions/normalizations for selected sections only. */
+  countSanitizations?: (text: string) => number;
 }
 
 interface ReviewTurnChunk {
   entries: readonly SessionEntry[];
   sections: string[];
   userTurns: number;
+  sanitizationCount: number;
 }
 
 function projectSkillUseData(entry: SessionEntry): unknown {
@@ -69,7 +97,10 @@ function projectSkillUseSection(entry: SessionEntry): string | undefined {
 }
 
 function reviewEntrySection(entry: SessionEntry): string | undefined {
-  if (entry.type === "compaction") return `[Prior conversation summary]\n${entry.summary}`;
+  if (entry.type === "compaction") {
+    const summary = stripSkillScaffolding(entry.summary);
+    return summary ? `[Prior conversation summary]\n${summary}` : undefined;
+  }
   const skillUse = projectSkillUseSection(entry);
   if (skillUse) return skillUse;
   if (entry.type !== "message") return undefined;
@@ -88,26 +119,48 @@ function reviewEntrySection(entry: SessionEntry): string | undefined {
   return undefined;
 }
 
-function reviewTurnChunks(entries: readonly SessionEntry[]): ReviewTurnChunk[] {
+function reviewTurnChunks(
+  entries: readonly SessionEntry[],
+  sanitizeText: (text: string) => string,
+  countSanitizations: (text: string) => number,
+): ReviewTurnChunk[] {
   const chunks: ReviewTurnChunk[] = [];
   let currentEntries: SessionEntry[] = [];
   let currentSections: string[] = [];
   let currentUserTurns = 0;
+  let currentSanitizationCount = 0;
   for (const entry of entries) {
     const startsTurn = entry.type === "message" && entry.message.role === "user";
     if (startsTurn && currentUserTurns > 0) {
-      chunks.push({ entries: currentEntries, sections: currentSections, userTurns: currentUserTurns });
+      chunks.push({
+        entries: currentEntries,
+        sections: currentSections,
+        userTurns: currentUserTurns,
+        sanitizationCount: currentSanitizationCount,
+      });
       currentEntries = [];
       currentSections = [];
       currentUserTurns = 0;
+      currentSanitizationCount = 0;
     }
     currentEntries.push(entry);
     if (startsTurn) currentUserTurns += 1;
     const section = reviewEntrySection(entry);
-    if (section) currentSections.push(section);
+    if (section) {
+      const sanitized = sanitizeText(section);
+      if (sanitized) {
+        currentSections.push(sanitized);
+        currentSanitizationCount += countSanitizations(section);
+      }
+    }
   }
   if (currentEntries.length > 0) {
-    chunks.push({ entries: currentEntries, sections: currentSections, userTurns: currentUserTurns });
+    chunks.push({
+      entries: currentEntries,
+      sections: currentSections,
+      userTurns: currentUserTurns,
+      sanitizationCount: currentSanitizationCount,
+    });
   }
   return chunks;
 }
@@ -124,8 +177,17 @@ function recentEntryWindow(entries: readonly SessionEntry[]): readonly SessionEn
  * Build the oldest bounded unreviewed window. Coverage advances only through
  * entries represented by this window, so later history is never skipped.
  */
-export function buildReviewEvidenceWindow(entries: readonly SessionEntry[], afterEntryId?: string): ReviewEvidenceWindow {
+export function buildReviewEvidenceWindow(
+  entries: readonly SessionEntry[],
+  afterEntryId?: string,
+  options: ReviewEvidenceWindowOptions = {},
+): ReviewEvidenceWindow {
   const cursorIndex = afterEntryId ? entries.findIndex((entry) => entry.id === afterEntryId) : -1;
+  const cursorStatus: ReviewEvidenceCursorStatus = afterEntryId === undefined
+    ? "from-start"
+    : cursorIndex >= 0
+      ? "resolved"
+      : "missing-recent-fallback";
   // A cursor that no longer resolves (compaction or fork dropped its entry) must
   // not rewind coverage to the oldest turn, or the cursor would move backwards
   // and every already-reviewed turn would be re-derived window by window.
@@ -137,7 +199,11 @@ export function buildReviewEvidenceWindow(entries: readonly SessionEntry[], afte
   const selected: ReviewTurnChunk[] = [];
   let chars = 0;
   let userTurns = 0;
-  for (const chunk of reviewTurnChunks(scopedEntries)) {
+  for (const chunk of reviewTurnChunks(
+    scopedEntries,
+    options.sanitizeText ?? ((text) => text),
+    options.countSanitizations ?? (() => 0),
+  )) {
     if (userTurns > 0 && userTurns + chunk.userTurns > MAX_TRANSCRIPT_USER_TURNS) break;
     const text = chunk.sections.join("\n\n");
     const separator = selected.length > 0 && text ? 2 : 0;
@@ -157,12 +223,17 @@ export function buildReviewEvidenceWindow(entries: readonly SessionEntry[], afte
     transcript,
     ...(includedEntries.at(-1)?.id ? { throughEntryId: includedEntries.at(-1)!.id } : {}),
     includedEntryIds: includedEntries.map((entry) => entry.id),
+    eligibleUserEntryIds: scopedEntries.flatMap((entry) => (
+      entry.type === "message" && entry.message.role === "user" ? [entry.id] : []
+    )),
     truncated: includedEntries.length < scopedEntries.length || full.length > MAX_TRANSCRIPT_CHARS,
     userTurns,
+    cursorStatus,
+    sanitizationCount: selected.reduce((sum, chunk) => sum + chunk.sanitizationCount, 0),
   };
 }
 
-export function buildReviewTranscript(entries: readonly SessionEntry[], afterEntryId?: string): string {
+function buildReviewTranscript(entries: readonly SessionEntry[], afterEntryId?: string): string {
   return buildReviewEvidenceWindow(entries, afterEntryId).transcript;
 }
 

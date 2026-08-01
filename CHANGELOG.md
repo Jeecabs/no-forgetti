@@ -1,9 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-08-01
 
-- Author project skills through an explicit `writing-great-skills` evidence, curation, hierarchy, and pruning audit. Replace the 60-character description target with a 500-character safety ceiling.
-- Settle malformed generated skills as no-ops and quarantine invalid persisted proposals so they cannot block project-skill commands.
+- Author project skills from a bounded, sanitized evidence packet with atomic corpus capture and exact omission metadata.
+- Apply allowlisted project conventions and the `writing-great-skills` doctrine. Replace the 60-character description target with a 500-character safety ceiling.
+- Scope review cadence by hashed session and exact entry IDs. Preserve unrelated forks and concurrent sessions while settling only the captured evidence frontier.
+- Bind each `xhigh` skill review to an immutable prompt-versioned job. Require exact evidence spans or action references. Record reviewer provenance, usage, cost, operation digests, and target generation/content or absence bindings.
+- Keep invalid output, invalid admission, and runner failures from consuming evidence. Quarantine malformed persisted proposals and discard only typed stale-target conflicts.
+- Require explicit approval for generated patches and archives. Keep validated creates automatic for compatibility, with generated-package checks at the store boundary.
+- Add a mutation-free project-skill reviewer evaluation harness with deterministic replay scoring.
+- Require explicit live profiles and hard call, token, cost, and output budgets.
+- Use the TypeScript 7 native preview (`tsgo`) for faster type checks.
 
 ## 0.4.3 - 2026-07-31
 

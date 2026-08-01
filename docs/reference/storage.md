@@ -39,14 +39,17 @@ $PI_CODING_AGENT_DIR/no-forgetti/
     │   ├── main.json
     │   └── experiment.json
     ├── skills/
-    │   ├── <skill-name>/SKILL.md
+    │   ├── <skill-name>/
+    │   │   ├── SKILL.md
+    │   │   └── review.json              # latest background authorship receipt, when present
     │   └── .archive/
     ├── skill-activity-index/
     │   ├── state.json
     │   ├── sessions/<hashed-session-id>.json
     │   └── generations/<generation-id>.json
-    ├── skill-pending/
-    ├── skill-revisions/
+    ├── skill-review.json                 # v3 session-scoped exact cadence and lease
+    ├── skill-pending/                    # bound proposals and reviewer receipts
+    ├── skill-revisions/                  # frozen skill snapshots and patch receipts
     ├── service/
     │   ├── commit-receipts/
     │   └── review-feedback/
@@ -57,15 +60,17 @@ $PI_CODING_AGENT_DIR/no-forgetti/
 
 ## Authority
 
-The filesystem is authoritative for the review queue, provider attempts, budgets, decisions, and canonical project memory. SQLite is an observational ledger for status and inspection; it is not queue or memory authority.
+The filesystem is authoritative for the review queue, provider attempts, budgets, decisions, and canonical project memory. SQLite is an observational ledger for status and inspection. It is not queue or memory authority.
 
-A cross-process lock serializes project-memory read-modify-write operations. External admission additionally uses durable project intents and exact compare-and-swap checks.
+A cross-process lock serializes project-memory read-modify-write operations. External admission also uses durable project intents and exact compare-and-swap checks.
 
 ## Permissions and sensitivity
 
 Service configuration never contains credentials. Provider authentication stays in Pi’s `auth.json` or the worker process environment.
 
-Queued evidence is sanitized, but review spool and project service records remain sensitive. Result checkpoints can include sanitized jobs and model proposals. Active admission intents can include frozen memory post-state. Keep the whole agent directory private to your user.
+No Forgetti sanitizes queued evidence, but review spool and project service records remain sensitive. Result checkpoints can include sanitized jobs and model proposals. Active admission intents can include frozen memory post-state. Project-skill receipts contain job, prompt, attempt, operation, and target-binding digests.
+
+Receipts also contain requested and observed model identities, timestamps, token usage, and cost. They do not contain raw model output or resolved credentials. Keep the whole agent directory private to your user.
 
 ## Retention and deletion
 
@@ -73,6 +78,8 @@ The worker periodically enforces `evidenceTtlHours` for terminal spool records, 
 
 Stop every external worker before removing review state. Deleting unresolved state abandons recovery guarantees. See the complete procedure and threat model in [SECURITY.md](https://github.com/Jeecabs/no-forgetti/blob/main/SECURITY.md).
 
-## Legacy skill activity
+## Legacy state
 
-Legacy `skill-activity.json` migrates once into bounded per-session and per-generation records. The old file is retained as `skill-activity.json.legacy`.
+No Forgetti migrates legacy `skill-activity.json` once into bounded per-session and per-generation records. It retains the old file as `skill-activity.json.legacy`.
+
+Project-skill cadence migrates from versions 1 and 2 to version 3. Migration preserves global failure backoff and claim generation. It discards unattributed pending counters because it cannot assign them safely to a session path.

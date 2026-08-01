@@ -32,7 +32,11 @@ import { createReviewJob, replayReviewJob, type ReviewJob } from "./service/prot
 import { ReviewSpool } from "./service/spool.ts";
 import { formatReviewServiceMonitorText, showReviewServiceMonitor, type MemoryMonitorSummary } from "./service/tui.ts";
 import { PROJECT_SKILL_USE_ENTRY, projectSkillNameFromInvocation, projectSkillNameFromReadPath } from "./skill-native.ts";
+import { buildSkillAuthorshipPacket } from "./skill-authorship-packet.ts";
+import { buildSkillConventionSnapshot } from "./skill-conventions.ts";
 import { renderSkillChange } from "./skill-diff.ts";
+import { createSkillReviewJob } from "./skill-review-job.ts";
+import { createSkillReviewReceipt } from "./skill-review-provenance.ts";
 import { requestSkillReviewPlan } from "./skill-review.ts";
 import { ProjectSkillStore } from "./skill-store.ts";
 import { showSkillPicker, showSkillViewer } from "./skill-ui.ts";
@@ -877,8 +881,6 @@ export function activateProjectMemoryExtension(
     }
     const projectSkills = skillStore;
     if (!projectSkills) return;
-    const reviewAfterEntryId = skillReviewCursorId;
-    const throughEntryId = ctx.sessionManager.getLeafId();
     const controller = new AbortController();
     skillReviewController = controller;
     skillReviewPromise = (async () => {
@@ -886,36 +888,84 @@ export function activateProjectMemoryExtension(
       let success = false;
       let cancelled = false;
       let commitStarted = false;
+      let reviewedThroughEntryId: string | undefined;
       let reviewTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        claim = await projectSkills.claimReviewIfDue({ force });
+        const sessionId = ctx.sessionManager.getSessionId();
+        const packet = await buildSkillAuthorshipPacket({
+          entries: ctx.sessionManager.getBranch(),
+          afterEntryId: skillReviewCursorId,
+          pendingReviewEntryIds: await projectSkills.pendingReviewEntryIds(sessionId),
+          projectRoot: store?.projectRoot,
+          ...(store ? {
+            conventions: await buildSkillConventionSnapshot({
+              projectRoot: store.projectRoot,
+              memory: frozenBranch,
+            }),
+          } : {}),
+          store: projectSkills,
+        });
+        claim = await projectSkills.claimReviewIfDue({
+          sessionId,
+          selectedEntryIds: packet.coverage.includedUserEntryIds,
+          eligibleEntryIds: packet.coverage.eligibleUserEntryIds,
+          force,
+        });
         if (!claim) return;
         if (controller.signal.aborted) {
           cancelled = controller.signal.reason === REVIEW_ABORT_LIFECYCLE;
           return;
         }
+        const memoryStore = requireStore();
+        const job = createSkillReviewJob({
+          projectKey: memoryStore.projectKey,
+          sessionId,
+          claimGeneration: claim.generation,
+          packet,
+        });
         skillReviewRunning = true;
         refreshStatus(ctx);
         reviewTimeout = setTimeout(() => controller.abort(REVIEW_ABORT_TIMEOUT), dependencies.reviewTimeoutMs);
-        const plan = await settleOnAbort({
-          promise: dependencies.requestSkillReviewPlan(ctx, projectSkills, reviewAfterEntryId, controller.signal),
+        const reviewResult = await settleOnAbort({
+          promise: dependencies.requestSkillReviewPlan(ctx, job, controller.signal),
           signal: controller.signal,
           message: "Project skill review was aborted.",
         });
         if (controller.signal.aborted) throw new Error("Project skill review was aborted.");
         clearTimeout(reviewTimeout);
         reviewTimeout = undefined;
-        // Validated model output is the commit point. Local proposal admission is
-        // bounded and atomic; lifecycle cancellation waits for it to finish.
+        const { outcome, profile } = reviewResult;
+        if (outcome.disposition === "aborted") throw new Error("Project skill review was aborted.");
+        if (outcome.disposition === "runner-failure") {
+          throw new Error(`Project skill reviewer failed (${outcome.failure?.code ?? "unknown_runner_failure"}).`);
+        }
+        if (outcome.disposition === "invalid-output") {
+          throw new Error("Project skill reviewer returned invalid output twice.");
+        }
+        const plan = outcome.plan;
+        // A validated proposal or explicit no-change is the commit point. Invalid
+        // output and runner failures retain evidence and enter cadence backoff.
         commitStarted = true;
         if (plan.operations.length > 0) {
           const operation = plan.operations.at(0)!;
+          const target = operation.action === "create"
+            ? undefined
+            : packet.corpus.catalog.find((skill) => skill.name === operation.name);
+          const review = createSkillReviewReceipt({ job, outcome, profile });
           const submission = await projectSkills.submitReviewProposal({
             operations: plan.operations,
-            sourceSessionId: ctx.sessionManager.getSessionId(),
+            sourceSessionId: sessionId,
+            review,
+            ...(target ? {
+              binding: {
+                generationId: target.generationId,
+                contentDigest: target.contentDigest,
+              },
+            } : {}),
           });
           if (submission.discarded) {
             pendingSkillCount = (await projectSkills.listPending()).length;
+            if (submission.kind === "invalid-admission") throw new Error(submission.message);
             if (ctx.hasUI) ctx.ui.notify(submission.message, "warning");
           } else if (submission.result) {
             if (operation.action === "create") activeSkillCount += 1;
@@ -942,7 +992,7 @@ export function activateProjectMemoryExtension(
         } else if (force && ctx.hasUI) {
           ctx.ui.notify("Project skill review: no reusable workflow change found.", "info");
         }
-        if (throughEntryId) appendSkillReviewCursor(throughEntryId);
+        reviewedThroughEntryId = packet.coverage.frontierEntryId;
         success = true;
       } catch (error) {
         const abortReason = !commitStarted && controller.signal.aborted ? controller.signal.reason : undefined;
@@ -962,7 +1012,18 @@ export function activateProjectMemoryExtension(
         if (reviewTimeout) clearTimeout(reviewTimeout);
         if (claim) {
           const outcome = success ? "success" : cancelled ? "cancelled" : "failure";
-          await projectSkills.finishReview({ claim, outcome }).catch(() => undefined);
+          let settled = false;
+          try {
+            settled = await projectSkills.finishReview({ claim, outcome });
+          } catch (error) {
+            if (success && ctx.hasUI) {
+              ctx.ui.notify(`Project skill review coverage settlement failed: ${errorMessage(error)}`, "warning");
+            }
+          }
+          if (success && settled && reviewedThroughEntryId) appendSkillReviewCursor(reviewedThroughEntryId);
+          if (success && !settled && ctx.hasUI) {
+            ctx.ui.notify("Project skill review result was admitted, but its evidence remains due for safe retry.", "warning");
+          }
         }
         skillReviewRunning = false;
         refreshStatus(ctx);
@@ -1719,15 +1780,16 @@ export function activateProjectMemoryExtension(
     },
   });
 
-  function consumeCompletedInputs(ctx: ExtensionContext): { inputs: string[]; unseenIds: Set<string> } {
+  function consumeCompletedInputs(ctx: ExtensionContext): Array<{ entryId: string; text: string }> {
     const unseen = ctx.sessionManager.getBranch().filter((entry) =>
       entry.type === "message" && entry.message.role === "user" && !knownUserEntryIds.has(entry.id)
     );
     for (const entry of unseen) knownUserEntryIds.add(entry.id);
     const completedCount = Math.min(unseen.length, pendingUserInputs.length);
+    const entries = unseen.slice(-completedCount);
     const inputs = pendingUserInputs.slice(-completedCount);
     pendingUserInputs = [];
-    return { inputs, unseenIds: new Set(unseen.map((entry) => entry.id)) };
+    return entries.map((entry, index) => ({ entryId: entry.id, text: inputs[index]! }));
   }
 
   async function trackSkillUses(names: string[], ctx: ExtensionContext): Promise<string[]> {
@@ -1758,20 +1820,31 @@ export function activateProjectMemoryExtension(
   }
 
   async function recordCompletedTurnSignals(
-    inputs: string[],
-    unseenIds: Set<string>,
+    turns: Array<{ entryId: string; text: string }>,
     ctx: ExtensionContext,
   ): Promise<void> {
     const branch = ctx.sessionManager.getBranch();
-    const lastNewUserIndex = branch.reduce((index, entry, currentIndex) => (
-      entry.type === "message" && entry.message.role === "user" && unseenIds.has(entry.id) ? currentIndex : index
-    ), -1);
-    const completedTurnEntries = lastNewUserIndex >= 0 ? branch.slice(lastNewUserIndex) : [];
-    const toolResultCount = completedTurnEntries.filter((entry) => entry.type === "message" && entry.message.role === "toolResult").length;
-    const complexitySignal = toolResultCount >= 5 ? 4 : 0;
-    for (const text of inputs) {
-      await store!.recordUserTurn(activeName, scoreMemorySignal(text));
-      if (skillStore) await skillStore.recordUserTurn(scoreSkillSignal(text) + complexitySignal);
+    const indexes = new Map(branch.map((entry, index) => [entry.id, index]));
+    for (const turn of turns) {
+      const start = indexes.get(turn.entryId);
+      const nextUser = start === undefined
+        ? -1
+        : branch.findIndex((entry, index) => index > start && entry.type === "message" && entry.message.role === "user");
+      const completedTurnEntries = start === undefined
+        ? []
+        : branch.slice(start, nextUser < 0 ? undefined : nextUser);
+      const toolResultCount = completedTurnEntries.filter((entry) => (
+        entry.type === "message" && entry.message.role === "toolResult"
+      )).length;
+      const complexitySignal = toolResultCount >= 5 ? 2 : 0;
+      await store!.recordUserTurn(activeName, scoreMemorySignal(turn.text));
+      if (skillStore) {
+        await skillStore.recordUserTurn({
+          sessionId: ctx.sessionManager.getSessionId(),
+          entryId: turn.entryId,
+          signalScore: Math.max(scoreSkillSignal(turn.text), complexitySignal),
+        });
+      }
     }
   }
 
@@ -1918,12 +1991,12 @@ export function activateProjectMemoryExtension(
     observedNativeSkillUses.clear();
     if (!store) return;
     const completed = consumeCompletedInputs(ctx);
-    if (!lastAgentRunSuccessful || completed.inputs.length === 0) return;
+    if (!lastAgentRunSuccessful || completed.length === 0) return;
 
     const trackedSkillUses = await trackSkillUses(settledSkillUses, ctx);
     if (trackedSkillUses.length > 0) pi.appendEntry(PROJECT_SKILL_USE_ENTRY, { names: trackedSkillUses });
     await completeSkillSession(ctx);
-    await recordCompletedTurnSignals(completed.inputs, completed.unseenIds, ctx);
+    await recordCompletedTurnSignals(completed, ctx);
 
     const reviewExisting = reviewExistingSession;
     reviewExistingSession = false;

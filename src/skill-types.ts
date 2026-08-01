@@ -44,11 +44,68 @@ export interface SkillOperation {
   evidence?: string[];
 }
 
+export interface SkillProposalBinding {
+  generationId: string;
+  contentDigest: string;
+}
+
+export interface SkillReviewerProfileReceipt {
+  digest: string;
+  provider: string;
+  model: string;
+  api: string;
+  reasoningEffort: string;
+  maxOutputTokens?: number;
+}
+
+export interface SkillReviewAttemptReceipt {
+  ordinal: number;
+  promptDigest: string;
+  requestDigest: string;
+  outputDigest: string;
+  invalidOutput: boolean;
+  provider: string;
+  model: string;
+  api: string;
+  responseModel?: string;
+  responseId?: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costTotal: number;
+}
+
+export type SkillReviewTargetReceipt =
+  | { kind: "absent"; name: string }
+  | { kind: "existing"; name: string; generationId: string; contentDigest: string };
+
+export interface SkillReviewReceipt {
+  version: 1;
+  jobId: string;
+  jobDigest: string;
+  promptVersion: 1;
+  systemPromptDigest: string;
+  initialPromptDigest: string;
+  requestDigest: string;
+  operationDigest: string;
+  target: SkillReviewTargetReceipt;
+  outcomeDigest: string;
+  receiptDigest: string;
+  profile: SkillReviewerProfileReceipt;
+  attempts: SkillReviewAttemptReceipt[];
+}
+
 export interface SkillProposal {
   version: number;
   id: string;
   createdAt: string;
   sourceSessionId?: string;
+  origin?: SkillWriteOrigin;
+  binding?: SkillProposalBinding;
+  review?: SkillReviewReceipt;
   retention?: boolean;
   retentionSession?: number;
   retentionAfterSessions?: number;
@@ -65,23 +122,34 @@ export interface SkillUseResult {
   withdrawnRetentionProposals: number;
 }
 
+export interface SkillReviewPendingTurn {
+  entryId: string;
+  signalScore: number;
+}
+
+export interface SkillReviewSessionState {
+  pending: SkillReviewPendingTurn[];
+}
+
 export interface SkillReviewClaim {
   generation: number;
   token: string;
+  sessionKey: string;
+  evidenceEntryIds: string[];
   capturedTurns: number;
   capturedSignalScore: number;
 }
 
 export interface SkillReviewState {
   version: number;
-  turnsSinceReview: number;
-  signalScore: number;
+  sessions: Record<string, SkillReviewSessionState>;
   consecutiveFailures: number;
   generation?: number;
   activeClaim?: SkillReviewClaim;
   lastReviewedAt?: string;
   lastAttemptAt?: string;
   nextAttemptAt?: string;
+  /** May temporarily fence v3 claims after migration from an unattributed v2 lease. */
   inFlightUntil?: string;
 }
 

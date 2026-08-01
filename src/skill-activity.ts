@@ -89,14 +89,14 @@ function validateGenerationId(value: string): string {
   return value;
 }
 
-function sessionKey(sessionId: string): string {
+export function projectSkillSessionKey(sessionId: string): string {
   const normalized = sessionId.trim();
   if (!normalized || normalized !== sessionId || normalized.length > 256) throw new Error("Invalid project skill session id.");
   return createHash("sha256").update(normalized).digest("hex").slice(0, 32);
 }
 
 function legacySessionKey(value: string): string {
-  return SESSION_KEY.test(value) ? value : sessionKey(value);
+  return SESSION_KEY.test(value) ? value : projectSkillSessionKey(value);
 }
 
 function parseState(value: unknown): ActivityState {
@@ -184,7 +184,7 @@ export class SkillActivityIndex {
   async beginSession(sessionId: string): Promise<{ isNew: boolean; completedCount: number }> {
     await this.recoverJournal();
     const state = await this.loadState();
-    const path = this.sessionPath(sessionKey(sessionId));
+    const path = this.sessionPath(projectSkillSessionKey(sessionId));
     if (await this.exists(path)) return { isNew: false, completedCount: state.completedCount };
     if (state.begunCount >= MAX_SESSIONS) throw new Error("Project skill activity session limit reached.");
     await this.commit([
@@ -196,7 +196,7 @@ export class SkillActivityIndex {
 
   async recordUse(sessionId: string, generationId: string): Promise<GenerationUsage> {
     await this.recoverJournal();
-    const key = sessionKey(sessionId);
+    const key = projectSkillSessionKey(sessionId);
     const generation = validateGenerationId(generationId);
     const state = await this.loadState();
     const sessionPath = this.sessionPath(key);
@@ -227,7 +227,7 @@ export class SkillActivityIndex {
 
   async completeSession(sessionId: string): Promise<{ isNew: boolean; completedCount: number; usedGenerationIds: string[] }> {
     await this.recoverJournal();
-    const key = sessionKey(sessionId);
+    const key = projectSkillSessionKey(sessionId);
     const state = await this.loadState();
     const path = this.sessionPath(key);
     const session = this.parseSessionForState(await this.readJson(path), state);
