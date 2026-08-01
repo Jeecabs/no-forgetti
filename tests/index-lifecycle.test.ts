@@ -8,8 +8,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { activateProjectMemoryExtension, resolvePendingRef, type ExtensionDependencies } from "../src/index.ts";
 import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
+import type { SkillReviewJob } from "../src/skill-review-job.ts";
+import type { SkillReviewResult } from "../src/skill-review.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
-import { MAX_SKILL_DESCRIPTION_CHARS, type SkillProposal } from "../src/skill-types.ts";
+import { MAX_SKILL_DESCRIPTION_CHARS, type SkillOperation, type SkillProposal } from "../src/skill-types.ts";
 import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
 import { ReviewDecisionStore } from "../src/service/decisions.ts";
 import { createReviewOutcome } from "../src/service/protocol.ts";
@@ -124,6 +126,53 @@ function userEntry(id: string, text: string): Record<string, unknown> {
   return { id, type: "message", message: { role: "user", content: text } };
 }
 
+function skillReviewResult(
+  job: Readonly<SkillReviewJob>,
+  operations: SkillOperation[] = [],
+  disposition: "proposed" | "no-change" | "invalid-output" = operations.length > 0 ? "proposed" : "no-change",
+): SkillReviewResult {
+  const profile = {
+    provider: "test",
+    model: "reviewer",
+    api: "test-api",
+    reasoningEffort: "xhigh",
+    maxOutputTokens: 8_192,
+  };
+  return {
+    profile,
+    outcome: {
+      version: 1,
+      kind: "project-skill-review-outcome",
+      jobId: job.id,
+      jobDigest: job.digest,
+      disposition,
+      plan: { operations },
+      attempts: disposition === "invalid-output" ? [] : [{
+        ordinal: 1,
+        promptDigest: job.contract.initialPromptDigest,
+        requestDigest: job.contract.requestDigest,
+        outputDigest: "b".repeat(64),
+        provenance: {
+          provider: profile.provider,
+          model: profile.model,
+          api: profile.api,
+          startedAt: "2026-01-01T00:00:00.000Z",
+          completedAt: "2026-01-01T00:00:00.100Z",
+          durationMs: 100,
+          usage: {
+            input: 10,
+            output: 5,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 15,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+        },
+      }],
+    },
+  };
+}
+
 const assistantMessage = { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" };
 const overlongSkillDescription = `${"x".repeat(MAX_SKILL_DESCRIPTION_CHARS)}.`;
 
@@ -168,14 +217,70 @@ test("model tool records assessed importance on new memory", async (t) => {
   assert.ok(entry.importanceAssessedAt);
 });
 
+test("skill review advances only through each bounded authorship packet", async (t) => {
+  const packets: Array<{ coverage: { frontierEntryId?: string; includedUserEntryIds: string[] } }> = [];
+  const { branch, context, extension } = await fixture(t, {
+    requestSkillReviewPlan: async (_ctx, job) => {
+      packets.push(job);
+      return skillReviewResult(job);
+    },
+  });
+  await extension.emit("session_start", {}, context);
+  branch.push(...Array.from({ length: 14 }, (_, index) => userEntry(`user-${index + 1}`, `turn ${index + 1}`)));
+
+  await extension.command("project-skills", "review", context);
+  await extension.command("project-skills", "review", context);
+
+  assert.equal(packets.length, 2);
+  assert.equal(packets[0]?.coverage.frontierEntryId, "user-12");
+  assert.deepEqual(packets[0]?.coverage.includedUserEntryIds, Array.from({ length: 12 }, (_, index) => `user-${index + 1}`));
+  assert.equal(packets[1]?.coverage.frontierEntryId, "user-14");
+  assert.deepEqual(packets[1]?.coverage.includedUserEntryIds, ["user-13", "user-14"]);
+  const cursors = extension.entries.filter((entry) => entry.customType === "no-forgetti-skill-review");
+  assert.deepEqual(cursors.map((entry) => (entry.data as { throughEntryId: string }).throughEntryId), ["user-12", "user-14"]);
+});
+
+test("skill review does not advance coverage when exact cadence settlement fails", async (t) => {
+  const { branch, context, extension, skillStore, notifications } = await fixture(t, {
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  branch.push(userEntry("user-1", "durable workflow evidence"));
+  skillStore.finishReview = async () => false;
+
+  await extension.command("project-skills", "review", context);
+
+  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-skill-review"), false);
+  assert.match(notifications.at(-1)?.message ?? "", /evidence remains due/u);
+});
+
+test("typed invalid reviewer output retains exact evidence instead of settling no-change", async (t) => {
+  let attempts = 0;
+  const { branch, context, extension } = await fixture(t, {
+    requestSkillReviewPlan: async (_ctx, job) => {
+      attempts += 1;
+      return skillReviewResult(job, [], "invalid-output");
+    },
+  });
+  await extension.emit("session_start", {}, context);
+  branch.push(userEntry("user-1", "durable workflow evidence"));
+
+  await extension.command("project-skills", "review", context);
+  await extension.command("project-skills", "review", context);
+
+  assert.equal(attempts, 2);
+  assert.equal(extension.entries.some((entry) => entry.customType === "no-forgetti-skill-review"), false);
+});
+
 test("skill review automatically adds validated creates", async (t) => {
   const { context, extension, skillStore } = await fixture(t, {
-    requestSkillReviewPlan: async () => ({ operations: [{
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
       action: "create",
       name: "release-check",
       description: "Verify a project release.",
       content: "# Release check\n\n## Steps\n\n1. Run release checks. Done when: all checks pass.",
-    }] }),
+    }]),
   });
   await extension.emit("session_start", {}, context);
   await extension.command("project-skills", "review", context);
@@ -184,14 +289,64 @@ test("skill review automatically adds validated creates", async (t) => {
   assert.equal((await skillStore.listPending()).length, 0);
 });
 
-test("skill review discards an invalid resulting description without leaving approval work", async (t) => {
+test("skill review stages patches for explicit approval without mutating the active skill", async (t) => {
   const { context, extension, skillStore, notifications } = await fixture(t, {
-    requestSkillReviewPlan: async () => ({ operations: [{
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
+      action: "patch",
+      name: "verification",
+      oldText: "canonical check",
+      newText: "canonical verification check",
+    }]),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+  await extension.command("project-skills", "review", context);
+
+  assert.match((await skillStore.loadSkill("verification")).content, /canonical check/u);
+  const pending = await skillStore.listPending();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.origin, "background_review");
+  assert.equal(pending[0]?.operations.at(0)?.action, "patch");
+  assert.deepEqual(notifications.at(-1), {
+    message: "Project skill review staged patch 'verification'. Inspect with /project-skills pending verification",
+    type: "info",
+  });
+});
+
+test("foreground editing never coalesces with a pending background patch", async (t) => {
+  const { context, extension, skillStore } = await fixture(t, {
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
+      action: "patch",
+      name: "verification",
+      oldText: "canonical check",
+      newText: "background verification check",
+    }]),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  Object.assign(context.ui, {
+    editor: async (_title: string, content: string) => content.replace("canonical check", "foreground verification check"),
+  });
+  await extension.emit("session_start", {}, context);
+  await extension.command("project-skills", "review", context);
+  const background = (await skillStore.listPending()).at(0);
+  assert.equal(background?.origin, "background_review");
+
+  await extension.command("project-skills", "edit verification", context);
+
+  assert.match((await skillStore.loadSkill("verification")).content, /foreground verification check/u);
+  const pending = await skillStore.listPending();
+  assert.deepEqual(pending.map(({ id }) => id), [background?.id]);
+  assert.equal(pending[0]?.origin, "background_review");
+});
+
+test("invalid patch admission retains review evidence without leaving approval work", async (t) => {
+  const { context, extension, skillStore, notifications } = await fixture(t, {
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
       action: "patch",
       name: "verification",
       oldText: "Run the canonical project verification.",
       newText: overlongSkillDescription,
-    }] }),
+    }]),
   });
   Object.assign(context, { hasUI: true, mode: "tui" });
   await extension.emit("session_start", {}, context);
@@ -200,19 +355,19 @@ test("skill review discards an invalid resulting description without leaving app
   assert.equal((await skillStore.loadSkill("verification")).description, "Run the canonical project verification.");
   assert.equal((await skillStore.listPending()).length, 0);
   assert.deepEqual(notifications.at(-1), {
-    message: "Discarded invalid project skill proposal 'verification'.",
+    message: "Project skill review failed: Discarded invalid project skill proposal 'verification'.",
     type: "warning",
   });
 });
 
-test("malformed generated creates settle as a no-op instead of retrying", async (t) => {
+test("malformed generated creates retain evidence and enter retry backoff", async (t) => {
   const { context, extension, skillStore, notifications } = await fixture(t, {
-    requestSkillReviewPlan: async () => ({ operations: [{
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
       action: "create",
       name: "release-check",
       description: overlongSkillDescription,
       content: "# Release check\n\n## Steps\n\n1. Run release checks. Done when: all checks pass.",
-    }] }),
+    }]),
   });
   Object.assign(context, { hasUI: true, mode: "tui" });
   await extension.emit("session_start", {}, context);
@@ -221,9 +376,9 @@ test("malformed generated creates settle as a no-op instead of retrying", async 
   await assert.rejects(skillStore.loadSkill("release-check"), { code: "ENOENT" });
   assert.equal((await skillStore.listPending()).length, 0);
   const reviewState = JSON.parse(await readFile(skillStore.reviewPath, "utf8")) as { consecutiveFailures: number };
-  assert.equal(reviewState.consecutiveFailures, 0);
+  assert.equal(reviewState.consecutiveFailures, 1);
   assert.deepEqual(notifications.at(-1), {
-    message: "Discarded invalid project skill proposal.",
+    message: "Project skill review failed: Discarded invalid project skill proposal.",
     type: "warning",
   });
 });
@@ -283,7 +438,7 @@ test("project skill deletion archives the skill and clears its pending proposals
 test("skill review reports timeout accurately and records retry backoff", async (t) => {
   const { context, extension, skillStore, notifications } = await fixture(t, {
     reviewTimeoutMs: 5,
-    requestSkillReviewPlan: async (_ctx, _store, _afterEntryId, signal) =>
+    requestSkillReviewPlan: async (_ctx, _packet, signal) =>
       new Promise<never>((_resolve, reject) => {
         signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
       }),
@@ -305,11 +460,12 @@ test("skill review reports timeout accurately and records retry backoff", async 
 });
 
 test("skill review timeout settles when the reviewer ignores cancellation", async (t) => {
-  let release!: (plan: { operations: [] }) => void;
-  const ignoredCancellation = new Promise<{ operations: [] }>((resolve) => { release = resolve; });
+  let release!: () => void;
   const { context, extension, notifications } = await fixture(t, {
     reviewTimeoutMs: 5,
-    requestSkillReviewPlan: async () => ignoredCancellation,
+    requestSkillReviewPlan: async (_ctx, job) => new Promise<SkillReviewResult>((resolve) => {
+      release = () => resolve(skillReviewResult(job));
+    }),
   });
   Object.assign(context, { hasUI: true, mode: "tui" });
   await extension.emit("session_start", {}, context);
@@ -319,7 +475,7 @@ test("skill review timeout settles when the reviewer ignores cancellation", asyn
     review.then(() => true),
     new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
   ]);
-  release({ operations: [] });
+  release();
   await review;
 
   assert.equal(settledBeforeReviewer, true);
@@ -333,7 +489,7 @@ test("skill review lifecycle cancellation stays silent and preserves cadence", a
   let entered!: () => void;
   const started = new Promise<void>((resolve) => { entered = resolve; });
   const { context, extension, skillStore, notifications } = await fixture(t, {
-    requestSkillReviewPlan: async (_ctx, _store, _afterEntryId, signal) => {
+    requestSkillReviewPlan: async (_ctx, _packet, signal) => {
       entered();
       return new Promise<never>((_resolve, reject) => {
         signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
@@ -342,7 +498,10 @@ test("skill review lifecycle cancellation stays silent and preserves cadence", a
   });
   Object.assign(context, { hasUI: true, mode: "tui" });
   await extension.emit("session_start", {}, context);
-  for (let turn = 0; turn < 10; turn += 1) await skillStore.recordUserTurn();
+  const entryIds = Array.from({ length: 10 }, (_, index) => `cancel-user-${index + 1}`);
+  for (const entryId of entryIds) {
+    await skillStore.recordUserTurn({ sessionId: "lifecycle-session", entryId });
+  }
   const review = extension.command("project-skills", "review", context);
   await started;
   await extension.emit("session_shutdown", {}, context);
@@ -355,7 +514,11 @@ test("skill review lifecycle cancellation stays silent and preserves cadence", a
   };
   assert.equal(state.consecutiveFailures, 0);
   assert.equal(state.nextAttemptAt, undefined);
-  assert.ok(await skillStore.claimReviewIfDue());
+  assert.ok(await skillStore.claimReviewIfDue({
+    sessionId: "lifecycle-session",
+    selectedEntryIds: entryIds,
+    eligibleEntryIds: entryIds,
+  }));
 });
 
 test("skill review cancellation during a delayed claim releases its fenced lease", async (t) => {
@@ -365,14 +528,17 @@ test("skill review cancellation during a delayed claim releases its fenced lease
   const claimBarrier = new Promise<void>((resolve) => { releaseClaim = resolve; });
   let modelCalls = 0;
   const { context, extension, skillStore, notifications } = await fixture(t, {
-    requestSkillReviewPlan: async () => {
+    requestSkillReviewPlan: async (_ctx, job) => {
       modelCalls += 1;
-      return { operations: [] };
+      return skillReviewResult(job);
     },
   });
   Object.assign(context, { hasUI: true, mode: "tui" });
   await extension.emit("session_start", {}, context);
-  for (let turn = 0; turn < 10; turn += 1) await skillStore.recordUserTurn();
+  const entryIds = Array.from({ length: 10 }, (_, index) => `delayed-user-${index + 1}`);
+  for (const entryId of entryIds) {
+    await skillStore.recordUserTurn({ sessionId: "lifecycle-session", entryId });
+  }
   const originalClaim = skillStore.claimReviewIfDue.bind(skillStore);
   skillStore.claimReviewIfDue = async (...args) => {
     claimEntered();
@@ -388,7 +554,11 @@ test("skill review cancellation during a delayed claim releases its fenced lease
 
   assert.equal(modelCalls, 0);
   assert.deepEqual(notifications, []);
-  assert.ok(await originalClaim(), "cancelled claim leaves cadence due");
+  assert.ok(await originalClaim({
+    sessionId: "lifecycle-session",
+    selectedEntryIds: entryIds,
+    eligibleEntryIds: entryIds,
+  }), "cancelled claim leaves cadence due");
 });
 
 test("validated skill plans finish atomic admission after the commit point", async (t) => {
@@ -398,12 +568,12 @@ test("validated skill plans finish atomic admission after the commit point", asy
   const submitBarrier = new Promise<void>((resolve) => { releaseSubmit = resolve; });
   const { context, extension, skillStore, notifications } = await fixture(t, {
     reviewTimeoutMs: 5,
-    requestSkillReviewPlan: async () => ({ operations: [{
+    requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
       action: "create",
       name: "commit-after-plan",
       description: "Commit a validated skill plan.",
       content: "# Commit after plan\n\n## Steps\n\n1. Commit validated output. Done when: admission succeeds.",
-    }] }),
+    }]),
   });
   const originalSubmit = skillStore.submitProposal.bind(skillStore);
   skillStore.submitProposal = async (...args) => {

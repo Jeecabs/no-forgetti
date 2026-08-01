@@ -1,118 +1,124 @@
 import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { buildReviewTranscript } from "./review.ts";
-import { buildSkillReviewPrompt } from "./skill-authoring.ts";
-import { validateSkillContent, validateSkillDescription } from "./skill-security.ts";
-import { ProjectSkillStore } from "./skill-store.ts";
-import {
-  MAX_SKILL_CONTENT_CHARS,
-  MAX_SKILL_DESCRIPTION_CHARS,
-  type SkillOperation,
-  type SkillReviewPlan,
-} from "./skill-types.ts";
-import { isRecord } from "./state-validation.ts";
+import { ModelRunError, type ModelRunner, type ReviewModelProvenance } from "./service/model-runner.ts";
+import { SkillReviewEngine, type SkillReviewExecutionOutcome } from "./skill-review-engine.ts";
+import type { SkillReviewJob } from "./skill-review-job.ts";
+import type { RequestedSkillReviewerProfile } from "./skill-review-provenance.ts";
 
-const MAX_REVIEW_TRANSCRIPT_CHARS = 32_000;
+const SKILL_REVIEW_MAX_OUTPUT_TOKENS = 8_192;
+const SKILL_REVIEW_REASONING_EFFORT = "xhigh" as const;
 
-function parseOperation(value: unknown): SkillOperation {
-  if (!isRecord(value)) throw new Error("Skill review operation must be an object.");
-  const action = value.action;
-  if (action !== "create" && action !== "patch" && action !== "archive") {
-    throw new Error("Skill review operation has an invalid action.");
-  }
-  if (typeof value.name !== "string") throw new Error("Skill review operation requires name.");
-  const operation: SkillOperation = { action, name: value.name };
-  for (const key of ["description", "content", "oldText", "newText", "reason"] as const) {
-    if (typeof value[key] === "string") operation[key] = value[key];
-  }
-  if (Array.isArray(value.evidence)) operation.evidence = value.evidence.filter((item): item is string => typeof item === "string").slice(0, 8);
-  if (action === "create" && (typeof operation.description !== "string" || typeof operation.content !== "string")) {
-    throw new Error("Skill review create requires description and content.");
-  }
-  if (action === "patch" && (typeof operation.oldText !== "string" || typeof operation.newText !== "string")) {
-    throw new Error("Skill review patch requires oldText and newText.");
-  }
-  if (operation.content && operation.content.length > MAX_SKILL_CONTENT_CHARS) {
-    throw new Error("Skill review content is too large.");
-  }
-  return operation;
+export interface SkillReviewResult {
+  outcome: SkillReviewExecutionOutcome;
+  profile: RequestedSkillReviewerProfile;
 }
 
-export function parseSkillReviewPlan(raw: string): SkillReviewPlan {
-  const trimmed = raw.trim();
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/iu)?.[1]?.trim();
-  const objectText = fenced ?? trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1);
-  if (!objectText || !objectText.includes("{")) throw new Error("Skill review returned no JSON object.");
-  const parsed: unknown = JSON.parse(objectText);
-  if (!isRecord(parsed) || !Array.isArray(parsed.operations)) throw new Error("Skill review JSON must contain an operations array.");
-  if (parsed.operations.length > 1) throw new Error("Skill review may return at most one operation.");
-  return { operations: parsed.operations.map(parseOperation) };
+function provenance(request: {
+  model: NonNullable<ExtensionContext["model"]>;
+  response: Awaited<ReturnType<typeof complete>>;
+  started: Date;
+  completed: Date;
+}): ReviewModelProvenance {
+  const { model, response, started, completed } = request;
+  return {
+    provider: response.provider || model.provider,
+    model: model.id,
+    api: response.api || model.api,
+    ...(response.responseModel ? { responseModel: response.responseModel } : {}),
+    ...(response.responseId ? { responseId: response.responseId } : {}),
+    startedAt: started.toISOString(),
+    completedAt: completed.toISOString(),
+    durationMs: Math.max(0, completed.getTime() - started.getTime()),
+    usage: {
+      input: response.usage.input,
+      output: response.usage.output,
+      cacheRead: response.usage.cacheRead,
+      cacheWrite: response.usage.cacheWrite,
+      ...(response.usage.reasoning === undefined ? {} : { reasoning: response.usage.reasoning }),
+      totalTokens: response.usage.totalTokens,
+      cost: {
+        input: response.usage.cost.input,
+        output: response.usage.cost.output,
+        cacheRead: response.usage.cost.cacheRead,
+        cacheWrite: response.usage.cost.cacheWrite,
+        total: response.usage.cost.total,
+      },
+    },
+  };
 }
 
 export async function requestSkillReviewPlan(
   ctx: ExtensionContext,
-  store: ProjectSkillStore,
-  afterEntryId?: string,
+  job: Readonly<SkillReviewJob>,
   signal?: AbortSignal,
-): Promise<SkillReviewPlan> {
-  if (!ctx.model) throw new Error("No active model is available for project skill review.");
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-  if (!auth.ok) throw new Error(auth.error);
-  if (!auth.apiKey) throw new Error(`No API key available for ${ctx.model.provider}.`);
-
-  const transcript = buildReviewTranscript(ctx.sessionManager.getBranch(), afterEntryId);
-  const boundedTranscript = transcript.length <= MAX_REVIEW_TRANSCRIPT_CHARS
-    ? transcript
-    : `[Earlier context omitted]\n\n${transcript.slice(-MAX_REVIEW_TRANSCRIPT_CHARS)}`;
-  const prompt = buildSkillReviewPrompt({
-    transcript: boundedTranscript,
-    skillIndex: await store.skillIndex(),
-    pendingIndex: await store.pendingIndex(),
-  });
-
-  let correction = "";
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const message: Message = {
-      role: "user",
-      content: [{ type: "text", text: `${prompt}${correction}` }],
-      timestamp: Date.now(),
-    };
-    const response = await complete(
-      ctx.model,
-      {
-        systemPrompt: "You are a procedural-skill author and curator. You write predictable, well-structured skills and output valid JSON only.",
-        messages: [message],
-      },
-      {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        env: auth.env,
-        reasoningEffort: "medium",
-        signal,
-      },
-    );
-    if (response.stopReason === "aborted") throw new Error("Project skill review was aborted.");
-    const raw = response.content
-      .filter((part): part is { type: "text"; text: string } => part.type === "text")
-      .map((part) => part.text)
-      .join("\n");
-    try {
-      const plan = parseSkillReviewPlan(raw);
-      for (const operation of plan.operations) {
-        if (operation.action === "create") {
-          validateSkillDescription(operation.description || "");
-          validateSkillContent(operation.content || "");
-        } else if (operation.action === "patch") {
-          validateSkillContent(operation.newText || "");
-        }
-      }
-      return plan;
-    } catch (error) {
-      if (attempt === 1) return { operations: [] };
-      correction = `\n\nYour previous output was invalid: ${error instanceof Error ? error.message : "schema validation failed"}. Repeat the authorship process, repair that defect, and return only valid JSON. Descriptions must be one sentence ending in a period and at most ${MAX_SKILL_DESCRIPTION_CHARS} characters.`;
+): Promise<SkillReviewResult> {
+  const model = ctx.model;
+  const profile: RequestedSkillReviewerProfile = model
+    ? {
+      provider: model.provider,
+      model: model.id,
+      api: model.api,
+      reasoningEffort: SKILL_REVIEW_REASONING_EFFORT,
+      maxOutputTokens: SKILL_REVIEW_MAX_OUTPUT_TOKENS,
     }
-  }
-  return { operations: [] };
-}
+    : {
+      provider: "unavailable",
+      model: "unavailable",
+      api: "unavailable",
+      reasoningEffort: SKILL_REVIEW_REASONING_EFFORT,
+      maxOutputTokens: SKILL_REVIEW_MAX_OUTPUT_TOKENS,
+    };
+  const runner: ModelRunner = {
+    async run(request, hooks = {}) {
+      if (!model) throw new ModelRunError("model_not_found", "No active model is available for project skill review.", { retryable: true });
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok || !auth.apiKey) {
+        throw new ModelRunError("auth_unavailable", "No model authentication is available for project skill review.", { retryable: true });
+      }
+      const started = new Date();
+      const message: Message = {
+        role: "user",
+        content: [{ type: "text", text: request.prompt }],
+        timestamp: started.getTime(),
+      };
+      let response: Awaited<ReturnType<typeof complete>>;
+      try {
+        response = await complete(
+          model,
+          { systemPrompt: request.systemPrompt, messages: [message] },
+          {
+            apiKey: auth.apiKey,
+            headers: auth.headers,
+            env: auth.env,
+            reasoningEffort: SKILL_REVIEW_REASONING_EFFORT,
+            maxTokens: SKILL_REVIEW_MAX_OUTPUT_TOKENS,
+            signal: request.signal,
+          },
+        );
+      } catch (error) {
+        const aborted = request.signal?.aborted ?? false;
+        throw new ModelRunError(aborted ? "aborted" : "provider_error", "Project skill model request failed.", {
+          retryable: !aborted,
+          cause: error,
+        });
+      }
+      const completed = new Date();
+      const observed = provenance({ model, response, started, completed });
+      await hooks.observe?.(observed);
+      if (response.stopReason === "aborted") throw new ModelRunError("aborted", "Project skill review was aborted.", { retryable: false, provenance: observed });
+      if (response.stopReason === "error") throw new ModelRunError("provider_error", "Project skill reviewer returned an error.", { retryable: true, provenance: observed });
+      if (response.stopReason === "length") throw new ModelRunError("output_truncated", "Project skill reviewer output was truncated.", { retryable: true, provenance: observed });
+      if (response.stopReason === "toolUse") throw new ModelRunError("unexpected_tool_use", "Project skill reviewer attempted tool use.", { retryable: false, provenance: observed });
+      const text = response.content
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+      if (!text.trim()) throw new ModelRunError("empty_model_output", "Project skill reviewer returned no text.", { retryable: true, provenance: observed });
+      return { text, provenance: observed };
+    },
+  };
 
+  const outcome = await new SkillReviewEngine(runner).review(job, signal);
+  return { outcome, profile };
+}

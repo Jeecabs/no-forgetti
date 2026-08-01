@@ -6,7 +6,6 @@ import { scoreMemorySignal } from "../src/heuristics.ts";
 import {
   buildReviewEvidenceWindow,
   buildReviewPrompt,
-  buildReviewTranscript,
   parseReviewPlan,
   validateReviewPlan,
 } from "../src/review.ts";
@@ -92,6 +91,14 @@ test("review prompt requires non-growing refinement once the working target is r
 
 test("review transcript strips tool arguments and results", () => {
   const entries = [{
+    type: "compaction",
+    id: "summary-1",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    summary: '<skill name="summary" location="/private/SKILL.md">\nSECRET SUMMARY SKILL BODY\n</skill>\n\nSafe summary',
+    firstKeptEntryId: "user-1",
+    tokensBefore: 1,
+  }, {
     type: "message",
     id: "user-1",
     parentId: null,
@@ -132,17 +139,40 @@ test("review transcript strips tool arguments and results", () => {
     timestamp: "2026-01-01T00:00:00.000Z",
     customType: PROJECT_SKILL_USE_ENTRY,
     data: { names: ["verification"] },
-  }] as unknown as Parameters<typeof buildReviewTranscript>[0];
-  const transcript = buildReviewTranscript(entries);
+  }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+  const transcript = buildReviewEvidenceWindow(entries).transcript;
+  assert.match(transcript, /Safe summary/u);
   assert.match(transcript, /USER: Review this change/u);
   assert.match(transcript, /tool call: read/u);
   assert.match(transcript, /TOOL read: completed/u);
   assert.match(transcript, /PROJECT SKILLS INVOKED: verification/u);
-  assert.doesNotMatch(transcript, /SECRET SKILL BODY|do-not-leak|untrusted raw output/u);
+  assert.doesNotMatch(transcript, /SECRET SKILL BODY|SECRET SUMMARY SKILL BODY|private\/SKILL|do-not-leak|untrusted raw output/u);
 
-  const afterUser = buildReviewTranscript(entries, "user-1");
+  const afterUser = buildReviewEvidenceWindow(entries, "user-1").transcript;
   assert.doesNotMatch(afterUser, /Review this change/u);
   assert.match(afterUser, /TOOL read: completed/u);
+});
+
+test("review transcript strips skill scaffolding from compaction and fails closed on unmatched tags", () => {
+  const compaction = [{
+    type: "compaction",
+    id: "summary-1",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    summary: '<skill name="private">\nPRIVATE SKILL BODY\n</skill>\n\nDurable summary.',
+  }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+  assert.equal(buildReviewEvidenceWindow(compaction).transcript, "[Prior conversation summary]\nDurable summary.");
+
+  for (const text of ["before <skill name=\"open\">never closed", "orphan </skill> after"]) {
+    const entries = [{
+      type: "message",
+      id: "user-1",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: { role: "user", content: text, timestamp: 0 },
+    }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+    assert.throws(() => buildReviewEvidenceWindow(entries), /unmatched skill scaffolding/u);
+  }
 });
 
 test("review window processes oldest turns first and advances only through included evidence", () => {
@@ -166,6 +196,79 @@ test("review window processes oldest turns first and advances only through inclu
   assert.equal(second.throughEntryId, "user-14");
   assert.match(second.transcript, /turn 13/u);
   assert.equal(second.truncated, false);
+});
+
+test("review window applies an optional sanitizer before bounds without changing defaults", () => {
+  const entries = [
+    {
+      type: "message",
+      id: "user-1",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: { role: "user", content: "SECRET".repeat(6_000), timestamp: 0 },
+    },
+    {
+      type: "message",
+      id: "user-2",
+      parentId: "user-1",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: { role: "user", content: "second turn", timestamp: 1 },
+    },
+  ] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+
+  const original = buildReviewEvidenceWindow(entries);
+  assert.equal(original.throughEntryId, "user-1");
+  assert.doesNotMatch(original.transcript, /second turn/u);
+
+  const sanitized = buildReviewEvidenceWindow(entries, undefined, {
+    sanitizeText: (text) => text.replaceAll("SECRET", "x"),
+  });
+  assert.equal(sanitized.throughEntryId, "user-2");
+  assert.match(sanitized.transcript, /second turn/u);
+  assert.equal(sanitized.truncated, false);
+});
+
+test("review sanitization metadata counts only sections inside the selected frontier", () => {
+  const entries = Array.from({ length: 13 }, (_, index) => ({
+    type: "message",
+    id: `user-${index + 1}`,
+    parentId: index === 0 ? null : `user-${index}`,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    message: { role: "user", content: index === 12 ? "SECRET" : `turn ${index + 1}`, timestamp: index },
+  })) as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+  const options = {
+    sanitizeText: (text: string) => text.replaceAll("SECRET", "[REDACTED]"),
+    countSanitizations: (text: string) => text.includes("SECRET") ? 1 : 0,
+  };
+
+  const first = buildReviewEvidenceWindow(entries, undefined, options);
+  assert.equal(first.throughEntryId, "user-12");
+  assert.equal(first.sanitizationCount, 0);
+  const second = buildReviewEvidenceWindow(entries, first.throughEntryId, options);
+  assert.equal(second.sanitizationCount, 1);
+  assert.match(second.transcript, /\[REDACTED\]/u);
+});
+
+test("review evidence metadata distinguishes resolved and missing cursor scopes", () => {
+  const entries = Array.from({ length: 14 }, (_, index) => ({
+    type: "message",
+    id: `user-${index + 1}`,
+    parentId: index === 0 ? null : `user-${index}`,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    message: { role: "user", content: `turn ${index + 1}`, timestamp: index },
+  })) as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+
+  const fromStart = buildReviewEvidenceWindow(entries);
+  assert.equal(fromStart.cursorStatus, "from-start");
+  assert.deepEqual(fromStart.eligibleUserEntryIds, Array.from({ length: 14 }, (_, index) => `user-${index + 1}`));
+
+  const resolved = buildReviewEvidenceWindow(entries, "user-12");
+  assert.equal(resolved.cursorStatus, "resolved");
+  assert.deepEqual(resolved.eligibleUserEntryIds, ["user-13", "user-14"]);
+
+  const missing = buildReviewEvidenceWindow(entries, "missing");
+  assert.equal(missing.cursorStatus, "missing-recent-fallback");
+  assert.deepEqual(missing.eligibleUserEntryIds, Array.from({ length: 12 }, (_, index) => `user-${index + 3}`));
 });
 
 test("rejects malformed review output", () => {
