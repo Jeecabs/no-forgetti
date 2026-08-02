@@ -4,6 +4,7 @@
 
 - Allow memory and project-skill review model calls five minutes before timeout.
 - Report automatic project-skill review timeouts as informational. Keep project skills unchanged and preserve evidence for automatic retry.
+- Update the runtime lockfile to the patched `brace-expansion` 5.0.9 release.
 
 ## 0.5.0 - 2026-08-01
 
