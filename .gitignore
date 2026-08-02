@@ -10,3 +10,6 @@ docs/.vitepress/dist/
 .env.*
 !.env.example
 .DS_Store
+
+# local video workspace
+remotion/
