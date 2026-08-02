@@ -12,6 +12,7 @@ import { parseReviewCliArgs } from "../src/service/cli.ts";
 import { classifyReviewFailure, InMemoryReviewBudgetAccount, ReviewDaemon } from "../src/service/daemon.ts";
 import { ReviewDecisionStore } from "../src/service/decisions.ts";
 import {
+  DEFAULT_REVIEW_TIMEOUT_MS,
   ModelRunError,
   PiModelRunner,
   type ModelRunHooks,
@@ -147,6 +148,10 @@ async function fauxPiModelRunner(
   });
   return { runner, callCount: () => faux.state.callCount };
 }
+
+test("memory review model calls allow five minutes by default", () => {
+  assert.equal(DEFAULT_REVIEW_TIMEOUT_MS, 5 * 60_000);
+});
 
 test("model dispatch checkpoint and response observation are awaited in provider order", async () => {
   const events: string[] = [];

@@ -27,6 +27,7 @@ import {
   type ReviewRequestOrigin,
 } from "./service/feedback.ts";
 import { ReviewDecisionStore } from "./service/decisions.ts";
+import { DEFAULT_REVIEW_TIMEOUT_MS } from "./service/model-runner.ts";
 import { readReviewServiceMonitor, type ReviewServiceMonitor } from "./service/monitor.ts";
 import { createReviewJob, replayReviewJob, type ReviewJob } from "./service/protocol.ts";
 import { ReviewSpool } from "./service/spool.ts";
@@ -91,7 +92,7 @@ function capacityBar(t: ExtensionContext["ui"]["theme"], color: StateColor, used
 }
 
 const TOOL_NAME = "project_memory";
-const REVIEW_TIMEOUT_MS = 120_000;
+const SKILL_REVIEW_TIMEOUT_MS = 5 * 60_000;
 const SERVICE_MONITOR_IDLE_POLL_MS = 15_000;
 const SERVICE_MONITOR_ACTIVE_POLL_MS = 1_000;
 const REVIEW_ABORT_LIFECYCLE = "lifecycle";
@@ -107,6 +108,7 @@ export interface ExtensionDependencies {
   createReviewSpool: () => ReviewSpool;
   createRuntimeReporter: (options: RuntimeStatusReporterOptions) => RuntimeReporter;
   reviewTimeoutMs: number;
+  skillReviewTimeoutMs: number;
   writeCommandOutput: (text: string) => void;
 }
 
@@ -120,7 +122,8 @@ const DEFAULT_DEPENDENCIES: ExtensionDependencies = {
   loadServiceMonitor: readReviewServiceMonitor,
   createReviewSpool: () => new ReviewSpool(join(getAgentDir(), "no-forgetti", "review-spool")),
   createRuntimeReporter: (options) => new RuntimeStatusReporter(options),
-  reviewTimeoutMs: REVIEW_TIMEOUT_MS,
+  reviewTimeoutMs: DEFAULT_REVIEW_TIMEOUT_MS,
+  skillReviewTimeoutMs: SKILL_REVIEW_TIMEOUT_MS,
   writeCommandOutput: (text) => process.stdout.write(`${text}\n`),
 };
 
@@ -929,7 +932,7 @@ export function activateProjectMemoryExtension(
         });
         skillReviewRunning = true;
         refreshStatus(ctx);
-        reviewTimeout = setTimeout(() => controller.abort(REVIEW_ABORT_TIMEOUT), dependencies.reviewTimeoutMs);
+        reviewTimeout = setTimeout(() => controller.abort(REVIEW_ABORT_TIMEOUT), dependencies.skillReviewTimeoutMs);
         const reviewResult = await settleOnAbort({
           promise: dependencies.requestSkillReviewPlan(ctx, job, controller.signal),
           signal: controller.signal,
