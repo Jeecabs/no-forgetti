@@ -442,7 +442,7 @@ test("project skill deletion archives the skill and clears its pending proposals
 
 test("skill review reports timeout accurately and records retry backoff", async (t) => {
   const { context, extension, skillStore, notifications } = await fixture(t, {
-    reviewTimeoutMs: 5,
+    skillReviewTimeoutMs: 5,
     requestSkillReviewPlan: async (_ctx, _packet, signal) =>
       new Promise<never>((_resolve, reject) => {
         signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
@@ -468,7 +468,7 @@ test("automatic skill review timeout is informational and explains recovery", as
   let finishReview!: () => void;
   const reviewFinished = new Promise<void>((resolve) => { finishReview = resolve; });
   const { branch, context, extension, skillStore, notifications } = await fixture(t, {
-    reviewTimeoutMs: 5,
+    skillReviewTimeoutMs: 5,
     requestSkillReviewPlan: async (_ctx, _packet, signal) =>
       new Promise<never>((_resolve, reject) => {
         signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
@@ -506,7 +506,7 @@ test("automatic skill review timeout is informational and explains recovery", as
 test("skill review timeout settles when the reviewer ignores cancellation", async (t) => {
   let release!: () => void;
   const { context, extension, notifications } = await fixture(t, {
-    reviewTimeoutMs: 5,
+    skillReviewTimeoutMs: 5,
     requestSkillReviewPlan: async (_ctx, job) => new Promise<SkillReviewResult>((resolve) => {
       release = () => resolve(skillReviewResult(job));
     }),
@@ -611,7 +611,7 @@ test("validated skill plans finish atomic admission after the commit point", asy
   const submitStarted = new Promise<void>((resolve) => { submitEntered = resolve; });
   const submitBarrier = new Promise<void>((resolve) => { releaseSubmit = resolve; });
   const { context, extension, skillStore, notifications } = await fixture(t, {
-    reviewTimeoutMs: 5,
+    skillReviewTimeoutMs: 5,
     requestSkillReviewPlan: async (_ctx, job) => skillReviewResult(job, [{
       action: "create",
       name: "commit-after-plan",

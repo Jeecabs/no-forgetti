@@ -10,7 +10,7 @@ import type { ReviewModelProvenance, ReviewModelUsage } from "./protocol.ts";
 export type { ReviewModelProvenance, ReviewModelUsage } from "./protocol.ts";
 
 export const DEFAULT_REVIEW_MAX_OUTPUT_TOKENS = 2_048;
-export const DEFAULT_REVIEW_TIMEOUT_MS = 2 * 60_000;
+export const DEFAULT_REVIEW_TIMEOUT_MS = 5 * 60_000;
 
 export interface ModelRunRequest {
   systemPrompt: string;
