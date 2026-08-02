@@ -11,7 +11,12 @@ import { PROJECT_SKILL_USE_ENTRY } from "../src/skill-native.ts";
 import type { SkillReviewJob } from "../src/skill-review-job.ts";
 import type { SkillReviewResult } from "../src/skill-review.ts";
 import { ProjectSkillStore } from "../src/skill-store.ts";
-import { MAX_SKILL_DESCRIPTION_CHARS, type SkillOperation, type SkillProposal } from "../src/skill-types.ts";
+import {
+  DEFAULT_SKILL_REVIEW_INTERVAL,
+  MAX_SKILL_DESCRIPTION_CHARS,
+  type SkillOperation,
+  type SkillProposal,
+} from "../src/skill-types.ts";
 import { FileMemoryProposalCommitter } from "../src/service/admission.ts";
 import { ReviewDecisionStore } from "../src/service/decisions.ts";
 import { createReviewOutcome } from "../src/service/protocol.ts";
@@ -448,7 +453,7 @@ test("skill review reports timeout accurately and records retry backoff", async 
   await extension.command("project-skills", "review", context);
 
   assert.deepEqual(notifications, [{
-    message: "Project skill review timed out; it will retry after backoff on a future completed turn.",
+    message: "Project skill review took too long. Project skills remain unchanged. No Forgetti will retry automatically.",
     type: "warning",
   }]);
   const state = JSON.parse(await readFile(skillStore.reviewPath, "utf8")) as {
@@ -457,6 +462,45 @@ test("skill review reports timeout accurately and records retry backoff", async 
   };
   assert.equal(state.consecutiveFailures, 1);
   assert.ok(state.nextAttemptAt);
+});
+
+test("automatic skill review timeout is informational and explains recovery", async (t) => {
+  let finishReview!: () => void;
+  const reviewFinished = new Promise<void>((resolve) => { finishReview = resolve; });
+  const { branch, context, extension, skillStore, notifications } = await fixture(t, {
+    reviewTimeoutMs: 5,
+    requestSkillReviewPlan: async (_ctx, _packet, signal) =>
+      new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("Project skill review was aborted.")), { once: true });
+      }),
+  });
+  Object.assign(context, { hasUI: true, mode: "tui" });
+  await extension.emit("session_start", {}, context);
+
+  const originalFinishReview = skillStore.finishReview.bind(skillStore);
+  skillStore.finishReview = async (request) => {
+    try {
+      return await originalFinishReview(request);
+    } finally {
+      finishReview();
+    }
+  };
+  for (let index = 0; index < DEFAULT_SKILL_REVIEW_INTERVAL; index += 1) {
+    const entryId = `automatic-timeout-${index + 1}`;
+    branch.push(userEntry(entryId, `review evidence ${index + 1}`));
+    await skillStore.recordUserTurn({ sessionId: "lifecycle-session", entryId });
+  }
+  const currentInput = "ordinary completed work that triggers the due review";
+  await extension.emit("input", { source: "user", text: currentInput }, context);
+  branch.push(userEntry("automatic-timeout-current", currentInput));
+  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
+  await extension.emit("agent_settled", {}, context);
+  await reviewFinished;
+
+  assert.deepEqual(notifications, [{
+    message: "Project skill review took too long. Project skills remain unchanged. No Forgetti will retry automatically.",
+    type: "info",
+  }]);
 });
 
 test("skill review timeout settles when the reviewer ignores cancellation", async (t) => {
@@ -480,7 +524,7 @@ test("skill review timeout settles when the reviewer ignores cancellation", asyn
 
   assert.equal(settledBeforeReviewer, true);
   assert.deepEqual(notifications, [{
-    message: "Project skill review timed out; it will retry after backoff on a future completed turn.",
+    message: "Project skill review took too long. Project skills remain unchanged. No Forgetti will retry automatically.",
     type: "warning",
   }]);
 });
