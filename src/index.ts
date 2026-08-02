@@ -874,9 +874,13 @@ export function activateProjectMemoryExtension(
     refreshStatus(ctx);
   }
 
-  async function runSkillReview(ctx: ExtensionContext, force: boolean): Promise<void> {
+  async function runSkillReview(
+    ctx: ExtensionContext,
+    request: { force: boolean; requestedBy: ReviewRequestOrigin },
+  ): Promise<void> {
+    const { force, requestedBy } = request;
     if (skillReviewPromise) {
-      if (force && ctx.hasUI) ctx.ui.notify("Project skill review already running.", "info");
+      if (requestedBy === "manual" && ctx.hasUI) ctx.ui.notify("Project skill review already running.", "info");
       return skillReviewPromise;
     }
     const projectSkills = skillStore;
@@ -989,7 +993,7 @@ export function activateProjectMemoryExtension(
               );
             }
           }
-        } else if (force && ctx.hasUI) {
+        } else if (requestedBy === "manual" && ctx.hasUI) {
           ctx.ui.notify("Project skill review: no reusable workflow change found.", "info");
         }
         reviewedThroughEntryId = packet.coverage.frontierEntryId;
@@ -1001,8 +1005,8 @@ export function activateProjectMemoryExtension(
         } else if (abortReason === REVIEW_ABORT_TIMEOUT) {
           if (ctx.hasUI) {
             ctx.ui.notify(
-              "Project skill review timed out; it will retry after backoff on a future completed turn.",
-              "warning",
+              "Project skill review took too long. Project skills remain unchanged. No Forgetti will retry automatically.",
+              requestedBy === "manual" ? "warning" : "info",
             );
           }
         } else if (ctx.hasUI) {
@@ -1641,7 +1645,7 @@ export function activateProjectMemoryExtension(
       }
       if (subcommand === "review") {
         await ctx.waitForIdle();
-        await runSkillReview(ctx, true);
+        await runSkillReview(ctx, { force: true, requestedBy: "manual" });
         return;
       }
       ctx.ui.notify("Usage: /project-skills list|stats|read <name>|edit <name>|delete <name>|undo <name>|pending [name]|approve <name>|approve-all|reject <name>|review", "warning");
@@ -2005,7 +2009,7 @@ export function activateProjectMemoryExtension(
     // Existing sessions are eligible on their first completed turn; fresh
     // sessions use cadence plus explicit correction/complexity signals.
     void runReview(ctx, reviewExisting).catch(() => undefined);
-    void runSkillReview(ctx, skillReviewExisting).catch(() => undefined);
+    void runSkillReview(ctx, { force: skillReviewExisting, requestedBy: "automatic" }).catch(() => undefined);
   });
 
   pi.on("session_shutdown", async () => {
