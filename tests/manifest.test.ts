@@ -22,7 +22,7 @@ interface Manifest {
 test("package manifest preserves No Forgetti identity and exposes extension plus service CLI", async () => {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as Manifest;
   assert.equal(manifest.name, "no-forgetti");
-  assert.equal(manifest.version, "0.5.0");
+  assert.equal(manifest.version, "0.5.1");
   // EXTENSION_VERSION is stamped into durable provenance records, so a version
   // bump that forgets src/index.ts must fail here rather than mislabel jobs.
   assert.equal(EXTENSION_VERSION, manifest.version);

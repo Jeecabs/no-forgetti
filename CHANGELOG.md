@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 - 2026-08-03
+
+- Allow memory and project-skill review model calls five minutes before timeout.
+- Report automatic project-skill review timeouts as informational. Keep project skills unchanged and preserve evidence for automatic retry.
+
 ## 0.5.0 - 2026-08-01
 
 - Author project skills from a bounded, sanitized evidence packet with atomic corpus capture and exact omission metadata.
