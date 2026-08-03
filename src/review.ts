@@ -404,6 +404,18 @@ export function projectedReviewChars(
   return entries.reduce((total, entry) => total + entry.text.length, 0);
 }
 
+function reviewObjectiveGuidance(refinementRequired: boolean): string[] {
+  if (!refinementRequired) return [
+    "Review the entire completed Pi conversation above for durable project memory, including resumed history.",
+    "Actively look for user corrections, preferences, recurring workflow expectations, and non-obvious project facts; do not require the user to say 'remember'.",
+  ];
+  return [
+    "Memory maintenance is the primary task because current usage has reached the working target.",
+    "Audit every current memory entry before using recent conversation evidence. Look for facts that are superseded, redundant, overlapping, narrow, or cheap to rediscover, plus wording that can be shortened without semantic loss.",
+    "Only preserve a new durable fact when the same atomic batch creates enough room through removal, merge, or a shorter replacement.",
+  ];
+}
+
 function maintenanceGuidance(request: {
   refinementRequired: boolean;
   availableBeforeTarget: number;
@@ -413,6 +425,7 @@ function maintenanceGuidance(request: {
 }): string[] {
   if (request.refinementRequired) return [
     `REFINEMENT REQUIRED: current memory has reached the ${request.refinementTarget}-character working target. The final state must not exceed the current ${request.usedChars} characters. When lossless, compact toward the ${request.maintenanceGoal}-character maintenance goal to restore room for later facts. Preserve useful semantics through concise replacements or merges; never discard valid semantics merely to shrink. A safe no-op is allowed.`,
+    "Do not return a pure add while refinement is required. Prefer removals, merges, and shorter replacements that restore headroom.",
   ];
   if (request.availableBeforeTarget < DEFAULT_MAX_ENTRY_CHARS) return [
     `HEADROOM LOW: ${request.availableBeforeTarget} characters remain before the working target. New durable facts must fit that exact budget; otherwise merge or shorten existing entries in the same atomic batch.`,
@@ -442,8 +455,7 @@ export function buildReviewPrompt(
     }).join("\n")
     : "(empty)";
   return [
-    "Review the entire completed Pi conversation above for durable project memory, including resumed history.",
-    "Actively look for user corrections, preferences, recurring workflow expectations, and non-obvious project facts; do not require the user to say 'remember'.",
+    ...reviewObjectiveGuidance(refinementRequired),
     "Return ONLY JSON with an operations array. Valid operation shapes:",
     '{"action":"add","content":"...","importance":"high|normal|low"}',
     '{"action":"replace","entryId":"...","content":"...","importance":"high|normal|low"}',
@@ -473,7 +485,7 @@ export function buildReviewPrompt(
       maintenanceGoal,
       usedChars,
     }),
-    "Refine in this order: remove contradicted or documented facts regardless of importance; merge overlaps; remove low-importance facts; then consider unassessed or normal facts. Preserve high-importance facts unless contradicted or merged.",
+    "Refine in this order: remove contradicted or superseded facts regardless of importance; merge overlaps; remove low-importance, narrow, or cheap-to-rediscover facts; then consider unassessed or normal facts. Preserve high-importance facts unless contradicted or merged.",
     "The operation batch is atomic and capacity is checked only against final size, so removals need not precede additions. Operations still execute sequentially; never target an entry after removing or merging it.",
     "Target existing entries by entryId, never by text. Merge only explicit entryIds; the first ID supplies the retained entry identity and position.",
     "Every add, replace, merge, and assess operation requires importance. Use assess to classify legacy entries only when evidence supports the classification.",
