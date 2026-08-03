@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3 - 2026-08-03
+
+- Prevent unmatched session user entries from reaching memory signal scoring with undefined input text.
+
 ## 0.5.2 - 2026-08-03
 
 - Make capacity-bound memory reviews audit existing entries before adding new facts.
