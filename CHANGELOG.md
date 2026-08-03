@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.4 - 2026-08-03
+
+- Give invalid memory-review retries an explicit 800-character content check. Settle repeated size-only violations as a safe no-op while retaining fail-closed safety validation.
+
 ## 0.5.3 - 2026-08-03
 
 - Prevent unmatched session user entries from reaching memory signal scoring with undefined input text.
