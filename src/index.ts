@@ -1793,6 +1793,11 @@ export function activateProjectMemoryExtension(
     );
     for (const entry of unseen) knownUserEntryIds.add(entry.id);
     const completedCount = Math.min(unseen.length, pendingUserInputs.length);
+    // slice(-0) equals slice(0), which would pair every unseen entry with undefined.
+    if (completedCount === 0) {
+      pendingUserInputs = [];
+      return [];
+    }
     const entries = unseen.slice(-completedCount);
     const inputs = pendingUserInputs.slice(-completedCount);
     pendingUserInputs = [];
