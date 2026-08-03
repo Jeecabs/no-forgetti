@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2 - 2026-08-03
+
+- Make capacity-bound memory reviews audit existing entries before adding new facts.
+- Give invalid capacity proposals corrective retries. Settle repeated growth as a safe no-op instead of a terminal warning.
+- Replace the external-mode explainer video with the HyperFrames cut.
+
 ## 0.5.1 - 2026-08-03
 
 - Allow memory and project-skill review model calls five minutes before timeout.
