@@ -382,6 +382,28 @@ test("review engine rejects oversized entries before proposal persistence", asyn
   assert.equal(runner.requests.length, 1);
 });
 
+test("review engine final retry settles an oversized proposal as a safe no-op", async () => {
+  const runner = new FakeModelRunner({
+    text: JSON.stringify({ operations: [{ action: "add", content: "x".repeat(801), importance: "normal" }] }),
+    provenance,
+  });
+
+  const proposal = await new ReviewEngine(runner).review(job(), { attempt: 3, finalAttempt: true });
+
+  assert.deepEqual(proposal.plan.operations, []);
+  assert.match(runner.requests.at(0)?.prompt ?? "", /FINAL ATTEMPT/u);
+  assert.match(runner.requests.at(0)?.prompt ?? "", /at most 800 characters/u);
+
+  const unsafe = new ReviewEngine(new FakeModelRunner({
+    text: JSON.stringify({ operations: [{ action: "add", content: "API_KEY=super-secret-token-value", importance: "high" }] }),
+    provenance,
+  }));
+  await assert.rejects(
+    unsafe.review(job(), { attempt: 3, finalAttempt: true }),
+    (error: unknown) => error instanceof ReviewEngineError && error.code === "invalid_proposal",
+  );
+});
+
 test("review engine retries a proposal that would consume reserved review headroom", async () => {
   const crowdedBranch: MemoryBranch = {
     ...branch,
@@ -660,7 +682,10 @@ test("capacity retries audit existing memory and settle as a safe no-op", async 
   assert.doesNotMatch(requests[0]!.prompt, /CORRECTIVE RETRY/u);
   assert.match(requests[1]!.prompt, /CORRECTIVE RETRY: a previous proposal failed deterministic validation/u);
   assert.match(requests[1]!.prompt, /do not repeat a pure add/iu);
+  assert.match(requests[1]!.prompt, /at most 800 characters/u);
+  assert.doesNotMatch(requests[1]!.prompt, /FINAL ATTEMPT/u);
   assert.match(requests[2]!.prompt, /CORRECTIVE RETRY/u);
+  assert.match(requests[2]!.prompt, /FINAL ATTEMPT/u);
   assert.deepEqual(committedOperations, [[]]);
   assert.deepEqual(deadLetters, []);
   const outcome = await spool.getOutcome(reviewJob.id);
