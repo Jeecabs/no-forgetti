@@ -10,10 +10,20 @@ const INSTRUCTION_PATTERNS: RegExp[] = [
   /\b(?:assistant|model|you)\s+(?:must|should|need to|are required to)\b/iu,
 ];
 
+export class MemoryEntryTooLongError extends Error {
+  readonly maxChars: number;
+
+  constructor(maxChars: number) {
+    super(`Memory entry exceeds ${maxChars} characters.`);
+    this.name = "MemoryEntryTooLongError";
+    this.maxChars = maxChars;
+  }
+}
+
 export function validateMemoryText(input: string, maxChars: number): string {
   const text = input.trim().replace(/\r\n/g, "\n");
   if (!text) throw new Error("Memory text cannot be empty.");
-  if (text.length > maxChars) throw new Error(`Memory entry exceeds ${maxChars} characters.`);
+  if (text.length > maxChars) throw new MemoryEntryTooLongError(maxChars);
   if (INVISIBLE_UNICODE.test(text)) throw new Error("Memory entry contains invisible Unicode control characters.");
   if (/<\/?project-memory\b/iu.test(text)) throw new Error("Memory entry cannot contain project-memory fence tags.");
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) {
