@@ -699,6 +699,18 @@ test("tracks successful native SKILL.md reads once per settled run", async (t) =
   assert.equal(used.useSessionCount, 1);
 });
 
+test("ignores unmatched session user entries without scoring undefined input", async (t) => {
+  const { branch, context, extension, skillStore } = await fixture(t);
+  await extension.emit("session_start", {}, context);
+  branch.push(userEntry("user-bypassed-input", "user entry added without an input event"));
+  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
+
+  await extension.emit("agent_settled", {}, context);
+
+  assert.deepEqual(await skillStore.pendingReviewEntryIds("lifecycle-session"), []);
+  assert.equal(await skillStore.activity.completedCount(), 0);
+});
+
 test("routes read-only command output in print and JSON modes", async (t) => {
   const output: string[] = [];
   const { context, extension } = await fixture(t, { writeCommandOutput: (text) => output.push(text) });
