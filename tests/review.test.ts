@@ -85,6 +85,9 @@ test("review prompt requires non-growing refinement once the working target is r
   assert.match(prompt, /REFINEMENT REQUIRED/u);
   assert.match(prompt, /final state must not exceed the current 4500 characters/u);
   assert.match(prompt, /compact toward the 4000-character maintenance goal/u);
+  assert.match(prompt, /Audit every current memory entry/u);
+  assert.match(prompt, /superseded, redundant, overlapping, narrow, or cheap to rediscover/u);
+  assert.match(prompt, /Do not return a pure add/u);
   assert.match(prompt, /never discard valid semantics merely to shrink/u);
   assert.match(prompt, /safe no-op is allowed/u);
 });

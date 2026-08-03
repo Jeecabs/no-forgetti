@@ -706,7 +706,11 @@ export class ReviewDaemon {
 
     let usageCharged = false;
     try {
-      const proposal = await this.engine.review(claim.job, reviewSignal);
+      const proposal = await this.engine.review(claim.job, {
+        signal: reviewSignal,
+        attempt: claim.attempt,
+        finalAttempt: claim.attempt >= this.maxAttempts,
+      });
       await this.budgetAccount.charge(proposal.provenance);
       usageCharged = true;
       const outcome = createReviewOutcome(claim.job, {
@@ -812,7 +816,12 @@ export class ReviewDaemon {
       };
       let proposal: ReviewProposal;
       try {
-        proposal = await this.engine.review(claim.job, reviewSignal, coordinator.hooks(claim, state));
+        proposal = await this.engine.review(claim.job, {
+          signal: reviewSignal,
+          hooks: coordinator.hooks(claim, state),
+          attempt: claim.attempt,
+          finalAttempt: claim.attempt >= this.maxAttempts,
+        });
         if (!state.reservation || !state.dispatchCheckpointStarted || !state.observedProvenance) {
           throw new ReviewEngineError(
             "invalid_proposal",

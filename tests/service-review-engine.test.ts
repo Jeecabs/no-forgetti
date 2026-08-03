@@ -299,12 +299,14 @@ test("review engine forwards daemon checkpoints across its model seam", async ()
     },
   };
 
-  await new ReviewEngine(runner).review(job(), undefined, {
-    async beforeDispatch() {
-      events.push("dispatch");
-    },
-    async observe(value) {
-      events.push(`observed:${value.model}`);
+  await new ReviewEngine(runner).review(job(), {
+    hooks: {
+      async beforeDispatch() {
+        events.push("dispatch");
+      },
+      async observe(value) {
+        events.push(`observed:${value.model}`);
+      },
     },
   });
   events.push("returned");
@@ -555,6 +557,115 @@ test("oversized first proposal retries before election and a bounded retry commi
   }]]);
   const outcome = await spool.getOutcome(reviewJob.id);
   assert.equal(outcome?.status, "completed");
+});
+
+test("capacity retries audit existing memory and settle as a safe no-op", async () => {
+  const crowdedBranch: MemoryBranch = {
+    ...branch,
+    entries: [800, 800, 800, 800, 800, 634].map((size, index) => ({
+      id: `capacity-${index}`,
+      text: String(index).repeat(size),
+      createdAt: branch.createdAt,
+      updatedAt: branch.updatedAt,
+      importance: index === 5 ? "low" as const : "normal" as const,
+    })),
+  };
+  const reviewJob = createReviewJob({
+    projectKey: "a".repeat(24),
+    sessionId: "private-session-id",
+    throughEntryId: "assistant-capacity",
+    transcript: "USER: remember one more durable preference",
+    branch: crowdedBranch,
+    maxChars: DEFAULT_MAX_CHARS,
+  });
+  const root = await mkdtemp(join(tmpdir(), "no-forgetti-capacity-retry-"));
+  let spoolNow = new Date("2026-01-03T12:00:00.000Z");
+  const spool = new ReviewSpool(join(root, "spool"), { now: () => spoolNow });
+  const accounting = new FileReviewAttemptAccounting(spool.root, { now: () => spoolNow });
+  const decisions = new ReviewDecisionStore(spool.root);
+  const requests: ModelRunRequest[] = [];
+  let calls = 0;
+  const runner: ModelRunner = {
+    async run(request, hooks) {
+      calls += 1;
+      requests.push(request);
+      const observed = {
+        ...provenance,
+        responseId: `capacity-retry-${calls}`,
+        startedAt: new Date(spoolNow.getTime() - 1_000).toISOString(),
+        completedAt: spoolNow.toISOString(),
+      };
+      await hooks?.beforeDispatch?.({
+        provider: observed.provider,
+        model: observed.model,
+        api: observed.api,
+        requestDigest: String(calls).repeat(64),
+        hold: { tokens: 400, costUsd: 0.5 },
+      });
+      await hooks?.observe?.(observed);
+      return {
+        text: JSON.stringify({ operations: [{
+          action: "add",
+          content: "x".repeat(51),
+          importance: "normal",
+        }] }),
+        provenance: observed,
+      };
+    },
+  };
+  const committedOperations: unknown[] = [];
+  const deadLetters: ReviewFailure[] = [];
+  const daemon = new ReviewDaemon({
+    spool,
+    engine: new ReviewEngine(runner),
+    budget: { maxCalls: 3, maxTokens: 3_000, maxCostUsd: 2 },
+    attemptAccounting: accounting,
+    decisionStore: decisions,
+    workerId: "capacity-retry-worker",
+    maxAttempts: 3,
+    committer: {
+      async commit(_job, outcome) {
+        committedOperations.push(outcome.status === "completed" ? outcome.operations : []);
+        return {
+          version: 1,
+          proposalId: reviewJob.id,
+          jobDigest: reviewJob.digest,
+          projectKey: reviewJob.projectKey,
+          branchName: reviewJob.branch.name,
+          baseBranchDigest: reviewJob.baseBranchDigest,
+          status: "noop",
+          committedAt: spoolNow.toISOString(),
+          resultingBranchDigest: reviewJob.baseBranchDigest,
+          messages: ["Memory unchanged."],
+          transactionVersion: 1,
+          transactionId: reviewJob.id,
+          outcomeDigest: "b".repeat(64),
+        };
+      },
+      async failed(_job, failure) {
+        deadLetters.push(failure);
+      },
+    },
+  });
+  await spool.enqueue(reviewJob);
+
+  assert.equal((await daemon.processOne()).status, "retry");
+  spoolNow = new Date(spoolNow.getTime() + 5_000);
+  assert.equal((await daemon.processOne()).status, "retry");
+  spoolNow = new Date(spoolNow.getTime() + 10_000);
+  assert.equal((await daemon.processOne()).status, "completed");
+
+  assert.equal(calls, 3);
+  assert.match(requests[0]!.prompt, /Audit every current memory entry/u);
+  assert.doesNotMatch(requests[0]!.prompt, /CORRECTIVE RETRY/u);
+  assert.match(requests[1]!.prompt, /CORRECTIVE RETRY: a previous proposal failed deterministic validation/u);
+  assert.match(requests[1]!.prompt, /do not repeat a pure add/iu);
+  assert.match(requests[2]!.prompt, /CORRECTIVE RETRY/u);
+  assert.deepEqual(committedOperations, [[]]);
+  assert.deepEqual(deadLetters, []);
+  const outcome = await spool.getOutcome(reviewJob.id);
+  assert.equal(outcome?.status, "completed");
+  if (outcome?.status === "completed") assert.deepEqual(outcome.operations, []);
 });
 
 test("durable response checkpoint survives restart without provider rerun or duplicate usage", async () => {
