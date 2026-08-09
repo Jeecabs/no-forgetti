@@ -19,7 +19,7 @@ const MAX_TRANSCRIPT_CHARS = 32_000;
 const MAX_TRANSCRIPT_USER_TURNS = 12;
 
 function stripSkillScaffolding(text: string): string {
-  const tags = text.match(/<\/?skill\b[^>]*>/giu) ?? [];
+  const tags = text.match(/<\/?skill(?:\s[^>]*)?>/giu) ?? [];
   let open = false;
   for (const tag of tags) {
     const closing = /^<\//u.test(tag);
@@ -30,8 +30,8 @@ function stripSkillScaffolding(text: string): string {
     throw new Error("Review evidence contains unmatched skill scaffolding.");
   }
   if (open) throw new Error("Review evidence contains unmatched skill scaffolding.");
-  const stripped = text.replace(/<skill\b[^>]*>[\s\S]*?<\/skill>\s*/giu, "");
-  if (/<\/?skill\b/iu.test(stripped)) {
+  const stripped = text.replace(/<skill(?:\s[^>]*)?>[\s\S]*?<\/skill\s*>\s*/giu, "");
+  if (/<\/?skill(?=[\s/>])/iu.test(stripped)) {
     throw new Error("Review evidence contains unmatched skill scaffolding.");
   }
   return stripped.trim();

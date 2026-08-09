@@ -166,7 +166,24 @@ test("review transcript strips skill scaffolding from compaction and fails close
   }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
   assert.equal(buildReviewEvidenceWindow(compaction).transcript, "[Prior conversation summary]\nDurable summary.");
 
-  for (const text of ["before <skill name=\"open\">never closed", "orphan </skill> after"]) {
+  const placeholderCompaction = [{
+    type: "compaction",
+    id: "summary-2",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    summary: '<skill name="private">\nRun node "<skill-dir>/scripts/check.mjs".\n</skill>\n\nDurable placeholder summary.',
+  }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+  assert.equal(
+    buildReviewEvidenceWindow(placeholderCompaction).transcript,
+    "[Prior conversation summary]\nDurable placeholder summary.",
+  );
+
+  for (const text of [
+    "before <skill name=\"open\">never closed",
+    "orphan </skill> after",
+    "self-closing <skill/> tag",
+    "malformed closing </skill/> tag",
+  ]) {
     const entries = [{
       type: "message",
       id: "user-1",
