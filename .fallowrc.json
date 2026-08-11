@@ -4,5 +4,8 @@
     "src/index.ts",
     "src/service/cli.ts"
   ],
+  "ignorePatterns": [
+    "remotion/**"
+  ],
   "production": true
 }

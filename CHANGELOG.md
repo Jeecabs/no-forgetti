@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.5 - 2026-08-11
+
+- Parse review evidence skill envelopes with the canonical Pi parser. Preserve literal skill-tag examples and `<skill-dir>` placeholders outside native envelopes.
+- Keep skill bodies private and omit malformed native envelopes without stalling memory or project-skill review.
+- Update the Pi runtime dependency to 0.84.1 and its patched Undici 8.9.0 release.
+
 ## 0.5.4 - 2026-08-03
 
 - Give invalid memory-review retries an explicit 800-character content check. Settle repeated size-only violations as a safe no-op while retaining fail-closed safety validation.
