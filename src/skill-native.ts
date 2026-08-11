@@ -3,10 +3,23 @@ import { join, relative, resolve, sep } from "node:path";
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { TextContent } from "@earendil-works/pi-ai";
+import { parseSkillBlock } from "@earendil-works/pi-coding-agent";
 
 export const PROJECT_SKILL_USE_ENTRY = "no-forgetti-project-skill-use";
 
 const DIRECT_SKILL_FILE = /^([a-z0-9]+(?:-[a-z0-9]+)*)\/SKILL\.md$/u;
+const NATIVE_SKILL_INVOCATION_HEADER = /^<skill name="[^"\r\n]+" location="[^"\r\n]+">\r?\n/u;
+
+/**
+ * Strip Pi's canonical persisted skill envelope with Pi's own parser.
+ * An anchored header that does not parse is unsafe and returns undefined.
+ * Text outside the native envelope grammar passes through unchanged.
+ */
+export function stripNativeSkillInvocationEnvelope(text: string): string | undefined {
+  const skill = parseSkillBlock(text);
+  if (skill) return skill.userMessage ?? "";
+  return NATIVE_SKILL_INVOCATION_HEADER.test(text) ? undefined : text;
+}
 
 interface NativeSkillLocation {
   cwd: string;
@@ -41,8 +54,10 @@ function userText(message: AgentMessage): string | undefined {
 export function projectSkillNameFromInvocation(
   request: NativeSkillLocation & { message: AgentMessage },
 ): string | undefined {
-  const match = userText(request.message)?.match(/^<skill name="([^"]+)" location="([^"]+)">\n/u);
-  if (!match) return undefined;
-  const storedName = projectSkillNameFromReadPath({ ...request, path: match[2]! });
-  return storedName === match[1] ? storedName : undefined;
+  const text = userText(request.message);
+  if (!text) return undefined;
+  const skill = parseSkillBlock(text);
+  if (!skill) return undefined;
+  const storedName = projectSkillNameFromReadPath({ ...request, path: skill.location });
+  return storedName === skill.name ? storedName : undefined;
 }

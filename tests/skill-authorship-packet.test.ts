@@ -202,7 +202,7 @@ test("sanitizes evidence before bounding and excludes private payloads", async (
       role: "user",
       content: [{
         type: "text",
-        text: '<skill name="secret" location="/tmp/SKILL.md">\nAPI_KEY=skill-body-secret-value\n</skill>\r\nReview cafe\u0301; API_KEY=super-secret-token-value; AWS_SECRET_ACCESS_KEY=aws-secret-value; npm_token=npm-secret-value; Authorization: Bearer abcdefghijklmnopqrstuvwxyz; DATABASE_URL=postgres://user:password@db.example.test/app; eyJheader.eyJpayload.signature',
+        text: '<skill name="secret" location="/tmp/SKILL.md">\nAPI_KEY=skill-body-secret-value\n</skill>\n\nReview cafe\u0301; API_KEY=super-secret-token-value; AWS_SECRET_ACCESS_KEY=aws-secret-value; npm_token=npm-secret-value; Authorization: Bearer abcdefghijklmnopqrstuvwxyz; DATABASE_URL=postgres://user:password@db.example.test/app; eyJheader.eyJpayload.signature',
       }],
       timestamp: 0,
     },

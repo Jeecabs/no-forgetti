@@ -156,43 +156,68 @@ test("review transcript strips tool arguments and results", () => {
   assert.match(afterUser, /TOOL read: completed/u);
 });
 
-test("review transcript strips skill scaffolding from compaction and fails closed on unmatched tags", () => {
+test("review transcript strips only native skill envelopes and fails closed on truncated envelopes", () => {
   const compaction = [{
     type: "compaction",
     id: "summary-1",
     parentId: null,
     timestamp: "2026-01-01T00:00:00.000Z",
-    summary: '<skill name="private">\nPRIVATE SKILL BODY\n</skill>\n\nDurable summary.',
+    summary: '<skill name="private" location="/private/SKILL.md">\nPRIVATE BODY DOCUMENTS <skill> AND </skill> TAGS.\nRun node "<skill-dir>/scripts/check.mjs".\n</skill>\n\nDurable summary.',
   }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
   assert.equal(buildReviewEvidenceWindow(compaction).transcript, "[Prior conversation summary]\nDurable summary.");
 
-  const placeholderCompaction = [{
-    type: "compaction",
-    id: "summary-2",
+  const taggedPrompt = [{
+    type: "message",
+    id: "user-tagged-prompt",
     parentId: null,
     timestamp: "2026-01-01T00:00:00.000Z",
-    summary: '<skill name="private">\nRun node "<skill-dir>/scripts/check.mjs".\n</skill>\n\nDurable placeholder summary.',
+    message: {
+      role: "user",
+      content: '<skill name="private" location="/private/SKILL.md">\nPRIVATE SKILL BODY\n</skill>\n\nReview literal </skill> and <skill/> tags.',
+      timestamp: 0,
+    },
   }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
   assert.equal(
-    buildReviewEvidenceWindow(placeholderCompaction).transcript,
-    "[Prior conversation summary]\nDurable placeholder summary.",
+    buildReviewEvidenceWindow(taggedPrompt).transcript,
+    "USER: Review literal </skill> and <skill/> tags.",
   );
 
-  for (const text of [
-    "before <skill name=\"open\">never closed",
-    "orphan </skill> after",
-    "self-closing <skill/> tag",
-    "malformed closing </skill/> tag",
-  ]) {
-    const entries = [{
-      type: "message",
-      id: "user-1",
-      parentId: null,
-      timestamp: "2026-01-01T00:00:00.000Z",
-      message: { role: "user", content: text, timestamp: 0 },
-    }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
-    assert.throws(() => buildReviewEvidenceWindow(entries), /unmatched skill scaffolding/u);
-  }
+  const persistedEntryText = [
+    "The Micro Manager 1 notes",
+    " concern",
+    " The tightened regex regresses fail-closed handling for `<skill/>` (and `</skill/>`): these were matched by the old `\\b[^>]*` pattern and rejected as unmatched, but now neither the tag scan nor residual check sees",
+    " them, so they pass through into review evidence. Explicitly recognize/reject self-closing or otherwise malformed `skill` tags, and add a regression test.",
+  ].join("\n");
+  const ordinaryText = [{
+    type: "message",
+    id: "496c07de",
+    parentId: null,
+    timestamp: "2026-08-09T04:05:28.761Z",
+    message: { role: "user", content: persistedEntryText, timestamp: 0 },
+  }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+  assert.equal(buildReviewEvidenceWindow(ordinaryText).transcript, `USER: ${persistedEntryText}`);
+
+  const truncatedEnvelope = [{
+    type: "message",
+    id: "user-1",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    message: {
+      role: "user",
+      content: '<skill name="private" location="/private/SKILL.md">\nPRIVATE SKILL BODY WITHOUT OUTER CLOSE',
+      timestamp: 0,
+    },
+  }, {
+    type: "message",
+    id: "user-2",
+    parentId: "user-1",
+    timestamp: "2026-01-01T00:00:01.000Z",
+    message: { role: "user", content: "Safe follow-up.", timestamp: 1 },
+  }] as unknown as Parameters<typeof buildReviewEvidenceWindow>[0];
+  const window = buildReviewEvidenceWindow(truncatedEnvelope);
+  assert.equal(window.transcript, "USER: Safe follow-up.");
+  assert.deepEqual(window.includedEntryIds, ["user-1", "user-2"]);
+  assert.equal(window.throughEntryId, "user-2");
 });
 
 test("review window processes oldest turns first and advances only through included evidence", () => {

@@ -3,7 +3,10 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 
 import { memoryCharCount } from "./context.ts";
 import { memoryPolicy } from "./memory-policy.ts";
-import { PROJECT_SKILL_USE_ENTRY } from "./skill-native.ts";
+import {
+  PROJECT_SKILL_USE_ENTRY,
+  stripNativeSkillInvocationEnvelope,
+} from "./skill-native.ts";
 import { safeContextText, validateMemoryText } from "./security.ts";
 import { isRecord } from "./state-validation.ts";
 import {
@@ -19,22 +22,7 @@ const MAX_TRANSCRIPT_CHARS = 32_000;
 const MAX_TRANSCRIPT_USER_TURNS = 12;
 
 function stripSkillScaffolding(text: string): string {
-  const tags = text.match(/<\/?skill(?:\s[^>]*)?>/giu) ?? [];
-  let open = false;
-  for (const tag of tags) {
-    const closing = /^<\//u.test(tag);
-    if (closing === open) {
-      open = !closing;
-      continue;
-    }
-    throw new Error("Review evidence contains unmatched skill scaffolding.");
-  }
-  if (open) throw new Error("Review evidence contains unmatched skill scaffolding.");
-  const stripped = text.replace(/<skill(?:\s[^>]*)?>[\s\S]*?<\/skill\s*>\s*/giu, "");
-  if (/<\/?skill(?=[\s/>])/iu.test(stripped)) {
-    throw new Error("Review evidence contains unmatched skill scaffolding.");
-  }
-  return stripped.trim();
+  return stripNativeSkillInvocationEnvelope(text)?.trim() ?? "";
 }
 
 function textContent(content: unknown): string {
