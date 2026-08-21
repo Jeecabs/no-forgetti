@@ -464,7 +464,7 @@ export function activateProjectMemoryExtension(
   function refreshWidget(ctx: ExtensionContext): void {
     const external = externalReviewWidgetText();
     const memorySpinning = embeddedReviewRunning || external?.spinning === true;
-    const key = embeddedReviewRunning || external || skillReviewRunning || pendingSkillCount > 0
+    const key = embeddedReviewRunning || external || skillReviewRunning
       ? JSON.stringify({
         embeddedReviewRunning,
         externalPhase: projectReviewActivity?.jobs.at(0)?.phase,
@@ -518,7 +518,7 @@ export function activateProjectMemoryExtension(
           if (timer) clearInterval(timer);
         },
       };
-    });
+    }, { placement: "belowEditor" });
   }
 
   function reviewStatusSegment(t: ExtensionContext["ui"]["theme"]): string | undefined {

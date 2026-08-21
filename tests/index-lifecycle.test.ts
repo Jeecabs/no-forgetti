@@ -76,6 +76,7 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
   const branch: Array<Record<string, unknown>> = [];
   const notifications: Array<{ message: string; type: string }> = [];
   const widgets = new Map<string, unknown>();
+  const widgetPlacements = new Map<string, string | undefined>();
   const statuses = new Map<string, string | undefined>();
   const context = {
     cwd: project,
@@ -85,7 +86,10 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
       theme: { fg: (_color: string, text: string) => text },
       notify: (message: string, type: string) => notifications.push({ message, type }),
       setStatus: (key: string, value: string | undefined) => statuses.set(key, value),
-      setWidget: (key: string, value: unknown) => widgets.set(key, value),
+      setWidget: (key: string, value: unknown, options?: { placement?: string }) => {
+        widgets.set(key, value);
+        widgetPlacements.set(key, options?.placement);
+      },
     },
     waitForIdle: async () => undefined,
     sessionManager: {
@@ -124,7 +128,7 @@ async function fixture(t: test.TestContext, overrides: Partial<ExtensionDependen
     await extension.emit("session_shutdown", {}, context);
     await rm(base, { recursive: true, force: true });
   });
-  return { branch, context, extension, memoryStore, skillStore, reviewSpool, notifications, statuses, widgets };
+  return { branch, context, extension, memoryStore, skillStore, reviewSpool, notifications, statuses, widgets, widgetPlacements };
 }
 
 function userEntry(id: string, text: string): Record<string, unknown> {
@@ -827,6 +831,22 @@ test("external review authority durably queues bounded evidence without an in-pr
   assert.match(expanded!.render(120).join("\n"), new RegExp(claim.job.id, "u"));
 });
 
+test("pending skills stay in the compact status without an idle widget", async (t) => {
+  const { context, extension, skillStore, statuses, widgets } = await fixture(t);
+  await skillStore.stageProposal([{
+    action: "patch",
+    name: "verification",
+    oldText: "canonical check",
+    newText: "standard check",
+  }], "pending-widget-test");
+  Object.assign(context, { hasUI: true, mode: "tui" });
+
+  await extension.emit("session_start", {}, context);
+
+  assert.equal(widgets.get("no-forgetti"), undefined);
+  assert.match(statuses.get("no-forgetti") ?? "", /pending:1/u);
+});
+
 test("external review widget follows the current project job from queue to worker", async (t) => {
   const externalConfig = {
     version: 1 as const,
@@ -841,7 +861,7 @@ test("external review widget follows the current project job from queue to worke
       maxCostPerDayUsd: 1,
     },
   };
-  const { branch, context, extension, reviewSpool, statuses, widgets } = await fixture(t, {
+  const { branch, context, extension, reviewSpool, statuses, widgets, widgetPlacements } = await fixture(t, {
     loadServiceConfig: async () => externalConfig,
     loadServiceMonitor: async () => ({
       mode: "external",
@@ -871,6 +891,7 @@ test("external review widget follows the current project job from queue to worke
   assert.match(renderWidget(), /memory review queued/u);
   assert.doesNotMatch(renderWidget(), /review_[0-9a-f]+/u);
   assert.match(statuses.get("no-forgetti") ?? "", /review:queued/u);
+  assert.equal(widgetPlacements.get("no-forgetti"), "belowEditor");
 
   assert.ok(await reviewSpool.claim({ workerId: "widget-worker", leaseMs: 60_000 }));
   await extension.emit("before_agent_start", { systemPrompt: "base", prompt: "continue" }, context);
