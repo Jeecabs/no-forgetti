@@ -201,6 +201,61 @@ test("registers lifecycle hooks and disables itself for companion agents", async
   assert.equal(companion.commands.size, 0);
 });
 
+test("disabled mode registers the extension without starting memory or review work", async (t) => {
+  let memoryStoreStarts = 0;
+  let spoolStarts = 0;
+  let reviewCalls = 0;
+  const commandOutput: string[] = [];
+  const { branch, context, extension } = await fixture(t, {
+    loadServiceConfig: async () => ({ version: 1, mode: "disabled", evidenceTtlHours: 24 }),
+    createMemoryStore: () => {
+      memoryStoreStarts += 1;
+      throw new Error("disabled mode must not initialize memory");
+    },
+    createReviewSpool: () => {
+      spoolStarts += 1;
+      throw new Error("disabled mode must not initialize review spool");
+    },
+    requestReviewPlan: async () => {
+      reviewCalls += 1;
+      return { operations: [] };
+    },
+    writeCommandOutput: (text) => commandOutput.push(text),
+  });
+
+  await extension.emit("session_start", {}, context);
+  assert.deepEqual([...extension.tools.keys()], ["project_memory"]);
+  assert.deepEqual([...extension.commands.keys()].sort(), ["memory", "project-skills"]);
+  assert.equal(memoryStoreStarts, 0);
+  assert.equal(spoolStarts, 0);
+
+  const [promptResult] = await extension.emit("before_agent_start", { systemPrompt: "base" }, context);
+  assert.equal(promptResult, undefined);
+  branch.push(userEntry("disabled-user", "Remember this forever."));
+  await extension.emit("agent_end", { messages: [assistantMessage] }, context);
+  await extension.emit("agent_settled", {}, context);
+  assert.equal(reviewCalls, 0);
+  assert.equal(extension.entries.length, 0);
+
+  await extension.command("memory", "status", context);
+  await extension.command("project-skills", "list", context);
+  assert.match(commandOutput.at(0) ?? "", /registered but disabled/u);
+  assert.match(commandOutput.at(1) ?? "", /project skills are disabled/u);
+
+  const tool = extension.tools.get("project_memory") as {
+    execute: (
+      id: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      onUpdate: undefined,
+      context: ExtensionContext,
+    ) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
+  };
+  const result = await tool.execute("disabled-tool", { action: "list" }, undefined, undefined, context);
+  assert.equal(result.isError, true);
+  assert.match(result.content.at(0)?.text ?? "", /disabled by no-forgetti\/service\.json/u);
+});
+
 test("model tool records assessed importance on new memory", async (t) => {
   const { context, extension, memoryStore } = await fixture(t);
   await extension.emit("session_start", {}, context);

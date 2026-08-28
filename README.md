@@ -52,6 +52,7 @@ See [Getting started](docs/getting-started.md) for requirements, install scopes,
 
 | Mode | Behavior |
 | --- | --- |
+| `disabled` | Registers No Forgetti, but loads no memory or skills and starts no reviews. Stored state remains untouched. |
 | `embedded` | Default. Pi reviews memory in process; no service setup required. |
 | `shadow` | Pi remains authoritative and also writes sanitized deterministic jobs for inspection. |
 | `external` | Pi durably queues accepted jobs; a user-scoped worker owns review and CAS admission. |

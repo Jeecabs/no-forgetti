@@ -522,6 +522,7 @@ export function activateProjectMemoryExtension(
   }
 
   function reviewStatusSegment(t: ExtensionContext["ui"]["theme"]): string | undefined {
+    if (serviceConfig.mode === "disabled") return undefined;
     if (serviceConfig.mode === "embedded") {
       return embeddedReviewRunning ? t.fg("accent", "review:reviewing") : undefined;
     }
@@ -561,7 +562,7 @@ export function activateProjectMemoryExtension(
   }
 
   async function refreshServiceMonitor(ctx: ExtensionContext, notify = false): Promise<void> {
-    if (serviceConfig.mode === "embedded") {
+    if (serviceConfig.mode === "disabled" || serviceConfig.mode === "embedded") {
       serviceMonitor = undefined;
       refreshStatus(ctx);
       return;
@@ -669,7 +670,7 @@ export function activateProjectMemoryExtension(
     if (serviceMonitorTimer) clearTimeout(serviceMonitorTimer);
     serviceMonitorTimer = undefined;
     const epoch = ++serviceMonitorPollEpoch;
-    if (serviceConfig.mode === "embedded") return;
+    if (serviceConfig.mode === "disabled" || serviceConfig.mode === "embedded") return;
     const schedule = () => {
       if (epoch !== serviceMonitorPollEpoch) return;
       const delay = projectReviewActivity?.jobs.length
@@ -735,6 +736,13 @@ export function activateProjectMemoryExtension(
       serviceConfig = await dependencies.loadServiceConfig();
     } catch (error) {
       if (ctx.hasUI) ctx.ui.notify(`No Forgetti service config rejected: ${errorMessage(error)}`, "warning");
+    }
+    if (serviceConfig.mode === "disabled") {
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(STATUS_KEY, undefined);
+        ctx.ui.setWidget(STATUS_KEY, undefined);
+      }
+      return;
     }
     if (serviceConfig.mode !== "embedded") {
       try {
@@ -1425,6 +1433,21 @@ export function activateProjectMemoryExtension(
       } as Prepared;
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (serviceConfig.mode === "disabled") {
+        return {
+          content: [{ type: "text", text: "No Forgetti is disabled by no-forgetti/service.json." }],
+          details: {
+            action: params.action,
+            branch: activeName,
+            changed: false,
+            entries: 0,
+            usedChars: 0,
+            maxChars: 0,
+            message: "No Forgetti is disabled by no-forgetti/service.json.",
+          } satisfies MemoryToolDetails,
+          isError: true,
+        };
+      }
       const memoryStore = requireStore();
       if (params.action === "list") {
         const branch = await memoryStore.loadBranch(activeName);
@@ -1525,6 +1548,10 @@ export function activateProjectMemoryExtension(
       return filtered.length ? filtered : null;
     },
     handler: async (args, ctx) => {
+      if (serviceConfig.mode === "disabled") {
+        presentCommandOutput(ctx, "No Forgetti project skills are disabled by no-forgetti/service.json.", "warning");
+        return;
+      }
       const projectSkills = requireSkillStore();
       const [subcommand = "list", ...rest] = args.trim().split(/\s+/u).filter(Boolean);
       const value = rest.join(" ");
@@ -1678,9 +1705,19 @@ export function activateProjectMemoryExtension(
       return filtered.length ? filtered : null;
     },
     handler: async (args, ctx) => {
-      const memoryStore = requireStore();
       const [subcommand = "status", ...rest] = args.trim().split(/\s+/u).filter(Boolean);
       const value = rest.join(" ").trim();
+      if (serviceConfig.mode === "disabled") {
+        presentCommandOutput(
+          ctx,
+          subcommand === "status"
+            ? "No Forgetti is registered but disabled by no-forgetti/service.json. Stored memory and queued reviews are untouched."
+            : "No Forgetti is disabled by no-forgetti/service.json.",
+          subcommand === "status" ? "info" : "warning",
+        );
+        return;
+      }
+      const memoryStore = requireStore();
 
       if (subcommand === "status") {
         const live = await memoryStore.loadBranch(activeName);

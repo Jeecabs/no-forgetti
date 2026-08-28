@@ -9,7 +9,7 @@ import { isRecord } from "../state-validation.ts";
 export const SERVICE_CONFIG_VERSION = 1;
 export const MAX_SERVICE_CONFIG_BYTES = 64 * 1024;
 
-export type ReviewAuthorityMode = "embedded" | "shadow" | "external";
+export type ReviewAuthorityMode = "disabled" | "embedded" | "shadow" | "external";
 
 export interface ReviewerProfile {
   provider: string;
@@ -82,7 +82,7 @@ export function parseServiceConfig(value: unknown): ServiceConfig {
     throw new Error("Unsupported or invalid No Forgetti service config.");
   }
   exactKeys(value, ["version", "mode", "evidenceTtlHours", "reviewer"], "No Forgetti service config");
-  if (value.mode !== "embedded" && value.mode !== "shadow" && value.mode !== "external") {
+  if (value.mode !== "disabled" && value.mode !== "embedded" && value.mode !== "shadow" && value.mode !== "external") {
     throw new Error("Invalid No Forgetti review authority mode.");
   }
   const reviewer = parseReviewer(value.reviewer);

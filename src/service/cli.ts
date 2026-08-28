@@ -160,12 +160,48 @@ function reviewerBudget(profile: ReviewerProfile) {
   };
 }
 
+function createDisabledRuntime(): ReviewCliRuntime {
+  let stopped = false;
+  let finishRun: (() => void) | undefined;
+  return {
+    daemon: {
+      async drain(signal) {
+        return {
+          completed: 0,
+          failed: 0,
+          retried: 0,
+          budgetExhausted: false,
+          interrupted: Boolean(signal?.aborted),
+        };
+      },
+      async run(signal) {
+        if (stopped || signal?.aborted) return;
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            signal?.removeEventListener("abort", finish);
+            finishRun = undefined;
+            resolve();
+          };
+          finishRun = finish;
+          signal?.addEventListener("abort", finish, { once: true });
+        });
+      },
+      stop() {
+        stopped = true;
+        finishRun?.();
+      },
+    },
+    dispose() {},
+  };
+}
+
 async function createDefaultRuntime(
   args: ReviewCliArgs,
   onEvent: (event: ReviewDaemonEvent) => void,
 ): Promise<ReviewCliRuntime> {
   const agentDir = resolve(args.agentDir ?? getAgentDir());
   const config = await loadServiceConfig(agentDir);
+  if (config.mode === "disabled") return createDisabledRuntime();
   if (!config.reviewer) {
     throw new Error("Review service requires reviewer configuration in no-forgetti/service.json.");
   }

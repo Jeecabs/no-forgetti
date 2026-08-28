@@ -104,7 +104,7 @@ Replace the example provider and model with the exact values you confirmed in `/
 | Field | Meaning |
 | --- | --- |
 | `version` | Must be `1` |
-| `mode` | `embedded`, `shadow`, or `external` |
+| `mode` | `disabled`, `embedded`, `shadow`, or `external` |
 | `evidenceTtlHours` | Retention window for terminal spool, decision, and closed-day accounting records |
 | `reviewer.provider` | Exact Pi provider ID |
 | `reviewer.model` | Exact registered model ID for that provider |
@@ -114,6 +114,8 @@ Replace the example provider and model with the exact values you confirmed in `/
 | `maxCostPerDayUsd` | Positive numeric cost limit in US dollars |
 
 The schema rejects unknown fields. Credentials do not belong in this file.
+
+Use `mode: "disabled"` to pause No Forgetti without uninstalling it. The extension and commands remain registered, but memory, project skills, automatic reviews, and review-job enqueueing do not start. Existing state and queued jobs remain untouched. A review worker started with this mode stays idle and makes no model calls. Restart Pi and the worker after changing the mode.
 
 Daily calls are reserved atomically before dispatch. Token and cost thresholds use actual provider usage, so one in-flight call can cross a threshold; subsequent calls stop until the next UTC day.
 
