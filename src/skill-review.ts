@@ -1,4 +1,4 @@
-import { complete, type Message } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { ModelRunError, type ModelRunner, type ReviewModelProvenance } from "./service/model-runner.ts";
@@ -16,7 +16,7 @@ export interface SkillReviewResult {
 
 function provenance(request: {
   model: NonNullable<ExtensionContext["model"]>;
-  response: Awaited<ReturnType<typeof complete>>;
+  response: AssistantMessage;
   started: Date;
   completed: Date;
 }): ReviewModelProvenance {
@@ -72,8 +72,10 @@ export async function requestSkillReviewPlan(
   const runner: ModelRunner = {
     async run(request, hooks = {}) {
       if (!model) throw new ModelRunError("model_not_found", "No active model is available for project skill review.", { retryable: true });
+      // Checked up front so missing credentials surface as a retryable auth
+      // failure rather than a generic provider error.
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok || !auth.apiKey) {
+      if (!auth.ok) {
         throw new ModelRunError("auth_unavailable", "No model authentication is available for project skill review.", { retryable: true });
       }
       const started = new Date();
@@ -82,15 +84,12 @@ export async function requestSkillReviewPlan(
         content: [{ type: "text", text: request.prompt }],
         timestamp: started.getTime(),
       };
-      let response: Awaited<ReturnType<typeof complete>>;
+      let response: AssistantMessage;
       try {
-        response = await complete(
+        response = await ctx.modelRegistry.complete(
           model,
           { systemPrompt: request.systemPrompt, messages: [message] },
           {
-            apiKey: auth.apiKey,
-            headers: auth.headers,
-            env: auth.env,
             reasoningEffort: SKILL_REVIEW_REASONING_EFFORT,
             maxTokens: SKILL_REVIEW_MAX_OUTPUT_TOKENS,
             signal: request.signal,

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Run memory and project skill reviews through `ctx.modelRegistry.complete()` instead of the pi-ai compat entry, so providers registered by extensions and keyless providers work for reviews.
+- Require pi 1.5.0 or newer.
+
 ## 0.5.5 - 2026-08-11
 
 - Parse review evidence skill envelopes with the canonical Pi parser. Preserve literal skill-tag examples and `<skill-dir>` placeholders outside native envelopes.
