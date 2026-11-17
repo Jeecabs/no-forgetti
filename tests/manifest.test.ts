@@ -29,7 +29,7 @@ test("package manifest preserves No Forgetti identity and exposes extension plus
   assert.deepEqual(manifest.bin, { "no-forgetti": "./bin/no-forgetti.mjs" });
   assert.ok(manifest.keywords?.includes("pi-package"));
   assert.deepEqual(manifest.pi?.extensions, ["./src/index.ts"]);
-  assert.equal(manifest.dependencies?.["@earendil-works/pi-coding-agent"], "^0.84.1");
+  assert.equal(manifest.dependencies?.["@earendil-works/pi-coding-agent"], "^1.5.2");
   assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).sort(), [
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",

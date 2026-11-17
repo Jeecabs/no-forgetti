@@ -61,7 +61,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.1"
+    "@earendil-works/pi-coding-agent": "^1.5.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -71,9 +71,9 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.84.1",
-    "@earendil-works/pi-ai": "^0.84.1",
-    "@earendil-works/pi-tui": "^0.84.1",
+    "@earendil-works/pi-agent-core": "^1.5.2",
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-tui": "^1.5.2",
     "@types/node": "^24.3.0",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "typebox": "1.1.38",
